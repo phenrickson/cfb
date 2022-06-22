@@ -1,5 +1,5 @@
 ---
-title: "model_sequences"
+title: "CFB Expected Points Added"
 author: "Phil Henrickson"
 date: "6/7/2022"
 output: 
@@ -266,40 +266,47 @@ plays_data_score_events = plays_data_raw %>%
                                                  
 ```
 
-# What is this? {-}
+# Learning Expected Points
 
-# Exploring The Data
+In this notebook I develop and explore an expected points model at the play level for evaluating college football offenses and defenses. The goal of this analysis is to place a value on offensive/defensive plays in terms of their contribution's to a team's expected points. 
 
-The data used is from college football games from 2000 to present. Each observation represents one play in a game, in which we know the team, the situation (down, time remaining), and the location on the field (yards to go, yards to reach end zone). We have information about the types of plays called as well in a text field.
+The data used is from college football games from 2003 to present. Each observation represents one play in a game, in which we know the team, the situation (down, time remaining), and the location on the field (yards to go, yards to reach end zone). We have information about the types of plays called as well in a text field.
 
-```{r show skimr}
+## Sequences of Play
 
-plays_data_score_events %>%
-        filter(SEASON < 2015) %>%
-        mutate_at(vars(contains("_ID")),
-                  ~ as.character(.)) %>%
-        sample_n(1000) %>%
-        skimr::skim_without_charts(.)
-
-```
-
-The goal of this analysis is to determine the value of individual plays in terms of expected points. 
-
-A sequence in this case is defined as all plays within a half between kickoffs (either the beginning or scoring events). Every sequence can end in one of 7 different outcomes, which we will define from the perspective of the team on offense. If a team has the ball, for any play, there are seven possible outcomes that play will eventually reach:
+For each play in a game, I model the probability of the next scoring event that will occur within the same half. This means the analysis is not at the *drive* level, but at what I dub the *sequence* level. Suppose a team has the ball on offense to start the first half.  The next scoring event can take on one of seven outcomes:
 
 * Touchdown (7 points)
 * Field goal (3 points)
 * Safety (2 points)
-* No_Score (0 points)
-* Opp_Safety (2 points)
+* No Score (0 points)
+* Opp safety (2 points)
 * Opp field goal (-3 points)
 * Opp touchdown (-7 points)
 
-For instance, on drive 1, Team A receives the opening kickoff, drives for a few plays, and then punts. Team B takes over, which starts drive 2, and they drive for a few plays before also punting. Team A then manages to put together a drive that finally scores. All plays on these three drives are one sequence. The outcome of this sequence is the points scored by Team A - if they score a toucbhdown, their points from this sequence is 7 (assuming they make the extra point). Team B's points from this sequence is -7 points.
+If the team on offense drives down and scores a TD/FG, this will end the sequence. If the team on offense does not score but punts or turns the ball over, the sequence will continue with the other team now on offense. The sequence will continue until either one team scores, or the half comes to an end. From this, a sequence begins at kickoff and ends at the next kick off. 
+
+Suppose we have two teams, A and B, playing in a game. Team A receives the opening kickoff, drives for a few plays, and then punts. Team B takes over, which starts drive 2, and they drive for a few plays before also punting. Team A then manages to put together a drive that finally scores. 
+
+All plays on these three drives are one **sequence**. The outcome of this sequence is the points scored by Team A - if they score a touchdown, their points from this sequence is 7 (assuming for now they make the extra point). Team B's points from this sequence is -7 points.
 
 When Team A kicks off to Team B to start drive 4, we start our next sequence, which will end either with one team scoring or at the end of the half. We'll then start over with a new sequence in the second half.
 
-The outcome for this analysis is the NEXT_SCORE_EVENT. Each play in a given sequence contributes to the eventual outcome of the sequence. Here we can see an example of one game and its drives.
+Why model the outcome of sequences rather than individual drives? Individual plays have the potential to affect both team's chances of scoring, positively or negatively, and we want our model to directly capture this. If an offense turns the ball over at midfield, they are not only hurting their own chances of scoring, they are increasing the other team's chance of scoring. The value of a play in terms of expected points is function of how both team's probabilities are affected by the outcome.
+
+## Defining Expected Points
+
+A team's expected points is sum of the probability of each possible scoring event multiplied by the points of that event. For this analysis, I assume that touchdowns equate to 7 rather than 6 points, assuming that extra points will be made. I can later bake in the actual probability of making extra points, but this will be a simplification for now.
+
+For a given play $i$ for  Team $A$, we can compute Team A's expected points using the following:
+
+$$ {Expected Points}_A = \\Pr(TD)*7 + \\ Pr(FG)*3 + \\Pr(Safety)*2 + \\ Pr(No Score)*0 + \\ Pr(Opp. Safety)*-2 + \\ Pr(Opp. FG) * -3 +\\ Pr(Opp. TD) * -7  $$
+
+How do we get the probabilities of each scoring event? We learn these from historical data by using a model - I train a multinomial logistic regression model on many seasons worth of college football plays to learn how situations on the field affect the probability of the next scoring event. 
+
+## Next Scoring Event
+
+The outcome for our analysis is the **NEXT_SCORE_EVENT**. Each play in a given sequence contributes to the eventual outcome of the sequence. Here we can see an example of one game and its drives:
 
 ```{r show a full game of sequences}
 
@@ -314,6 +321,8 @@ drives_data_score_events %>%
         filter(HOME_TEAM == 'Texas A&M' & AWAY_TEAM == 'Florida') %>%
         filter(SEASON == 2012) %>%
         select(SEASON, HOME, AWAY, HALF, DRIVE_NUMBER, END_HOME_SCORE, END_AWAY_SCORE, NEXT_SCORE_EVENT) %>%
+        rename(HOME_SCORE = END_HOME_SCORE,
+               AWAY_SCORE = END_AWAY_SCORE) %>%
         mutate(SEASON = as.character(SEASON)) %>%
         flextable() %>%
         autofit()
@@ -328,14 +337,15 @@ plays_data_score_events %>%
         filter(HOME_TEAM == 'Texas A&M' & AWAY_TEAM == 'Florida') %>%
         filter(SEASON == 2012) %>%
         filter(DRIVE_NUMBER == 1) %>%
-        select(SEASON, OFFENSE, DEFENSE, DRIVE_NUMBER,  PLAY_NUMBER, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, NEXT_SCORE_EVENT_OFFENSE) %>%
-        mutate(SEASON = as.character(SEASON)) %>%
+        select(OFFENSE, DEFENSE, DRIVE_NUMBER, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, NEXT_SCORE_EVENT_OFFENSE) %>%
+        rename(DRIVE = DRIVE_NUMBER,
+               NEXT_SCORE_EVENT = NEXT_SCORE_EVENT_OFFENSE) %>%
         flextable() %>%
         autofit()
         
 ```
 
-If we look at another sequence in the second half, there were multiple drives before a team was able to score.
+If we look at another sequence in the second half, there were multiple drives before a team was able to score in that sequence. The next scoring event is always defined from the perspective of the offense.
 
 ```{r zoom in on another sequence}
 
@@ -343,29 +353,37 @@ plays_data_score_events %>%
         filter(HOME_TEAM == 'Texas A&M' & AWAY_TEAM == 'Florida') %>%
         filter(SEASON == 2012) %>%
         filter(DRIVE_NUMBER>=9 & DRIVE_NUMBER <=14) %>%
-        select(SEASON, OFFENSE, DEFENSE, HALF, DRIVE_NUMBER,  PLAY_NUMBER, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, NEXT_SCORE_EVENT_OFFENSE) %>%
-        mutate(SEASON = as.character(SEASON)) %>%
+        select(OFFENSE, DEFENSE, DRIVE_NUMBER, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, NEXT_SCORE_EVENT_OFFENSE) %>%
+        rename(DRIVE = DRIVE_NUMBER,
+               NEXT_SCORE_EVENT = NEXT_SCORE_EVENT_OFFENSE) %>%
         flextable() %>%
         autofit()
+        
 ```
+
+# Modeling Expected Points
 
 Our goal is to understand how individual plays contribute to a team's **expected points**, or the average points teams should expect to have given their situation (down, time, possession). 
 
-For instance, in the first drive of this game, Texas A&M received the ball at their own 25 yard line - the simplest intuition of expected points is to ask, for teams starting at the 25 yard line at the beginning of a game, how many points do they typically go on to score? The answer is to look at all starting drives with 75 yards to go and see what happened - we take the average of all of the points that followed from this situation.
+For instance, in the first drive of the Texas A&M-Florida game in 2012,  Texas A&M received the ball at their own 25 yard line to open the game. The simplest intuition of expected points is to ask, for teams starting at the 25 yard line at the beginning of a game, how many points do they typically go on to score? The answer is to look at all starting drives with 75 yards to go and see what the eventual next scoring event was for each of these plays - we take the average of all of the points that followed from this situation.
 
 ```{r expected points given situation}
 
 plays_data_score_events %>%
-        filter(SEASON >=2010) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         filter(!grepl("kick", tolower(PLAY_TEXT))) %>%
         filter(YARDS_TO_GOAL == 75 & DRIVE_NUMBER ==1) %>%
         group_by(NEXT_SCORE_EVENT_OFFENSE) %>%
-        count(sort=T)
+        count(sort=T) %>% 
+        ungroup() %>%
+        mutate(prop = n / sum(n)) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit() 
 
 plays_data_score_events %>%
-        filter(SEASON >=2010) %>%
+       # filter(SEASON >=2010) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         filter(YARDS_TO_GOAL == 75 & DRIVE_NUMBER ==1) %>%
@@ -373,7 +391,9 @@ plays_data_score_events %>%
         summarize(expected_points = mean(NEXT_SCORE_EVENT_OFFENSE_DIFF),
                   n = n(),
                   .groups = 'drop') %>%
-        mutate_if(is.numeric, round, 2)
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit()
 
 ```
 
@@ -384,34 +404,38 @@ But, this is also a function of the down. If we look at the expected points for 
 ```{r how does this vary as a function of }
 
 plays_data_score_events %>%
-        filter(SEASON >= 2010) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(YARDS_TO_GOAL == 75  & DRIVE_NUMBER ==1) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         group_by(YARDS_TO_GOAL, DOWN, NEXT_SCORE_EVENT_OFFENSE) %>%
         count() %>%
+        mutate(DOWN = paste("DOWN", DOWN, sep="_")) %>%
         spread(DOWN, n) %>%
         arrange(NEXT_SCORE_EVENT_OFFENSE) %>%
-        arrange(desc(`4`))
+        arrange(desc(`DOWN_4`)) %>%
+        flextable() %>%
+        autofit()
 
 plays_data_score_events %>%
-        filter(SEASON >= 2010) %>%
         filter(YARDS_TO_GOAL == 75  & DRIVE_NUMBER ==1) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         group_by(YARDS_TO_GOAL, DOWN) %>%
         summarize(expected_points = mean(NEXT_SCORE_EVENT_OFFENSE_DIFF, na.rm=T),
                   n = n(),
                   .groups = 'drop') %>%
-        mutate_if(is.numeric, round, 2)
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit()
 
 ```
 
-We can apply this type of thinking to the entire field. If we look at all total plays in a game, how do expected points vary as a function of a team's distance from their opponent's goal line?
+The fact that the expected point changes based on the down and yard line allows us to look at the difference between expected points from play to play - the difference in expected points based on how the situation changed allows us to compute the Expected Points *Added* from a single play.
+
+For any given play, we get a sense of the expected points a team can expect from their situation. For instance, if we look at all total plays in a game, how do expected points vary as a function of a team's distance from their opponent's goal line?
 
 ```{r expected points as a function of yard line for opening}
 
 plays_data_score_events %>%
-        filter(SEASON >= 2010) %>%
         filter(!grepl("kick", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
@@ -427,12 +451,18 @@ plays_data_score_events %>%
         geom_point(aes(size=n))+
         theme_phil()+
         geom_hline(yintercept = 0,
-                   linetype = 'dotted')+
+                   linetype = 'dashed')+
         scale_x_reverse()
 
 ```
 
+This should make sense - if you're backed up against your own end zone, your opponent has higher expected points because they are, historically, more likely to have the next scoring event, either by gaining good field advantage after you punt or by getting a safety. We can see this if we just look at the proportion of next scoring events based on the offense's position on the field.
+
 ```{r look at outcomes by yards to goal}
+
+# make my own color ramp
+my_col = colorRampPalette(c("blue", "white", "red"))
+score_palette = c(my_col(6)[1:3], "grey80", my_col(6)[4:6])
 
 plays_data_score_events %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
@@ -447,15 +477,16 @@ plays_data_score_events %>%
                       fill = NEXT_SCORE_EVENT_OFFENSE,
                       y=n))+
         geom_col(position = 'fill')+
-        scale_fill_viridis_d(option = 'B')+
+        scale_fill_manual(values = score_palette)+
+       # scale_fill_viridis_d(option = 'B')+
         theme_phil()+
         scale_x_reverse()
 
 ```
 
-This should make sense - if you're backed up against your own end zone, your opponent becomes more likely to have the next scoring event, either by gaining good field advantage after you punt or by getting a safety.
+From this, when we see an offense move the ball up the field on a given play, we will generally see their expected points go up. The difference in expected points before the snap and after the snap is the value added (positively or negatively) by the play.
 
-But, it's not just position on the field - it's also about the situation. If we look at how expected points varies by the down, we should see that fourth downs always have lower expected points.
+But, it's not just position on the field - it's also about the situation. If we look at how expected points varies by the down, we should see that fourth downs have lower expected points.
 
 ```{r look at expected points by down and field position}
 
@@ -489,58 +520,36 @@ plays_data_score_events %>%
 
 ```
 
-We also have other features like distance.
+We also have other features like distance to convert the first down (filtering here to plays with a maximum of 30 yards to go, as we start to run out of data at higher values and it looks wonky).
 
-```{r now look at by downs}
+```{r distance remaining}
 
 plays_data_score_events %>%
+        filter(FLAG_SECONDS_IN_HALF != 1) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         filter(YARD_LINE < 100 & YARD_LINE > 0) %>%
-        filter(!(DISTANCE <0 | DISTANCE >=99)) %>%
-        # group_by(DOWN, DISTANCE) %>%
-        # count() %>%
-        mutate(DOWN = factor(DOWN)) %>%
+        mutate(SECONDS_IN_HALF = plyr::round_any(SECONDS_IN_HALF, 5, ceiling)) %>%
+        filter(DISTANCE > 0 & DISTANCE<=30) %>%
+        group_by(DOWN, DISTANCE, NEXT_SCORE_EVENT_OFFENSE) %>%
+        mutate(DOWN = paste("DOWN", DOWN, sep="_")) %>%
+        count() %>%
         ggplot(., aes(x=DISTANCE,
-                      fill = DOWN))+
-        geom_histogram(bins = 50)+
-        facet_wrap(DOWN ~.,
-                   ncol = 2,
-                   scales = "free_y")+
-        scale_fill_viridis_d()+
+                      fill = NEXT_SCORE_EVENT_OFFENSE,
+                      y=n))+
+        #geom_col()+
+        facet_wrap(DOWN ~., ncol = 2) +
+        geom_bar(position = 'fill',
+                 stat='identity',
+                 color = NA)+
+        scale_fill_manual(values = score_palette)+
+       # scale_fill_viridis_d(option = 'B')+
         theme_phil()
-        
-
-plays_data_score_events %>%
-        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
-        filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
-        filter(DOWN %in% c(1,2,3,4)) %>%
-        filter(YARD_LINE < 100 & YARD_LINE > 0) %>%
-        filter(!(DISTANCE <0 | DISTANCE >=99)) %>%
-        group_by(DISTANCE, DOWN) %>%
-        summarize(expected_points = mean(NEXT_SCORE_EVENT_OFFENSE_DIFF, na.rm=T),
-                  n = n(),
-                  .groups = 'drop') %>%
-        mutate(DOWN = factor(DOWN)) %>%
-        ggplot(., aes(x=log1p(DISTANCE),
-                      group = DOWN,
-                      color = DOWN,
-                      y=expected_points))+
-        geom_point(aes(size=n))+
-        geom_line(stat = 'smooth',
-                  formula = 'y ~ x',
-                  method = 'loess',
-                  span = 0.25)+
-        theme_phil()+
-        geom_hline(yintercept = 0,
-                   linetype = 'dotted')+
-        scale_color_viridis_d()
-
 
 ```
 
-As well as time remaining in the half.
+And we also have info on time remaining in the half - as we might expect, the proportion of drives leading to no scoring goes up as the amount of time remaining in the half goes down.
 
 ```{r look at outcomes as a function of time remaining}
 
@@ -559,17 +568,24 @@ plays_data_score_events %>%
         geom_bar(position = 'fill',
                  stat='identity',
                  color = NA)+
-        scale_fill_viridis_d(option = 'B')+
+        scale_fill_manual(values = score_palette)+
+       # scale_fill_viridis_d(option = 'B')+
         theme_phil()+
         scale_x_reverse()
 
 ```
 
-# Modeling
+We use all of this historical data to learn the expected points from a given situation, then look at the difference in expected points from play to play - this is the intuition behind how we will value individual plays, which we can then roll up to the offense/defense/game/season level.
 
-We'll now proceed to modeling. I'll set up training, validation, and test sets based around the season.
+## Building Models
 
-```{r set up split sequence}
+How do these various features like down, distance, yards to goal, and time remaining affect the probability of the next scoring event? We use a model to learn this relationship from historical plays. I'll now proceed to building the model which I'll use for the bulk of the analysis.
+
+I'll set up training, validation, and test sets based around the season. I'm mostly going to build the model using plays from the 2010 season onwards, as the data quality of the play by play data starts to get worse the further back we go, though I'll do some backtesting of the model on older seasons.
+
+I'm going to use the seasons of 2010-2018 as my main training set, building and evaluating the model using a leave-one-season out approach, akin to k-fold cross validation using seasons as the folds. I'll use the 2019-2020 seasons as a validation set, and leave 2021 as my test set which I won't look at till later on.
+
+```{r set up training valid test splits, echo =T}
 
 # full plays
 plays_full = plays_data_score_events %>%
@@ -617,7 +633,7 @@ plays_full = plays_data_score_events %>%
 
 # training set
 plays_train = plays_full %>%
-        filter(SEASON >= 2012 & SEASON <2019)
+        filter(SEASON >= 2010 & SEASON <2019)
 
 # validation set
 plays_valid = plays_full %>%
@@ -643,11 +659,38 @@ test_split = make_splits(
 
 ```
 
-I plan to use the following as features in a baseline model.
+The outcome is the next scoring event, always defined from the perspective of the offense for any given play.
 
+```{r outcome year over year}
+
+plays_train %>%
+        group_by(SEASON, NEXT_SCORE_EVENT_OFFENSE) %>%
+        count() %>%
+        ggplot(., aes(x=n,
+                      fill = NEXT_SCORE_EVENT_OFFENSE,
+                      y=reorder(NEXT_SCORE_EVENT_OFFENSE, n)))+
+        geom_col()+
+        theme_phil()+
+        facet_wrap(SEASON ~.,
+                   ncol = 3)+
+        scale_fill_manual(values = score_palette)+
+        ylab("Next Score Event")
+```
+
+I currently use the following as features for plays in a baseline model: 
+
+* Quarter
+* Seconds Remaining in Half 
+* Down 
+* Distance (logged)
+* Yards to opponent's end zone
+* Down and goal indicator for whether the offennse is in a 'first and goal' situation
+
+I also include interactions between down and distance, down and yards to end zone, and yards to end zone and seconds remaining. This baseline model doesn't account for things like offense/defense quality or scoring effects, I'll train other models later on with these features to get things like 'Defense Adjusted Expected Points'. But this analysis is focused first and foremost on estimating probabilities 
+ 
 I'll now set up a recipe for the baseline model.
 
-```{r create recipes}
+```{r create recipes, echo=T}
 
 baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
                          data = plays_train) %>%
@@ -702,9 +745,6 @@ baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
         step_filter(KICKOFF != 1) %>%
         step_mutate(DOWN_TO_GOAL = case_when(DISTANCE == YARDS_TO_GOAL ~ 1,
                                              TRUE ~ 0)) %>%
-        # step_mutate(RED_ZONE = case_when(YARDS_TO_GOAL <= 20 ~ 1,
-        #                                  TRUE ~ 0)) %>%
-      #  step_mutate(OFFENSE_LEAD = OFFENSE_SCORE - DEFENSE_SCORE) %>%
         step_mutate(DOWN = factor(DOWN)) %>%
         step_mutate(PERIOD = factor(PERIOD)) %>%
         step_log(DISTANCE, offset =1) %>%
@@ -723,7 +763,7 @@ baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
 
 I'll define the model I'll be using here, which is a multinomial logistic regression.
 
-```{r define model objs}
+```{r define model objs, echo=T}
 
 # from glmnet
 multinom_mod = multinom_reg(
@@ -737,7 +777,7 @@ multinom_mod = multinom_reg(
 
 I'll then create a workflow.
 
-```{r craete workflow}
+```{r craete workflow, echo=T}
 
 # create multinomial workflow
 multinom_wf = workflow() %>%
@@ -790,9 +830,9 @@ registerDoParallel(numcores -2)
 
 ## Training
 
-Now I'll train and assess on these resamples.
+Now I'll train and assess the model on the training set via leave-one-season-out cross validation, then I'll refit the model to the entire training set.
 
-```{r fit on set, eval=F}
+```{r fit on set, echo=T}
 
 # fit to resamples
 resamples_multinom = multinom_wf %>%
@@ -802,22 +842,22 @@ resamples_multinom = multinom_wf %>%
                       control = keep_pred,
                       verbose=T)
 
-# # save locally so as to not need to retrain everytime
-write_rds(resamples_multinom,
-     file = here::here("models", "resamples_expected_points.Rds"),
-     compress = "gz")
+# # # save locally so as to not need to retrain everytime
+# write_rds(resamples_multinom,
+#      file = here::here("models", "resamples_expected_points.Rds"),
+#      compress = "gz")
 
 ```
 
 ```{r load previously run resamples}
 
-resamples_multinom = read_rds(here::here("models", 
-                                         "resamples_expected_points.Rds"))
+# resamples_multinom = read_rds(here::here("models", 
+#                                          "resamples_expected_points.Rds"))
 
 ```
 
 
-```{r fit to training set}
+```{r fit to training set, echo=T}
 
 # fit the model to the whole training set
 fit_multinom = multinom_wf %>%
@@ -827,6 +867,8 @@ fit_multinom = multinom_wf %>%
 
 ## Resampling Performance
 
+How did the model perform on each resample? I'm looking at the logloss and area under the receiver operating characteristic curve (roc_auc). The logloss is only meaningful by comparison, I'll compare how the model does to a null model on the validation set.
+
 ```{r get results}
 
 # collect metrics
@@ -834,12 +876,15 @@ resamples_multinom %>%
         collect_metrics(summarize=F) %>%
         mutate_if(is.numeric, round, 3) %>%
         select(id, .metric, .estimator, .estimate) %>%
-        arrange(.metric)
+        arrange(.metric) %>%
+        flextable() %>%
+        autofit()
 
 ```
+
 ## Inference
 
-```{r get coefs, fig.height=6, fig.width=8, warning=F, message=F}
+```{r get coefs, fig.height=10, fig.width=8, warning=F, message=F}
 
 tidy(fit_multinom) %>%
         mutate(term = factor(term)) %>%
@@ -853,7 +898,9 @@ tidy(fit_multinom) %>%
 
 ```
 
-Understanding partial effects from a multinomial logit is already difficult, and I've thrown a bunch of interactions in there to make this even more difficult. I'll look at predicted probabilities using an observed values approach for particular features (using a sample rather than the full dataset to save time). This means taking the model and then altering the feature of interest for every observation and taking the average predicted probability for each outcome across all observations.
+Understanding partial effects from a multinomial logit is already difficult, and I've thrown a bunch of interactions in there to make this even more difficult. 
+
+I'll look at predicted probabilities using an observed values approach for particular features (using a sample rather than the full dataset to save time). This means taking the model and then altering the feature of interest for every observation and taking the average predicted probability for each outcome across all observations.
 
 ```{r look at predicted probabilities}
 
@@ -867,7 +914,7 @@ pred_settings = foreach(i = 1:length(setting),
                 set.seed(1999)
                 fit_multinom %>%
                         predict(new_data = plays_train %>% 
-                                        sample_n(10000) %>%
+                                        sample_n(50000) %>%
                                         mutate(YARDS_TO_GOAL = setting[i]),
                                 type = 'prob') %>%
                         apply(., 2, mean) %>%
@@ -881,10 +928,6 @@ pred_settings = foreach(i = 1:length(setting),
 How is the probability of the next scoring event influenced by where the offense has possession?
 
 ```{r show probabilities by yards to goal}
-
-# make my own color ramp
-my_col = colorRampPalette(c("blue", "white", "red"))
-score_palette = c(my_col(6)[1:3], "grey80", my_col(6)[4:6])
 
 # now plot this effect
 pred_settings %>%
@@ -980,7 +1023,7 @@ pred_settings_12 = foreach(i = 1:length(setting_1),
                 set.seed(1999)
                  fit_multinom %>%
                         predict(new_data = plays_train %>% 
-                                        sample_n(10000) %>%
+                                        sample_n(50000) %>%
                                         mutate(YARDS_TO_GOAL = setting_1[i],
                                                DOWN = setting_2[j]),
                                 type = 'prob') %>%
@@ -1062,7 +1105,7 @@ point_settings_12 = foreach(i = 1:length(setting_1),
                 set.seed(1999)
                  fit_multinom %>%
                         predict(new_data = plays_train %>% 
-                                        sample_n(10000) %>%
+                                        sample_n(50000) %>%
                                         mutate(YARDS_TO_GOAL = setting_1[i],
                                                DOWN = setting_2[j]),
                                 type = 'prob') %>%
@@ -1237,9 +1280,9 @@ predicted_plays =
 
 ```
 
-Get expected points added for all plays. This part is a little wobbly, due to data quality issues with defining sequences. The basic thought here is to say, at the start of a play, we know the expected points for a team in that situation, EP_Pre. We then look to the next play to see the expected points for the team after the result of the previous play, EP_Post. EP_Added is the difference between these two outcomes from the perspective of the offense. 
+I'll get Expected Points Added for all non scoring plays. This part can be a little wobbly, due to data quality issues with defining sequences. The basic thought here is to say, at the start of a play, we know the expected points for a team in that situation, EP_Pre. We then look to the next play to see the expected points for the team after the result of the previous play, EP_Post. EP_Added is the difference between these two outcomes from the perspective of the offense. 
 
-This means that if the ball is turned over, but not scored, the team on offense becomes the defense and the sign of the expected points on the next play flips for their calculation. For events that produce touchdowns, I set EP_Post to be equal to the points scored on the play, 7 for touchdowns, 3 for FGs, 2 for safeties.
+This means that if the ball is turned over, but not scored, the team on offense becomes the defense and the sign of the expected points on the next play flips for their calculation. For events that produce touchdowns, EP_Added is empty, but I create another feature simply called Points_Added in which I take the difference between EP_Pre and the points scored on the play, 7 for touchdowns, 3 for FGs, 2 for safeties.
 
 ```{r compute expected points for all plays}
 
@@ -1260,8 +1303,8 @@ scored_plays = predicted_plays %>%
         mutate(SAFETY = case_when(
                 grepl("safety", tolower(PLAY_TEXT)) ~ 1,
                  TRUE ~ 0)) %>%
-        # compute the actual points added in the event of scoring plays
-        mutate(Points_Added = case_when(TOUCHDOWN==1 & NEXT_SCORE_EVENT_OFFENSE == 'TD' ~ 7,
+        # compute the actual points after scoring plays
+        mutate(Points_Post = case_when(TOUCHDOWN==1 & NEXT_SCORE_EVENT_OFFENSE == 'TD' ~ 7,
                                         TOUCHDOWN==1 & NEXT_SCORE_EVENT_OFFENSE == 'Opp_TD' ~ -7,
                                         FG==1 & NEXT_SCORE_EVENT_OFFENSE == 'FG' ~ 3,
                                         FG==1 & NEXT_SCORE_EVENT_OFFENSE == 'Opp_FG' ~ -3,
@@ -1272,13 +1315,10 @@ scored_plays = predicted_plays %>%
         # now, compute EPA_Pre, EPA_Post, EPA_Added for individual drives
         # all of these calculations are keeping plays in the order in which they appear from the API
          group_by(GAME_ID, OFFENSE, HALF, DRIVE_ID) %>%
-        # compute EP_Post, the result of the play. right now i'm combining points and expected points, potentially problematic but
-        # to use my most scientific defense possible, eh
+        # compute EP_Post, the expected points of the situation in the next play. 
+        # for scoring plays we'll be computing a slightly different quantity
         mutate(EP_Post = case_when(
-                TOUCHDOWN == 1 ~ Points_Added,
-                FG == 1 ~ Points_Added,
-                SAFETY == 1 ~ Points_Added,
-                TOUCHDOWN == 0 & FG ==0 & SAFETY==0  ~ dplyr::lead(EP_Pre,1))
+                (TOUCHDOWN == 0 & FG ==0 & SAFETY==0)  ~ dplyr::lead(EP_Pre,1))
                ) %>%
         mutate(EP_Added = EP_Post-EP_Pre) %>%
         # unfortunately, this doesn't catch what happens if possession changes before a scoring event
@@ -1287,296 +1327,679 @@ scored_plays = predicted_plays %>%
         bind_cols(.,
                   group_indices(., GAME_ID, HALF, HOME_SCORE, AWAY_SCORE) %>% # this creates a group index
                           as_tibble() %>%
-                          rename(SEQUENCE = value)) %>%
-        group_by(GAME_ID, HALF, SEQUENCE) %>%
-        # now, if EP_Post is NA, it is because a drive ended without a scoring event, so the other team gets the ball
-        # this means, flip the sign of the expected points for the next play (ie, what is the other teams EP now that they have the ball)
+                          rename(SEQUENCE = value)) %>%group_by(GAME_ID, HALF, SEQUENCE) %>%
+        # now, if EP_Post is NA, it is typically because a drive ended without a scoring event
+        # in the event that possession changed, flip the sign of the expected points for the next play (ie, what is the other teams EP now that they have the ball)
         # the difference in this case will be the result of the turnover/change in possession
         mutate(EP_Post = case_when(
-                is.na(EP_Post) ~ -1*(dplyr::lead(EP_Pre,1)),
+                (is.na(EP_Post) & (TOUCHDOWN == 0 & FG ==0 & SAFETY==0) & (OFFENSE!=dplyr::lead(OFFENSE,1))) ~ -1*(dplyr::lead(EP_Pre,1)),
+                 (is.na(EP_Post) & (TOUCHDOWN == 0 & FG ==0 & SAFETY==0) & (OFFENSE==dplyr::lead(OFFENSE,1))) ~ 1*(dplyr::lead(EP_Pre,1)),
                                    TRUE ~ EP_Post)) %>%
         mutate(EP_Added = case_when(
-                is.na(EP_Added) ~ EP_Post-EP_Pre,
+                (is.na(EP_Added) & (TOUCHDOWN == 0 & FG ==0 & SAFETY==0)) ~ EP_Post-EP_Pre,
                                    TRUE ~ EP_Added)) %>%
+        # Points added by scoring plays
+        mutate(Points_Added = Points_Post-EP_Pre) %>%
         ungroup()
 
 ```
 
 ## Game Results
 
-I'll look at a few games, play by play, to get a sense of how this is looking. I'll pick one game completely at random, in no way influenced by my fandom.
+I'll look at a few games, play by play, to get a sense of how this is looking. I'll pick one game completely at random, in no way influenced by my fandom: Texas A&M vs Alabama in 2012.
+
+What were the most impactful plays in this game in terms of expected points added? I'll look at the 15 plays in this game with the largest absolute change.
 
 ```{r look at a game from 2013}
 
 scored_plays %>%
         filter(SEASON == 2012) %>%
         filter(HOME == 'Alabama' & AWAY == 'Texas A&M') %>%
-        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, SECONDS_IN_HALF, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added) %>%
         mutate_at(c("SEASON",
                     "GAME_ID",
                     "DRIVE_ID",
                     "PLAY_ID"),
                   ~ as.character(.)) %>%
-        select(-DRIVE_ID, -GAME_ID) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(EP_Added))) %>%
+        head(15) %>%
         mutate_if(is.numeric, round, 2) %>%
-      #  arrange(desc(EP_Added)) %>%
+ #       arrange(desc(EP_Added)) %>%
         flextable() %>%
-        autofit()
+        autofit() %>%
+        color(., i = ~ EP_Added > 0,
+           j = "EP_Added",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ EP_Added < 0,
+           j = "EP_Added",
+           color = 'red')
 
 ```
 
-From this game, we can look at the top ten positive points added plays and the top ten negative points added plays.
+Kind of interesting - this game is remembered for a lot of plays by Johnny Manziel, but the most impactful plays in the game in terms of expected points changes were actually turnovers forced by the A&M defense.
+
+However, this doesn't include scoring plays. The Points_Added measure looks at the difference between actual points scored vs expected points from the situation.
+
+```{r top plays my expected points}
+
+scored_plays %>%
+        filter(SEASON == 2012) %>%
+        filter(HOME == 'Alabama' & AWAY == 'Texas A&M') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, Points_Added) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(Points_Added))) %>%
+        head(5) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ Points_Added > 0,
+           j = "Points_Added",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ Points_Added < 0,
+           j = "Points_Added",
+           color = 'red')
+
+```
+
+In this case, we can still use the expected points of the situation to give us a measure of how many points the play added. In the case of Christine Michael's 1 yard TD run, the points added are pretty low, as you'd expect teams to score from that situation. By comparison, AJ McCarron's 54 yard pass on 3rd and 6 in the 4th quarter had a much higher points added, as they were in a third down situation at the midfield and made a huge play. For this reason, what I'm calling Points Added has been dubbed by others as a measure of a team's offensive explosiveness. For most of my analyses I'm condensing Expected Points Added and points Added into one metric that I'm calling Predicted Points Added.
+
+What's cool is that we can do this (right now) for any play from any game from 2010-2020. For instance, we can look at a team and ask, what were its highest predicted points added plays in each season? This is Wisconsin's top plays for each year.
+
+```{r look at a wisconsin game play by play}
+
+scored_plays %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Wisconsin') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+
+```
+
+ What were the highest predicted points added plays (including scoring plays) from each season?
 
 ```{r look at a game from 2014}
 
 scored_plays %>%
-        filter(SEASON == 2012) %>%
-        filter(HOME == 'Alabama' & AWAY == 'Texas A&M') %>%
-        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
         mutate_at(c("SEASON",
                     "GAME_ID",
                     "DRIVE_ID",
                     "PLAY_ID"),
                   ~ as.character(.)) %>%
-        select(-DRIVE_ID, -GAME_ID) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
         mutate_if(is.numeric, round, 2) %>%
-        arrange(desc(EP_Added)) %>%
-        head(10) %>%
-        bind_rows(.,
-                  scored_plays %>%
-        filter(SEASON == 2012) %>%
-        filter(HOME == 'Alabama' & AWAY == 'Texas A&M') %>%
-        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added) %>%
-        mutate_at(c("SEASON",
-                    "GAME_ID",
-                    "DRIVE_ID",
-                    "PLAY_ID"),
-                  ~ as.character(.)) %>%
-        select(-DRIVE_ID, -GAME_ID) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        arrange(EP_Added) %>%
-        head(10)) %>%
-        arrange(desc(EP_Added)) %>%
         flextable() %>%
-        autofit()
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
 
 ```
 
+Looks like there's a data quality issue with the Iowa vs Northern Iowa game, the yards to go looks to be incorrect there which is making that play look like it was a big yardage gain. We also notice some data quality issues if we look at highest expected points added plays, not including scoring plays.
 
-## Team Offenses and Defenses by Game
-
-Having scored all individual plays, we can now roll this up to whatever level of analysis we're interested in. We can, for instance, look at a team's offense game by game over this time period. Continuing to select a team at random, we'll look at A&M's offense by game.
-
-```{r look at tamu offense by season by game}
+```{r look for issues}
 
 scored_plays %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = EPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ EPA > 0,
+           j = "EPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ EPA < 0,
+           j = "EPA",
+           color = 'red')
+```
+
+For that 2011 play, it's 4th and 58 with 93 yards to go and the pass is complete for a loss of seven yards, and yet the model considers this a play worthy of 9 expected points? The heck? Turns out this, and most of these, are actually just issues of data quality with ESPNs play by play data.
+
+```{r look at example of a problem}
+
+scored_plays %>%
+        filter(SEASON == 2011 & OFFENSE == 'Troy' & DEFENSE == 'Clemson' & PERIOD ==3) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD,  DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        filter(PLAY_ID %in% c(312460228140,
+                              312460228160,
+                              312460228163)) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ EPA > 0,
+           j = "EPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ EPA < 0,
+           j = "EPA",
+           color = 'red')
+
+```
+
+In this case, the play by play data has a bizarre sequence in which Troy is listed as punting, then completing a loss on 4th and 58, while still having possession on the next play with a 1st and 10. Since the expected points added calculation is based on the difference between plays, that phantom 4th and 58 play throws off the value of the next play. This is unfortunately quite common in ESPNs play by play data, especially as we go further back.
+
+## Team Offenses by Season
+
+Having scored all individual plays, we can now roll this up to whatever level of analysis we're interested in. We can, for instance, look at a team's offense for each season over this time period. Continuing to select a team at random, we'll look at Texas A&M's offense in terms of predicted/expected points game by game over this time period. The line in navy, EPA_Average, looks at a team's expected points added per play without including scoring plays. The line in light blue, PPA_Average, looks at all plays, including scoring.
+
+```{r take a look at a team by season}
+
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         # exclude kickoffs from this
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         # also field goals, not that interested in kicking performance at the minute
         filter(FG == 0) %>% # remove FGs
         filter(OFFENSE == 'Texas A&M') %>%
-        group_by(SEASON, OFFENSE, GAME_ID) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
+        group_by(SEASON, OFFENSE) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+             #     PA_Average = mean(PA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
                   plays = n(),
                   .groups = 'drop') %>%
-        mutate(TEAM = OFFENSE) %>%
+        rename(TEAM = OFFENSE) %>%
         mutate(TYPE = "OFFENSE") %>%
-        left_join(., games_data_raw %>%
-                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
-                  by = c("GAME_ID")) %>%
-        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
-                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        mutate(game = row_number()) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        ggplot(., aes(x=game,
-                      color = SEASON,
+        select(SEASON, 
+               TEAM,
+               TYPE,
+               EPA_Average, 
+           #    PA_Average, 
+               PPA_Average,
+           plays) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        gather("variable","value",
+               -SEASON, -TEAM, -TYPE, -plays) %>%
+        mutate(SEASON = as.integer(SEASON)) %>%
+      #  mutate(SEASON = factor(SEASON)) %>%
+        ggplot(., aes(x=SEASON,
+                      label = SEASON,
+                      color = variable,
                   #    size = plays,
-                      label = paste(OPPONENT, SEASON),
-                      y = EPA_per_Play))+
-        geom_point()+
-   geom_line(lwd = 0.8,
-                  alpha = 0.8,
-                  stat = 'smooth',
-                  method = 'loess',
-                  span = 0.25,
-                  se = F,
-                  formula = 'y ~ x')+
-        geom_text_repel(check_overlap=T,
-                 # vjust=-1,
-                  size = 2.5)+
-        theme_phil()+
-        facet_wrap(TEAM~.)+
-        scale_color_viridis_d(option = 'B',
-                              begin = 0.8,
-                              end = 0.2)+
-        geom_hline(yintercept =0,
-                   linetype = 'dashed')
-
-
-scored_plays %>%
-        # exclude kickoffs from this
-        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
-        # also field goals, not that interested in kicking performance at the minute
-        filter(FG == 0) %>% # remove FGs
-        filter(OFFENSE == 'Texas A&M') %>%
-        group_by(SEASON, OFFENSE, GAME_ID) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
-                  plays = n(),
-                  .groups = 'drop') %>%
-        mutate(TEAM = OFFENSE) %>%
-        mutate(TYPE = "OFFENSE") %>%
-        left_join(., games_data_raw %>%
-                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
-                  by = c("GAME_ID")) %>%
-        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
-                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        group_by(SEASON) %>%
-        mutate(game = row_number()) %>%
-        ungroup() %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        ggplot(., aes(x=game,
-                      color = SEASON,
-                  #    size = plays,
-                      label = OPPONENT,
-                      y = EPA_per_Play))+
+                      y = value))+
+        geom_text(check_overlap = T,
+                  size=2.5,
+                  vjust=-1)+
         geom_point()+
         geom_line(lwd = 0.8,
                   alpha = 0.8,
                   stat = 'smooth',
                   method = 'loess',
-                  span = 0.25,
+                  span = 0.3,
                   se = F,
                   formula = 'y ~ x')+
-        geom_text(check_overlap=T,
-                  vjust=-1,
-                  size = 2.5)+
         theme_phil()+
-        facet_wrap(TEAM ~ SEASON,
-                   ncol = 3)+
-        scale_color_viridis_d(option = 'B',
-                              begin = 0.8,
-                              end = 0.2)+
+        facet_wrap(TEAM ~.,
+                   ncol = 1)+
         geom_hline(yintercept =0,
-                   linetype = 'dashed')
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("navy", "deepskyblue1"))+
+        ylab("Points per Play")+
+        ggtitle("Team Offensive Metrics by Season",
+                "Average expected points added and predicted points added for a team's offense over the course of a season. Model estimates from multinomial logistic regression.")+
+        scale_x_continuous(breaks = int_breaks)
 
 ```
 
-We can do the same thing, but looking at a team's defense - what was the expected points added for the opposing team's offense? In this case, negative is good - it means the opposing team's offense didn't perform well.
+If we use these as general measures of the efficiency of an offense in a season/game, where does A&M place compared to all teams? What is good? I'll plot the distribution of all teams with at least 400 plays in a season, then overlay where A&M ranks.
 
-```{r look at tamu defense}
+```{r indicate where tamu offense falls}
 
-scored_plays %>%
+library(ggforce)
+
+team = 'Texas A&M'
+
+temp = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         # exclude kickoffs from this
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         # also field goals, not that interested in kicking performance at the minute
         filter(FG == 0) %>% # remove FGs
-        filter(DEFENSE == 'Texas A&M') %>%
-        group_by(SEASON, DEFENSE, GAME_ID) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
+        group_by(SEASON, OFFENSE) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+             #     PA_Average = mean(PA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
                   plays = n(),
                   .groups = 'drop') %>%
-        mutate(TEAM = DEFENSE) %>%
-        mutate(TYPE = "DEFENSE") %>%
-        left_join(., games_data_raw %>%
-                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
-                  by = c("GAME_ID")) %>%
-        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
-                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        mutate(game = row_number()) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        ggplot(., aes(x=game,
-                      color = SEASON,
+        rename(TEAM = OFFENSE) %>%
+        mutate(TYPE = "OFFENSE") %>%
+        select(SEASON, 
+               TEAM,
+               TYPE,
+               EPA_Average, 
+           #    PA_Average, 
+               PPA_Average,
+           plays) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        filter(plays > 400) %>%
+        gather("variable","value",
+               -SEASON, -TEAM, -TYPE, -plays) %>%
+        mutate(SEASON = as.integer(SEASON))
+
+
+p1 = temp %>%
+        ggplot(., aes(x=SEASON,
+                      label = TEAM,
+                      color = variable,
                   #    size = plays,
-                      label = paste(OPPONENT, SEASON),
-                      y = EPA_per_Play))+
-        geom_point()+
-   geom_line(lwd = 0.8,
-                  alpha = 0.8,
-                  stat = 'smooth',
-                  method = 'loess',
-                  span = 0.25,
-                  se = F,
-                  formula = 'y ~ x')+
-        geom_text_repel(check_overlap=T,
-                 # vjust=-1,
-                  size = 2.5)+
+                      y = value))+
+        facet_wrap(variable~.,
+                           ncol =1)+
+        geom_point(position = ggforce::position_jitternormal(sd_x = 0.1,
+                                                             sd_y = 0),
+                   alpha = 0.2)+
+        # geom_line(lwd = 0.8,
+        #           alpha = 0.8,
+        #           stat = 'smooth',
+        #           method = 'loess',
+        #           span = 0.3,
+        #           se = F,
+        #           formula = 'y ~ x')+
         theme_phil()+
-        facet_wrap(TEAM~.)+
-        scale_color_viridis_d(option = 'B',
-                              begin = 0.8,
-                              end = 0.2)+
         geom_hline(yintercept =0,
                    linetype = 'dashed')
 
-
-scored_plays %>%
-        # exclude kickoffs from this
-        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
-        # also field goals, not that interested in kicking performance at the minute
-        filter(FG == 0) %>% # remove FGs
-        filter(DEFENSE == 'Texas A&M') %>%
-        group_by(SEASON, DEFENSE, GAME_ID) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
-                  plays = n(),
-                  .groups = 'drop') %>%
-        mutate(TEAM = DEFENSE) %>%
-        mutate(TYPE = "DEFENSE") %>%
-        left_join(., games_data_raw %>%
-                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
-                  by = c("GAME_ID")) %>%
-        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
-                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        group_by(SEASON) %>%
-        mutate(game = row_number()) %>%
-        ungroup() %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        ggplot(., aes(x=game,
-                      color = SEASON,
+p1 +
+        geom_point(data = temp %>%
+                           filter(TEAM == team),
+                   aes(x=SEASON,
+                       label = SEASON,
+                      color = variable,
                   #    size = plays,
-                      label = OPPONENT,
-                      y = EPA_per_Play))+
-        geom_point()+
-        geom_line(lwd = 0.8,
+                      y = value))+
+        geom_line(data = temp %>%
+                           filter(TEAM == team),
+                  lwd = 0.8,
                   alpha = 0.8,
                   stat = 'smooth',
                   method = 'loess',
-                  span = 0.25,
+                  span = 0.3,
                   se = F,
                   formula = 'y ~ x')+
-        geom_text(check_overlap=T,
-                  vjust=-1,
-                  size = 2.5)+
         theme_phil()+
-        facet_wrap(TEAM ~ SEASON,
-                   ncol = 3)+
-        scale_color_viridis_d(option = 'B',
-                              begin = 0.8,
-                              end = 0.2)+
         geom_hline(yintercept =0,
-                   linetype = 'dashed')
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("navy", "deepskyblue1"))+
+        ylab("Points per Play")+
+        ggtitle(paste(team, "Offensive Metrics by Season"),
+                "Average expected points added and predicted points added for a team's offense over the course of a season. Model estimates from multinomial logistic regression.")+
+        scale_x_continuous(breaks = int_breaks)
+        
 
 ```
 
-I'll put these side by side for a really good team, like Bama. A good performance is one where team's offense EPA is higher than the points yielded by the defense.
+Based on either metric, we can see that A&M's offense in 2012 and 2013 were among the best in college football at the time. It also looks like A&M's 2018 and 2020 offense were pretty darn good as well.
 
-```{r game by game offense defense alabama}
+Let's look at another team that we would expect to be really strong this entire time period: Ohio State.
 
-scored_plays %>%
+```{r look at osu offense}
+
+team = 'Ohio State'
+
+temp = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         # exclude kickoffs from this
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         # also field goals, not that interested in kicking performance at the minute
         filter(FG == 0) %>% # remove FGs
-        filter(OFFENSE == 'Alabama') %>%
+        group_by(SEASON, OFFENSE) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+             #     PA_Average = mean(PA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
+                  plays = n(),
+                  .groups = 'drop') %>%
+        rename(TEAM = OFFENSE) %>%
+        mutate(TYPE = "OFFENSE") %>%
+        select(SEASON, 
+               TEAM,
+               TYPE,
+               EPA_Average, 
+           #    PA_Average, 
+               PPA_Average,
+           plays) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        filter(plays > 400) %>%
+        gather("variable","value",
+               -SEASON, -TEAM, -TYPE, -plays) %>%
+        mutate(SEASON = as.integer(SEASON))
+
+
+p1 = temp %>%
+        ggplot(., aes(x=SEASON,
+                      label = TEAM,
+                      color = variable,
+                  #    size = plays,
+                      y = value))+
+        facet_wrap(variable~.,
+                           ncol =1)+
+        geom_point(position = ggforce::position_jitternormal(sd_x = 0.1,
+                                                             sd_y = 0),
+                   alpha = 0.2)+
+        # geom_line(lwd = 0.8,
+        #           alpha = 0.8,
+        #           stat = 'smooth',
+        #           method = 'loess',
+        #           span = 0.3,
+        #           se = F,
+        #           formula = 'y ~ x')+
+        theme_phil()+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')
+
+p1 +
+        geom_point(data = temp %>%
+                           filter(TEAM == team),
+                   aes(x=SEASON,
+                       label = SEASON,
+                      color = variable,
+                  #    size = plays,
+                      y = value))+
+        geom_line(data = temp %>%
+                           filter(TEAM == team),
+                  lwd = 0.8,
+                  alpha = 0.8,
+                  stat = 'smooth',
+                  method = 'loess',
+                  span = 0.3,
+                  se = F,
+                  formula = 'y ~ x')+
+        theme_phil()+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("navy", "deepskyblue1"))+
+        ylab("Points per Play")+
+        ggtitle(paste(team, "Offensive Metrics by Season"),
+                "Average expected points added and predicted points added for a team's offense over the course of a season. Model estimates from multinomial logistic regression.")+
+        scale_x_continuous(breaks = int_breaks)
+        
+```
+
+What about a team that's been up and down during this time period? Some lowly team, like Texas.
+
+```{r look at texas offense}
+
+team = 'Texas'
+
+temp = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # exclude kickoffs from this
+        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+        # also field goals, not that interested in kicking performance at the minute
+        filter(FG == 0) %>% # remove FGs
+        group_by(SEASON, OFFENSE) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+             #     PA_Average = mean(PA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
+                  plays = n(),
+                  .groups = 'drop') %>%
+        rename(TEAM = OFFENSE) %>%
+        mutate(TYPE = "OFFENSE") %>%
+        select(SEASON, 
+               TEAM,
+               TYPE,
+               EPA_Average, 
+           #    PA_Average, 
+               PPA_Average,
+           plays) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        filter(plays > 400) %>%
+        gather("variable","value",
+               -SEASON, -TEAM, -TYPE, -plays) %>%
+        mutate(SEASON = as.integer(SEASON))
+
+
+p1 = temp %>%
+        ggplot(., aes(x=SEASON,
+                      label = TEAM,
+                      color = variable,
+                  #    size = plays,
+                      y = value))+
+        facet_wrap(variable~.,
+                           ncol =1)+
+        geom_point(position = ggforce::position_jitternormal(sd_x = 0.1,
+                                                             sd_y = 0),
+                   alpha = 0.2)+
+        # geom_line(lwd = 0.8,
+        #           alpha = 0.8,
+        #           stat = 'smooth',
+        #           method = 'loess',
+        #           span = 0.3,
+        #           se = F,
+        #           formula = 'y ~ x')+
+        theme_phil()+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')
+
+p1 +
+        geom_point(data = temp %>%
+                           filter(TEAM == team),
+                   aes(x=SEASON,
+                       label = SEASON,
+                      color = variable,
+                  #    size = plays,
+                      y = value))+
+        geom_line(data = temp %>%
+                           filter(TEAM == team),
+                  lwd = 0.8,
+                  alpha = 0.8,
+                  stat = 'smooth',
+                  method = 'loess',
+                  span = 0.3,
+                  se = F,
+                  formula = 'y ~ x')+
+        theme_phil()+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("navy", "deepskyblue1"))+
+        ylab("Points per Play")+
+        ggtitle(paste(team, "Offensive Metrics by Season"),
+                "Average expected points added and predicted points added for a team's offense over the course of a season. Model estimates from multinomial logistic regression.")+
+        scale_x_continuous(breaks = int_breaks)
+
+```
+
+What about Florida State? We would expect them to be towards the top in the Jimob/Jameis era and then fall back to Earth during the Taggart era.
+
+```{r look at fsu offense}
+
+team = 'Florida State'
+
+temp = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # exclude kickoffs from this
+        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+        # also field goals, not that interested in kicking performance at the minute
+        filter(FG == 0) %>% # remove FGs
+        group_by(SEASON, OFFENSE) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+             #     PA_Average = mean(PA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
+                  plays = n(),
+                  .groups = 'drop') %>%
+        rename(TEAM = OFFENSE) %>%
+        mutate(TYPE = "OFFENSE") %>%
+        select(SEASON, 
+               TEAM,
+               TYPE,
+               EPA_Average, 
+           #    PA_Average, 
+               PPA_Average,
+           plays) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        filter(plays > 400) %>%
+        gather("variable","value",
+               -SEASON, -TEAM, -TYPE, -plays) %>%
+        mutate(SEASON = as.integer(SEASON))
+
+
+p1 = temp %>%
+        ggplot(., aes(x=SEASON,
+                      label = TEAM,
+                      color = variable,
+                  #    size = plays,
+                      y = value))+
+        facet_wrap(variable~.,
+                           ncol =1)+
+        geom_point(position = ggforce::position_jitternormal(sd_x = 0.1,
+                                                             sd_y = 0),
+                   alpha = 0.2)+
+        # geom_line(lwd = 0.8,
+        #           alpha = 0.8,
+        #           stat = 'smooth',
+        #           method = 'loess',
+        #           span = 0.3,
+        #           se = F,
+        #           formula = 'y ~ x')+
+        theme_phil()+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')
+
+p1 +
+        geom_point(data = temp %>%
+                           filter(TEAM == team),
+                   aes(x=SEASON,
+                       label = SEASON,
+                      color = variable,
+                  #    size = plays,
+                      y = value))+
+        geom_line(data = temp %>%
+                           filter(TEAM == team),
+                  lwd = 0.8,
+                  alpha = 0.8,
+                  stat = 'smooth',
+                  method = 'loess',
+                  span = 0.3,
+                  se = F,
+                  formula = 'y ~ x')+
+        theme_phil()+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("navy", "deepskyblue1"))+
+        ylab("Points per Play")+
+        ggtitle(paste(team, "Offensive Metrics by Season"),
+                "Average expected points added and predicted points added for a team's offense over the course of a season. Model estimates from multinomial logistic regression.")+
+        scale_x_continuous(breaks = int_breaks)
+
+```
+
+Hmm. That's kind of interesting - I've heard people discuss Jimbo's offense as lacking in explosiveness, which some argue is the difference between the expected points and the predicted points. This definitely wasn't the case in 2013, but generally FSU had a pretty efficient and explosive offense until their collapse in 2017.
+
+## Team Offense and Defense by Game
+
+But this is only looking at one side of the ball at the season level. We can look at team's defense in the same way in terms of the average expected/predicted points allowed by the offenses they face. In this case, you want your defense to have a negative value - this indicates that offenses weren't able to generate points against your defense. I'll look at a team's offense and defense side by side in terms of Predicted Points Added - meaning I am including scoring plays. We would expect a good team to be one whose offense (in blue) generates more points per play than they allow on defense (in red).
+
+```{r look at tamu offense and defense by season by game, fig.height=8}
+
+team = 'Texas A&M'
+
+scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # exclude kickoffs from this
+        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+        # also field goals, not that interested in kicking performance at the minute
+        filter(FG == 0) %>% # remove FGs
+        filter(OFFENSE == team) %>%
         group_by(SEASON, OFFENSE, GAME_ID) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
                   plays = n(),
                   .groups = 'drop') %>%
         mutate(TEAM = OFFENSE) %>%
@@ -1586,42 +2009,43 @@ scored_plays %>%
                   by = c("GAME_ID")) %>%
         mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
                                     AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-        mutate_if(is.numeric, round, 2) %>%
+        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
         group_by(SEASON) %>%
         mutate(game = row_number()) %>%
-        ungroup() %>%
         mutate(SEASON = factor(SEASON)) %>%
         bind_rows(.,
                   scored_plays %>%
-                        # exclude kickoffs from this
-                        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
-                        # also field goals, not that interested in kicking performance at the minute
-                        filter(FG == 0) %>% # remove FGs
-                        filter(DEFENSE == 'Alabama') %>%
-                        group_by(SEASON, DEFENSE, GAME_ID) %>%
-                        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
-                                  plays = n(),
-                                  .groups = 'drop') %>%
-                        mutate(TEAM = DEFENSE) %>%
-                        mutate(TYPE = "DEFENSE") %>%
-                        left_join(., games_data_raw %>%
-                                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
-                                  by = c("GAME_ID")) %>%
-                        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
-                                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-                        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-                        mutate_if(is.numeric, round, 2) %>%
+                rename(EPA = EP_Added,
+                       PA = Points_Added) %>%
+                mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                                       !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+                # exclude kickoffs from this
+                filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+                # also field goals, not that interested in kicking performance at the minute
+                filter(FG == 0) %>% # remove FGs
+                filter(DEFENSE == team) %>%
+                group_by(SEASON, DEFENSE, GAME_ID) %>%
+                summarize(EPA_Average = mean(EPA, na.rm=T),
+                          PPA_Average = mean(PPA, na.rm=T),
+                          plays = n(),
+                          .groups = 'drop') %>%
+                mutate(TEAM = DEFENSE) %>%
+                mutate(TYPE = "DEFENSE") %>%
+                left_join(., games_data_raw %>%
+                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                          by = c("GAME_ID")) %>%
+                mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
+                                            AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
+                select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
                         group_by(SEASON) %>%
-                        mutate(game = row_number()) %>%
-                        ungroup() %>%
-                        mutate(SEASON = factor(SEASON))
-                  ) %>%
+                mutate(game = row_number()) %>%
+                mutate(SEASON = factor(SEASON))) %>%
+        mutate(TYPE = paste(TYPE, "PPA_Average")) %>%
         ggplot(., aes(x=game,
                       color = TYPE,
                   #    size = plays,
                       label = OPPONENT,
-                      y = EPA_per_Play))+
+                      y = PPA_Average))+
         geom_point()+
         geom_line(lwd = 0.8,
                   alpha = 0.8,
@@ -1639,22 +2063,32 @@ scored_plays %>%
         geom_hline(yintercept =0,
                    linetype = 'dashed')+
         scale_color_manual(values = c("red", "deepskyblue1"))+
-        coord_cartesian(ylim = c(-.75, .75))
-
+        coord_cartesian(ylim = c(-.8, .8))+
+        ggtitle(paste(team, "Offense/Defense Efficency by Game"),
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+        
+     
 ```
 
-Okay let's look at a mediocre team, like Kansas.
+I'll look at a team like Wisconsin. They seem to generally have a pretty good defense, but struggle in terms of their ability to generate points on offense.
 
-```{r look at a mediocre team}
+```{r look at wisconson offense and defense by season by game, fig.height=8}
+
+team = 'Wisconsin'
 
 scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         # exclude kickoffs from this
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         # also field goals, not that interested in kicking performance at the minute
         filter(FG == 0) %>% # remove FGs
-        filter(OFFENSE == 'Kansas') %>%
+        filter(OFFENSE == team) %>%
         group_by(SEASON, OFFENSE, GAME_ID) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
                   plays = n(),
                   .groups = 'drop') %>%
         mutate(TEAM = OFFENSE) %>%
@@ -1664,42 +2098,43 @@ scored_plays %>%
                   by = c("GAME_ID")) %>%
         mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
                                     AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-        mutate_if(is.numeric, round, 2) %>%
+        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
         group_by(SEASON) %>%
         mutate(game = row_number()) %>%
-        ungroup() %>%
         mutate(SEASON = factor(SEASON)) %>%
         bind_rows(.,
                   scored_plays %>%
-                        # exclude kickoffs from this
-                        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
-                        # also field goals, not that interested in kicking performance at the minute
-                        filter(FG == 0) %>% # remove FGs
-                        filter(DEFENSE == 'Kansas') %>%
-                        group_by(SEASON, DEFENSE, GAME_ID) %>%
-                        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
-                                  plays = n(),
-                                  .groups = 'drop') %>%
-                        mutate(TEAM = DEFENSE) %>%
-                        mutate(TYPE = "DEFENSE") %>%
-                        left_join(., games_data_raw %>%
-                                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
-                                  by = c("GAME_ID")) %>%
-                        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
-                                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
-                        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_per_Play, plays) %>%
-                        mutate_if(is.numeric, round, 2) %>%
+                rename(EPA = EP_Added,
+                       PA = Points_Added) %>%
+                mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                                       !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+                # exclude kickoffs from this
+                filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+                # also field goals, not that interested in kicking performance at the minute
+                filter(FG == 0) %>% # remove FGs
+                filter(DEFENSE == team) %>%
+                group_by(SEASON, DEFENSE, GAME_ID) %>%
+                summarize(EPA_Average = mean(EPA, na.rm=T),
+                          PPA_Average = mean(PPA, na.rm=T),
+                          plays = n(),
+                          .groups = 'drop') %>%
+                mutate(TEAM = DEFENSE) %>%
+                mutate(TYPE = "DEFENSE") %>%
+                left_join(., games_data_raw %>%
+                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                          by = c("GAME_ID")) %>%
+                mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
+                                            AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
+                select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
                         group_by(SEASON) %>%
-                        mutate(game = row_number()) %>%
-                        ungroup() %>%
-                        mutate(SEASON = factor(SEASON))
-                  ) %>%
+                mutate(game = row_number()) %>%
+                mutate(SEASON = factor(SEASON))) %>%
+        mutate(TYPE = paste(TYPE, "PPA_Average")) %>%
         ggplot(., aes(x=game,
                       color = TYPE,
                   #    size = plays,
                       label = OPPONENT,
-                      y = EPA_per_Play))+
+                      y = PPA_Average))+
         geom_point()+
         geom_line(lwd = 0.8,
                   alpha = 0.8,
@@ -1717,32 +2152,223 @@ scored_plays %>%
         geom_hline(yintercept =0,
                    linetype = 'dashed')+
         scale_color_manual(values = c("red", "deepskyblue1"))+
-        coord_cartesian(ylim = c(-.75, .75))
-
+        coord_cartesian(ylim = c(-.8, .8))+
+        ggtitle(paste(team, "Offense/Defense Efficency by Game"),
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+        
 ```
 
-## Team Offenses and Defenses by Year
+For a dominant team like Alabama, we should see their offensive efficiency be high and their defensive efficiency be high as well - the blue should almost always outstrip the red.
 
-We can then aggregate this to a team's offensive performance within a full year to rate their overall offensive/defensive efficiency. We can also break this down by passing vs rushing plays on both sides of the ball.
+```{r look at alabama offense and defense by season by game, fig.height=8}
 
-For the purpose of evaluating a team's defense, I'll flip the sign of the points, which are currently scored from the perspective of the offense, so that positive is always good for a team.
+team = 'Alabama'
+
+scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # exclude kickoffs from this
+        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+        # also field goals, not that interested in kicking performance at the minute
+        filter(FG == 0) %>% # remove FGs
+        filter(OFFENSE == team) %>%
+        group_by(SEASON, OFFENSE, GAME_ID) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
+                  plays = n(),
+                  .groups = 'drop') %>%
+        mutate(TEAM = OFFENSE) %>%
+        mutate(TYPE = "OFFENSE") %>%
+        left_join(., games_data_raw %>%
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                  by = c("GAME_ID")) %>%
+        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
+                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
+        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
+        group_by(SEASON) %>%
+        mutate(game = row_number()) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        bind_rows(.,
+                  scored_plays %>%
+                rename(EPA = EP_Added,
+                       PA = Points_Added) %>%
+                mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                                       !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+                # exclude kickoffs from this
+                filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+                # also field goals, not that interested in kicking performance at the minute
+                filter(FG == 0) %>% # remove FGs
+                filter(DEFENSE == team) %>%
+                group_by(SEASON, DEFENSE, GAME_ID) %>%
+                summarize(EPA_Average = mean(EPA, na.rm=T),
+                          PPA_Average = mean(PPA, na.rm=T),
+                          plays = n(),
+                          .groups = 'drop') %>%
+                mutate(TEAM = DEFENSE) %>%
+                mutate(TYPE = "DEFENSE") %>%
+                left_join(., games_data_raw %>%
+                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                          by = c("GAME_ID")) %>%
+                mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
+                                            AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
+                select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
+                        group_by(SEASON) %>%
+                mutate(game = row_number()) %>%
+                mutate(SEASON = factor(SEASON))) %>%
+        mutate(TYPE = paste(TYPE, "PPA_Average")) %>%
+        ggplot(., aes(x=game,
+                      color = TYPE,
+                  #    size = plays,
+                      label = OPPONENT,
+                      y = PPA_Average))+
+        geom_point()+
+        geom_line(lwd = 0.8,
+                  alpha = 0.8,
+                  stat = 'smooth',
+                  method = 'loess',
+                  span = 0.25,
+                  se = F,
+                  formula = 'y ~ x')+
+        geom_text(check_overlap=T,
+                  vjust=-1,
+                  size = 2.5)+
+        theme_phil()+
+        facet_wrap(TEAM ~ SEASON,
+                   ncol = 3)+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("red", "deepskyblue1"))+
+        coord_cartesian(ylim = c(-.8, .8))+
+        ggtitle(paste(team, "Offense/Defense Efficency by Game"),
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+        
+     
+```
+
+Evidently they were so good at stopping Tennesee in 2011 that it breaks my axis.
+
+For a mediocre team, like Kansas, we should see the opposite type of graph here.
+
+```{r look at kansas offense and defense by season by game, fig.height=8}
+
+team = 'Kansas'
+
+scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # exclude kickoffs from this
+        filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+        # also field goals, not that interested in kicking performance at the minute
+        filter(FG == 0) %>% # remove FGs
+        filter(OFFENSE == team) %>%
+        group_by(SEASON, OFFENSE, GAME_ID) %>%
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
+                  plays = n(),
+                  .groups = 'drop') %>%
+        mutate(TEAM = OFFENSE) %>%
+        mutate(TYPE = "OFFENSE") %>%
+        left_join(., games_data_raw %>%
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                  by = c("GAME_ID")) %>%
+        mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
+                                    AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
+        select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
+        group_by(SEASON) %>%
+        mutate(game = row_number()) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        bind_rows(.,
+                  scored_plays %>%
+                rename(EPA = EP_Added,
+                       PA = Points_Added) %>%
+                mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                                       !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+                # exclude kickoffs from this
+                filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
+                # also field goals, not that interested in kicking performance at the minute
+                filter(FG == 0) %>% # remove FGs
+                filter(DEFENSE == team) %>%
+                group_by(SEASON, DEFENSE, GAME_ID) %>%
+                summarize(EPA_Average = mean(EPA, na.rm=T),
+                          PPA_Average = mean(PPA, na.rm=T),
+                          plays = n(),
+                          .groups = 'drop') %>%
+                mutate(TEAM = DEFENSE) %>%
+                mutate(TYPE = "DEFENSE") %>%
+                left_join(., games_data_raw %>%
+                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                          by = c("GAME_ID")) %>%
+                mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM,
+                                            AWAY_TEAM == TEAM ~ HOME_TEAM)) %>%
+                select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>%
+                        group_by(SEASON) %>%
+                mutate(game = row_number()) %>%
+                mutate(SEASON = factor(SEASON))) %>%
+        mutate(TYPE = paste(TYPE, "PPA_Average")) %>%
+        ggplot(., aes(x=game,
+                      color = TYPE,
+                  #    size = plays,
+                      label = OPPONENT,
+                      y = PPA_Average))+
+        geom_point()+
+        geom_line(lwd = 0.8,
+                  alpha = 0.8,
+                  stat = 'smooth',
+                  method = 'loess',
+                  span = 0.25,
+                  se = F,
+                  formula = 'y ~ x')+
+        geom_text(check_overlap=T,
+                  vjust=-1,
+                  size = 2.5)+
+        theme_phil()+
+        facet_wrap(TEAM ~ SEASON,
+                   ncol = 3)+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')+
+        scale_color_manual(values = c("red", "deepskyblue1"))+
+        coord_cartesian(ylim = c(-.8, .8))+
+        ggtitle(paste(team, "Offense/Defense Efficency by Game"),
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+        
+     
+```
+
+## Ranking Teams by Season
+
+We can then aggregate to a team's offensive performance within a full year to rate their overall offensive/defensive efficiency. We can also break this down by passing vs rushing plays on both sides of the ball.
+
+For the purpose of evaluating a team's defense in this analysis, I'll flip the sign of a defense's points, which are currently scored from the perspective of the offense, so that positive is always good for a team.
 
 ```{r look at expected points at the season level}
 
 # offense
 yearly_offense_epa = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(FG == 0) %>% # remove FGs
         group_by(SEASON, OFFENSE) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
                   plays = n(),
                   .groups = 'drop') %>%
         mutate(TEAM = OFFENSE) %>%
         mutate(TYPE = "OFFENSE") %>%
-        select(SEASON, TEAM, TYPE, EPA_per_Play, plays)
+        select(SEASON, TEAM, TYPE, EPA_Average, PPA_Average, plays)
 
 # offense by play type
 yearly_offense_epa_by_play = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         mutate(PLAY = case_when(
                 grepl("pass|completion|sack|intercept", tolower(PLAY_TYPE)) ~ 'Pass',
@@ -1750,27 +2376,37 @@ yearly_offense_epa_by_play = scored_plays %>%
                 TRUE ~ 'Special')) %>%
         filter(FG == 0) %>% # remove FGs
         group_by(SEASON, OFFENSE, PLAY) %>%
-        summarize(EPA_per_Play = mean(EP_Added, na.rm=T),
-                  Plays = n(),
+        summarize(EPA_Average = mean(EPA, na.rm=T),
+                  PPA_Average = mean(PPA, na.rm=T),
+                  plays = n(),
                   .groups = 'drop') %>%
         mutate(TEAM = OFFENSE) %>%
         mutate(TYPE = "OFFENSE") %>%
-        select(SEASON, TEAM, TYPE, PLAY, EPA_per_Play, Plays)
+        select(SEASON, TEAM, TYPE, PLAY, EPA_Average, PPA_Average, plays)
 
 # defense
 yearly_defense_epa = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(FG == 0) %>% # remove FGs
         group_by(SEASON, DEFENSE) %>%
-        summarize(EPA_per_Play = -1*mean(EP_Added, na.rm=T),
+        summarize(EPA_Average = -1*mean(EPA, na.rm=T),
+                  PPA_Average = -1*mean(PPA, na.rm=T),
                   plays = n(),
                   .groups = 'drop') %>%
         mutate(TEAM = DEFENSE) %>%
         mutate(TYPE = "DEFENSE") %>%
-        select(SEASON, TEAM, TYPE, EPA_per_Play, plays)
+        select(SEASON, TEAM, TYPE, EPA_Average, PPA_Average, plays)
 
 # defense by play type
 yearly_defense_epa_by_play = scored_plays %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         mutate(PLAY = case_when(
                 grepl("pass|completion|sack|intercept", tolower(PLAY_TYPE)) ~ 'Pass',
@@ -1778,12 +2414,13 @@ yearly_defense_epa_by_play = scored_plays %>%
                 TRUE ~ 'Special')) %>%
         filter(FG == 0) %>% # remove FGs
         group_by(SEASON, DEFENSE, PLAY) %>%
-        summarize(EPA_per_Play = -1*mean(EP_Added, na.rm=T),
-                  Plays = n(),
+        summarize(EPA_Average = -1*mean(EPA, na.rm=T),
+                  PPA_Average = -1*mean(PPA, na.rm=T),
+                  plays = n(),
                   .groups = 'drop') %>%
         mutate(TEAM = DEFENSE) %>%
         mutate(TYPE = "DEFENSE") %>%
-        select(SEASON, TEAM, TYPE, PLAY, EPA_per_Play, Plays)
+        select(SEASON, TEAM, TYPE, PLAY, EPA_Average, PPA_Average, plays)
         
 ```
 
@@ -1795,13 +2432,13 @@ yearly_teams = bind_rows(yearly_offense_epa,
           yearly_defense_epa) %>%
         pivot_wider(id_cols = c("SEASON", 
                                 "TEAM"),
-                    values_from = c("EPA_per_Play", "plays"),
+                    values_from = c("EPA_Average", "PPA_Average", "plays"),
                     names_from = c("TYPE")) %>%
         filter(plays_OFFENSE & plays_DEFENSE > 400) %>%
-        rename(OFFENSE_EPA = EPA_per_Play_OFFENSE,
-               DEFENSE_EPA = EPA_per_Play_DEFENSE) %>%
-        select(SEASON, TEAM, OFFENSE_EPA, DEFENSE_EPA) %>%
-        mutate(OVERALL = OFFENSE_EPA + DEFENSE_EPA)
+        rename(OFFENSE_PPA = PPA_Average_OFFENSE,
+               DEFENSE_PPA = PPA_Average_DEFENSE) %>%
+        select(SEASON, TEAM, OFFENSE_PPA, DEFENSE_PPA) %>%
+        mutate(OVERALL = OFFENSE_PPA + DEFENSE_PPA)
 
 yearly_teams %>%
         mutate(SEASON = as.character(SEASON)) %>%
@@ -1834,14 +2471,14 @@ yearly_teams %>%
 
 We can visualize all of this by placing every team based on its overall offensive/defensive efficiency.
 
-```{r make plot for overall}
+```{r make plot for overall, fig.height=8}
 
 yearly_teams %>%
         mutate(SEASON = as.character(SEASON)) %>%
-        ggplot(., aes(x=OFFENSE_EPA,
+        ggplot(., aes(x=OFFENSE_PPA,
                       color = OVERALL,
                       label = paste(TEAM, SEASON, sep=" "),
-                      y=DEFENSE_EPA))+
+                      y=DEFENSE_PPA))+
         geom_vline(xintercept = 0,
                    linetype = 'dashed',
                    color = 'black')+
@@ -1855,8 +2492,8 @@ yearly_teams %>%
                   hjust=0.5,
                   vjust = -1)+
         theme_phil()+
-        coord_cartesian(xlim= c(-0.4, 0.4),
-                        ylim = c(-0.4, 0.4))+
+        coord_cartesian(xlim= c(-0.45, 0.45),
+                        ylim = c(-0.45, 0.45))+
         annotate("label",
                  x=-0.25,
                  y=0.3,
@@ -1873,21 +2510,467 @@ yearly_teams %>%
                  x=-0.25,
                  y=-0.3,
                  label = "Bad Offense \n Bad Defense")+
-        ggtitle("College Football Teams, 2012-2020",
-                subtitle = "Teams placed based on regular season offense and defense efficiency")+
+        ggtitle("College Football Teams by Offense/Defense Efficiency, 2010-2020",
+                subtitle = "Teams placed based on regular season offense and defense predicted points added per play.")+
         scale_color_gradient(low = "red", high = "deepskyblue1",
                              limits = c(-0.25, 0.25),
                              oob = scales::squish)+
         theme(legend.title = element_text())+
         guides(color = guide_colorbar(barheight = 0.5,
-                                      title = 'Team EPA Overall',
+                                      title = 'Team PPA Overall',
                                       title.position = 'top',
                                      barwidth = 10))
 
 ```
 
-Stop here for now.
+We can also break this down by conference year over year. For instance, where do we place SEC teams in each of these seasons?
 
-# Backtesting
+```{r SEC overall score, fig.height=8}
 
-I'll next use the model we trained on 2012-2020 to evaluate prior seasons.
+yearly_teams %>%
+        left_join(.,
+                  games_data_raw %>% 
+                          select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>% 
+                          rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>% 
+                          bind_rows(.,
+                                    games_data_raw %>%
+                                            select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>% 
+                                            rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>%
+                          select(SEASON, TEAM, CONFERENCE) %>%
+                          unique(),
+                  by = c("SEASON", "TEAM")) %>%
+        filter(CONFERENCE == 'SEC') %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        ggplot(., aes(x=OFFENSE_PPA,
+                      color = OVERALL,
+                      label = paste(TEAM, SEASON, sep=" "),
+                      y=DEFENSE_PPA))+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed',
+                   alpha = 0.8,
+                   color = 'black')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed',
+                   alpha = 0.8,
+                   color = 'black')+
+        geom_point(alpha = 0.5)+
+        geom_text_repel(size=3)+
+                   #color = 'grey60')+
+        # geom_text(check_overlap = T,
+        #           size = 2.5,
+        #           hjust=0.5,
+        #           vjust = -1)+
+        theme_phil()+
+        coord_cartesian(xlim= c(-0.45, 0.45),
+                        ylim = c(-0.45, 0.45))+
+        facet_wrap(CONFERENCE + SEASON ~.,
+                   ncol =3)+
+        # annotate("label",
+        #          x=-0.25,
+        #          y=0.3,
+        #          label = "Bad Offense \n Good Defense")+
+        # annotate("label",
+        #          x=0.3,
+        #          y=-0.3,
+        #          label = "Good Offense \n Bad Defense")+
+        # annotate("label",
+        #          x=0.3,
+        #          y=0.3,
+        #          label = "Good Offense \n Good Defense")+
+        # annotate("label",
+        #          x=-0.25,
+        #          y=-0.3,
+        #          label = "Bad Offense \n Bad Defense")+
+        ggtitle("College Football Teams by Offense/Defense Efficiency, 2010-2020",
+                subtitle = "Teams placed based on regular season offense and defense predicted points added per play.")+
+        scale_color_gradient(low = "red", high = "deepskyblue1",
+                             limits = c(-0.25, 0.25),
+                             oob = scales::squish)+
+        theme(legend.title = element_text())+
+        guides(color = guide_colorbar(barheight = 0.5,
+                                      title = 'Team PPA Overall',
+                                      title.position = 'top',
+                                     barwidth = 10))
+
+```
+
+What about the Big Ten?
+
+```{r big ten overall score, fig.height=8}
+
+yearly_teams %>%
+        left_join(.,
+                  games_data_raw %>% 
+                          select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>% 
+                          rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>% 
+                          bind_rows(.,
+                                    games_data_raw %>%
+                                            select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>% 
+                                            rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>%
+                          select(SEASON, TEAM, CONFERENCE) %>%
+                          unique(),
+                  by = c("SEASON", "TEAM")) %>%
+        filter(CONFERENCE == 'Big Ten') %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        ggplot(., aes(x=OFFENSE_PPA,
+                      color = OVERALL,
+                      label = paste(TEAM, SEASON, sep=" "),
+                      y=DEFENSE_PPA))+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed',
+                   alpha = 0.8,
+                   color = 'black')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed',
+                   alpha = 0.8,
+                   color = 'black')+
+        geom_point(alpha = 0.5)+
+        geom_text_repel(size=3,
+                        max.overlaps = 20)+
+                   #color = 'grey60')+
+        # geom_text(check_overlap = T,
+        #           size = 2.5,
+        #           hjust=0.5,
+        #           vjust = -1)+
+        theme_phil()+
+        coord_cartesian(xlim= c(-0.45, 0.45),
+                        ylim = c(-0.45, 0.45))+
+        facet_wrap(CONFERENCE + SEASON ~.,
+                   ncol =3)+
+        # annotate("label",
+        #          x=-0.25,
+        #          y=0.3,
+        #          label = "Bad Offense \n Good Defense")+
+        # annotate("label",
+        #          x=0.3,
+        #          y=-0.3,
+        #          label = "Good Offense \n Bad Defense")+
+        # annotate("label",
+        #          x=0.3,
+        #          y=0.3,
+        #          label = "Good Offense \n Good Defense")+
+        # annotate("label",
+        #          x=-0.25,
+        #          y=-0.3,
+        #          label = "Bad Offense \n Bad Defense")+
+        ggtitle("College Football Teams by Offense/Defense Efficiency, 2010-2020",
+                subtitle = "Teams placed based on regular season offense and defense predicted points added per play.")+
+        scale_color_gradient(low = "red", high = "deepskyblue1",
+                             limits = c(-0.25, 0.25),
+                             oob = scales::squish)+
+        theme(legend.title = element_text())+
+        guides(color = guide_colorbar(barheight = 0.5,
+                                      title = 'Team PPA Overall',
+                                      title.position = 'top',
+                                     barwidth = 10))
+
+```
+
+## Ranking Teams by Pass/Run Efficiency
+
+We can break this down further to examine a team's expected points based on pass/run. 
+
+```{r look at offense defense efficiency vs run}
+
+yearly_teams_type = bind_rows(yearly_offense_epa_by_play,
+          yearly_defense_epa_by_play) %>%
+        pivot_wider(id_cols = c("SEASON", 
+                                "TEAM"),
+                    values_from = c("EPA_Average", "PPA_Average", "plays"),
+                    names_from = c("TYPE", "PLAY")) %>%
+        filter(plays_OFFENSE_Pass + plays_OFFENSE_Run + plays_OFFENSE_Special  > 400) %>%
+        rename(OFFENSE_PPA_Pass = PPA_Average_OFFENSE_Pass,
+               DEFENSE_PPA_Pass = PPA_Average_DEFENSE_Pass,
+               OFFENSE_PPA_Run = PPA_Average_OFFENSE_Run,
+               DEFENSE_PPA_Run = PPA_Average_DEFENSE_Run,
+               OFFENSE_Plays_Pass = plays_OFFENSE_Pass,
+               DEFENSE_Plays_Pass = plays_DEFENSE_Pass,
+               OFFENSE_Plays_Run = plays_OFFENSE_Run,
+               DEFENSE_Plays_Run = plays_DEFENSE_Run) %>%
+        select(SEASON, TEAM, starts_with("OFFENSE_PPA"), starts_with("DEFENSE_PPA"), starts_with("OFFENSE_Plays"), starts_with("DEFENSE_Plays"))
+
+```
+Filtering to teams with at least 200 such plays in a season, which teams had the most efficient passing offense in terms of predicted points added?
+
+```{r pass efficiency by teams}
+
+yearly_teams_type %>%
+        filter(OFFENSE_Plays_Pass > 200) %>%
+        arrange(desc(OFFENSE_PPA_Pass)) %>%
+        select(SEASON, TEAM, OFFENSE_PPA_Pass, OFFENSE_Plays_Pass) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+What about run offense?
+
+```{r run efficiency by teams}
+
+yearly_teams_type %>%
+        filter(OFFENSE_Plays_Run > 200) %>%
+        arrange(desc(OFFENSE_PPA_Run)) %>%
+        select(SEASON, TEAM, OFFENSE_PPA_Run, OFFENSE_Plays_Run) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Flipping this around, which defenses yielded the most points to passing/run?
+
+```{r worst defenses}
+
+yearly_teams_type %>%
+        filter(DEFENSE_Plays_Pass > 200) %>%
+        arrange(DEFENSE_PPA_Pass) %>%
+        select(SEASON, TEAM, DEFENSE_PPA_Pass, DEFENSE_Plays_Pass) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+yearly_teams_type %>%
+        filter(DEFENSE_Plays_Run > 200) %>%
+        arrange(DEFENSE_PPA_Run) %>%
+        select(SEASON, TEAM, DEFENSE_PPA_Run, DEFENSE_Plays_Run) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+What about the best defenses? Rutgers in 2012 with the best run defense? Really? Keep in mind that these ratings are unconditional based on opponent strength, though evidently Rutgers did have a bunch of defenders drafted in 2013, so..?
+
+```{r best defenses}
+
+yearly_teams_type %>%
+        filter(DEFENSE_Plays_Pass > 200) %>%
+        arrange(desc(DEFENSE_PPA_Pass)) %>%
+        select(SEASON, TEAM, DEFENSE_PPA_Pass, DEFENSE_Plays_Pass) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+yearly_teams_type %>%
+        filter(DEFENSE_Plays_Run > 200) %>%
+        arrange(desc(DEFENSE_PPA_Run)) %>%
+        select(SEASON, TEAM, DEFENSE_PPA_Run, DEFENSE_Plays_Run) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Putting this all together we can break down teams overall as before, only now explicitly looking at teams based on their pass and run offense/defense efficiency. Florida State 2013 still jumps to the top, evidently their passing defense that year was fantastic in addition to their passing offense. The picture is mostly unchanged from looking at just the overall numbers, but breaking it down can reveal which teams were more balanced while others were pass/run heavy.
+
+```{r look at A&M by pass run efficiency}
+
+ppa_col_func = 
+function(x) {
+        
+        breaks = seq(-1, 1,
+                     by = .1)
+        
+        colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
+        col_palette <- colorRamp(length(breaks))
+        mycut <- cut(x, 
+                     breaks = breaks,
+                     include.lowest = TRUE, 
+                     right=T,
+                     label = FALSE)
+        col_palette[mycut]
+        
+}
+
+overall_col_func = 
+function(x) {
+        
+        breaks = seq(-1.6, 1.6,
+                     by = .2)
+        
+        colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
+        col_palette <- colorRamp(length(breaks))
+        mycut <- cut(x, 
+                     breaks = breaks,
+                     include.lowest = TRUE, 
+                     right=T,
+                     label = FALSE)
+        col_palette[mycut]
+        
+}
+
+yearly_teams_type %>%
+        filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+                       OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+        
+
+```
+
+We can also look at individual teams year over year to see how their offense/defense/overall.
+
+For instance, Oregon was great in the early 2010s then had a few years in which they were down.
+
+```{r look at individual teams oregon}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Oregon') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+Florida State had that amazing year, but has really fallen back after Jimbo's bad year and eventual departure.
+
+```{r look at teams florida state}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Florida State') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+
+Wisconsin has generally been pretty good but not quite elite during this time period, people usually hound them for their passing game lately, how do they compare year over year?
+
+```{r look at individual teams wisconsin}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Wisconsin') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+What about a historically weaker team that has been on the rise lately? Iowa State?
+
+```{r iowa state year over year}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Iowa State') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+
+```
+
+And of course the team I keep randomly selecting, Texas A&M.
+
+```{r look at individual teams tamu}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Texas A&M') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
