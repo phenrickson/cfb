@@ -1626,7 +1626,7 @@ scored_plays %>%
 
 If we use these as general measures of the efficiency of an offense in a season/game, where does A&M place compared to all teams? What is good? I'll plot the distribution of all teams with at least 400 plays in a season, then overlay where A&M ranks.
 
-```{r indicate where tamu offense falls}
+```{r indicate where tamu offense falls, fig.height=8}
 
 library(ggforce)
 
@@ -1718,7 +1718,7 @@ Based on either metric, we can see that A&M's offense in 2012 and 2013 were amon
 
 Let's look at another team that we would expect to be really strong this entire time period: Ohio State.
 
-```{r look at osu offense}
+```{r look at osu offense, fig.height=8}
 
 team = 'Ohio State'
 
@@ -1805,7 +1805,7 @@ p1 +
 
 What about a team that's been up and down during this time period? Some lowly team, like Texas.
 
-```{r look at texas offense}
+```{r look at texas offense, fig.height=8}
 
 team = 'Texas'
 
@@ -1892,7 +1892,7 @@ p1 +
 
 What about Florida State? We would expect them to be towards the top in the Jimob/Jameis era and then fall back to Earth during the Taggart era.
 
-```{r look at fsu offense}
+```{r look at fsu offense, fig.height=8}
 
 team = 'Florida State'
 
@@ -2065,7 +2065,7 @@ scored_plays %>%
         scale_color_manual(values = c("red", "deepskyblue1"))+
         coord_cartesian(ylim = c(-.8, .8))+
         ggtitle(paste(team, "Offense/Defense Efficency by Game"),
-                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120))
         
      
 ```
@@ -2154,7 +2154,8 @@ scored_plays %>%
         scale_color_manual(values = c("red", "deepskyblue1"))+
         coord_cartesian(ylim = c(-.8, .8))+
         ggtitle(paste(team, "Offense/Defense Efficency by Game"),
-                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120))
+        
         
 ```
 
@@ -2242,7 +2243,8 @@ scored_plays %>%
         scale_color_manual(values = c("red", "deepskyblue1"))+
         coord_cartesian(ylim = c(-.8, .8))+
         ggtitle(paste(team, "Offense/Defense Efficency by Game"),
-                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120))
+        
         
      
 ```
@@ -2333,7 +2335,8 @@ scored_plays %>%
         scale_color_manual(values = c("red", "deepskyblue1"))+
         coord_cartesian(ylim = c(-.8, .8))+
         ggtitle(paste(team, "Offense/Defense Efficency by Game"),
-                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Offenses (in blue) are more efficient the higher their predicted points added. Defenses (in red) are more efficient the lower the predicted points added by the opponent's offense. Model estimates from multinomial logistic regression.",120))
+                subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120))
+        
         
      
 ```

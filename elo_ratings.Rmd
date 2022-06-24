@@ -20,7 +20,7 @@ knitr::opts_chunk$set(echo = F,
                       warning=F,
                       dev="png",
                       fig.width = 10,
-                      fig.height = 6)
+                      fig.height = 8)
 
 options(knitr.duplicate.label = "allow")
 
@@ -369,6 +369,21 @@ If $A$, the pre game favorite, wins by 50, the most they can really move up is 1
 
 What's with the constants of 2.2 and 0.001? As far as I can tell, this is because they initialized their ratings for teams at around 1500 (others have less) and they expect the maximum difference in Elo to be no greater than 2200 (2.2 / 0.001). The equation itself no longer works if the WinnerEloDiff is -2200, as the denominator goes to zero. The decision for these constants should then depend on the scale factor and the initial ratings selected.
 
+```{r remove}
+
+rm(a_update,
+   b_update,
+   win_omv,
+   a,
+   b,
+   a_vals,
+   b_vals,
+   mov,
+   outcome)
+
+```
+
+
 # Elo Ratings and Historical CFB Games
 
 ## Initial Settings: 1970-1990
@@ -401,13 +416,7 @@ team_games = games_data %>%
                                  CONFERENCE = AWAY_CONFERENCE)) %>%
         arrange(SEASON, WEEK, GAME_ID)
 
-```
-
-This means we loop over every game, look at the result, and then update each team's Elo rating based on the outcome and the margin of victory. 
-
-```{r loop over games to get updated elo ratings, include=F}
-
-# set the initial ratings for the first game for every team
+# define initial team elo ratings
 initial_team_elo_ratings = team_games %>%
         arrange(SEASON, WEEK, GAME_ID) %>%
         group_by(TEAM) %>%
@@ -416,44 +425,54 @@ initial_team_elo_ratings = team_games %>%
         ungroup() %>%
         mutate(TYPE = "Pre_Elo") %>%
         mutate(TEAM_ELO = case_when(!is.na(CONFERENCE) ~ 1500,
-                                    TRUE ~ 1200)) %>%
+                            TRUE ~ 1200)) %>%
         select(SEASON, GAME_ID, WEEK, TEAM, TYPE, TEAM_ELO, CONFERENCE)
 
-# make a copy, this will be the one we update
-team_elo_ratings = initial_team_elo_ratings
+```
 
-# game ids
-game_ids = games_data %>%
-        arrange(SEASON, WEEK, GAME_ID) %>%
-        select(GAME_ID) %>%
-        unique() %>%
-        pull(GAME_ID)
+This means we loop over every game, look at the result, and then update each team's Elo rating based on the outcome and the margin of victory. 
 
-# specify parameters
-k = 25
-v = 400
+```{r create initial function}
 
-# loop over games
-elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
+# define function to calculate elo ratings
+calc_elo_ratings = function(input_game_matchups,
+                            input_team_games,
+                            input_initial_team_elo_ratings,
+                            k,
+                            v) {
+        
+        # get game ids 
+        game_ids = input_game_matchups %>%
+                arrange(SEASON, WEEK, GAME_ID) %>%
+                select(GAME_ID) %>%
+                unique() %>%
+                pull(GAME_ID)
+        
+        # define
+        team_elo_ratings = input_initial_team_elo_ratings
+        
+        # now loop over games and get results
+        elo_game_results = foreach (i = 1:length(game_ids), 
+                                    .combine = bind_rows) %do% {
                                    
                 # now pull relevant info from the selected game
                 # get the home team
-                home_team = games_data %>%
+                home_team = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(HOME_TEAM)
                 
                 # get their conference
-                home_team_conference = games_data %>%
+                home_team_conference = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(HOME_CONFERENCE)
                 
                 # get the away team
-                away_team = games_data %>%
+                away_team = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(AWAY_TEAM)
                 
                 # get their conference
-                away_team_conference = games_data %>%
+                away_team_conference = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(AWAY_CONFERENCE)
                                    
@@ -484,37 +503,39 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 
                 ## now look at the outcome
                 # get the outcome
-                home_team_outcome = games_data %>% 
+                home_team_outcome = input_game_matchups %>% 
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(OUTCOME)
                 
                 # get the margin of victory for the winner
-                winner_margin = games_data %>%
+                winner_margin = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         mutate(WIN_MARGIN = abs(HOME_POINTS-AWAY_POINTS)) %>%
                         pull(WIN_MARGIN)
                 
                 ### update team rating based on pre game elo, outcome, and expected score
                 # home team update
-                home_team_post_elo = update_team_rating(home_team_pre_elo,
-                                                        home_team_outcome,
-                                                        home_expected_score,
-                                                        winner_margin,
+                home_team_post_elo = update_team_rating(team_rating = home_team_pre_elo,
+                                                        opponent_rating = away_team_pre_elo,
+                                                        observed_score = home_team_outcome,
+                                                        winner_mov = winner_margin,
+                                                        expected_score = home_expected_score,
                                                         k_factor = k)
                 
                 # away team update
-                away_team_post_elo = update_team_rating(away_team_pre_elo,
-                                                        1-home_team_outcome,
-                                                        away_expected_score,
-                                                        winner_margin,
+                away_team_post_elo = update_team_rating(team_rating = away_team_pre_elo,
+                                                        opponent_rating = home_team_pre_elo,
+                                                        observed_score = 1-home_team_outcome,
+                                                        winner_mov = winner_margin,
+                                                        expected_score = away_expected_score,
                                                         k_factor = k)
                                     
                 # output each team's post game elo rating
                 post_elo_ratings = 
-                        tibble(SEASON =  games_data %>%
+                        tibble(SEASON =  input_game_matchups %>%
                                        filter(GAME_ID == game_ids[i]) %>%
                                        pull(SEASON),
-                               WEEK =  games_data %>%
+                               WEEK =  input_game_matchups %>%
                                        filter(GAME_ID == game_ids[i]) %>%
                                        pull(WEEK),
                                GAME_ID = game_ids[i],
@@ -527,23 +548,23 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 new_pre_elo_ratings = 
                         bind_rows(
                                 # home team
-                                tibble(SEASON =  team_games %>%
+                                tibble(SEASON =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(SEASON),
-                                       WEEK =  team_games %>%
+                                       WEEK =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(WEEK),
                                        TEAM = home_team,
-                                       GAME_ID =  team_games %>%
+                                       GAME_ID =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(GAME_ID),
-                                       CONFERENCE =  team_games %>%
+                                       CONFERENCE =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
@@ -551,23 +572,23 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                                        TYPE = 'Pre_Elo',
                                        TEAM_ELO = home_team_post_elo),
                                 # away team
-                                tibble(SEASON =  team_games %>%
+                                tibble(SEASON =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(SEASON),
-                                       WEEK =  team_games %>%
+                                       WEEK =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(WEEK),
                                        TEAM = away_team,
-                                       GAME_ID =  team_games %>%
+                                       GAME_ID =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(GAME_ID),
-                                       CONFERENCE =  team_games %>%
+                                       CONFERENCE =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
@@ -588,10 +609,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                  
                  # return the outcome to be stored from the loop
                 game_result = tibble(
-                         SEASON =  games_data %>%
+                         SEASON =  input_game_matchups %>%
                                               filter(GAME_ID == game_ids[i]) %>%
                                               pull(SEASON),
-                        WEEK =  games_data %>%
+                        WEEK =  input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                        pull(WEEK),
                         GAME_ID = game_ids[i],
@@ -599,10 +620,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                         AWAY_TEAM = away_team,
                         HOME_CONFERENCE = home_team_conference,
                         AWAY_CONFERENCE = away_team_conference,
-                        HOME_POINTS = games_data %>%
+                        HOME_POINTS = input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                 pull(HOME_POINTS),
-                        AWAY_POINTS = games_data %>%
+                        AWAY_POINTS = input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                 pull(AWAY_POINTS),
                         HOME_PROB = home_expected_score,
@@ -617,13 +638,45 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 
                 game_result
 
+                                    }
+        
+        
+        # return 
+        out = list(
+                "elo_game_results" =  elo_game_results,
+                "elo_team_ratings" = team_elo_ratings %>%
+                        mutate(K = k,
+                               V = v))
+        
+        # return
+        return(out)
+        
 }
+        
+
+```
+
+
+```{r now run initial elo results v1, include=F}
+
+elo_ratings_returned = calc_elo_ratings(input_game_matchups = games_data,
+                                        input_team_games = team_games,
+                                        input_initial_team_elo_ratings = initial_team_elo_ratings,
+                                        k=25,
+                                        v = 400)
+
+```
+
+```{r grab the results}
+
+team_elo_ratings = elo_ratings_returned$elo_team_ratings
+elo_game_results = elo_ratings_returned$elo_game_results
 
 ```
 
 ### SEC 
 
-Once that finishes, we have the accumulation of Elo ratings as a function of game outcomes over the selected time period. For instance, here is each SEC team's Elo ratings fared from 1970-1980.
+Once that finishes, we have the accumulation of Elo ratings as a function of game outcomes over the selected time period. For instance, here is how each SEC team's Elo ratings fared from 1970-1980.
 
 ```{r get initial and updated for SEC v1}
 
@@ -968,7 +1021,7 @@ elo_game_results %>%
 
 ```
 
-Similarly, log loss by week of each season. The current Elo approach tends to be weaker at the beginning of each season - more on this in a bit.
+Similarly, log loss by the week of each season.
 
 ```{r log loss by week}
 
@@ -978,9 +1031,9 @@ elo_game_results %>%
         mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
                                      TRUE ~ 'no'),
                                   levels = c("no", "yes"))) %>%
-        group_by(WEEK) %>%
+        group_by(SEASON, WEEK) %>%
         mutate(games = n_distinct(GAME_ID)) %>%
-        group_by(WEEK, games) %>%
+        group_by(SEASON, WEEK, games) %>%
         yardstick::mn_log_loss(truth = HOME_WIN,
                             estimate = HOME_PROB,
                             event_level = 'second') %>%
@@ -990,24 +1043,26 @@ elo_game_results %>%
                           mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                        TRUE ~'no'))) %>%
                           mutate(HOME_PROB = .6) %>%
-                          group_by(WEEK) %>%
+                          group_by(SEASON, WEEK) %>%
                           mutate(games = n_distinct(GAME_ID)) %>%
-                          group_by(WEEK, games) %>%
+                          group_by(SEASON, WEEK, games) %>%
                           yardstick::mn_log_loss(truth = HOME_WIN,
                             estimate = HOME_PROB,
                             event_level = 'second') %>%
                           mutate(Model = 'Home Win'),
                   )  %>%
         ggplot(., aes(x=WEEK,
+                      group = Model,
+                      color = Model,
+                      by = SEASON,
                       y=.estimate))+
-        geom_point(aes(color = Model,
-                       size = games))+
-        geom_line(aes(color = Model),
-                  lwd = 1,
+        geom_point(aes(size = games),
+                   alpha = 0.5)+
+        geom_smooth(
                   stat = 'smooth',
                   method = 'loess',
-                  formula = 'y ~ x',
-                  span = 0.2)+
+                  se=F,
+                  formula = 'y ~ x')+
         theme_phil()+
         theme(legend.title = element_text())+
         guides(size = guide_legend(title = 'Number of Games',
@@ -1046,7 +1101,7 @@ elo_game_results %>%
 
 ```
 
-The relationship changes over the years, as the initial few seasons are being used to learn the Elo scores, but once we have a few seasons worth of data the partial effect of a point change in Elo differential on the score differential seems to be around .04.
+The relationship changes over the years, as the initial few seasons are being used to learn the Elo scores, but once we have a few seasons worth of data the partial effect of a point change in Elo differential on the score differential seems to be around .05 - this means tangibly that a 20 point lead in Elo is worth about a point on the spread; a 200 point lead is worth about 10 points.
 
 ```{r predicted margin}
 
@@ -1084,7 +1139,7 @@ foo %>%
         coord_cartesian(ylim = c(0, NA))+
         geom_hline(yintercept = 0,
                    linetype = 'dashed')+
-        geom_hline(yintercept = 0.04,
+        geom_hline(yintercept = 0.05,
                    linetype = 'dotted',
                    color ='grey60')
 
@@ -1116,11 +1171,11 @@ foo %>%
 
 ```
 
-We can simulate the point differential and compare it to the actual. I'll look at the 1980 season, week by week to see simulated vs actual.
+We can simulate the point differential and compare it to the actual. I'll look at the 1980 season, week by week to see the simulated result vs actual.
 
-```{r simulte and compare}
+```{r simulate and compare point differential}
 
-set.seed(1999)
+set.seed(2)
 foo %>% 
         filter(SEASON == 1980) %>%
         mutate(sim = map(lm, simulate)) %>% 
@@ -1160,24 +1215,16 @@ I'll save the Elo ratings computed with these settings so we can see how they co
 
 ```{r save v1 results}
 
-elo_game_results_v1 = elo_game_results %>%
-        mutate(K = k,
-               V = v,
-               Reversion = F)
-
-team_elo_ratings_v1 = team_elo_ratings %>%
-        mutate(K = k,
-               V = v,
-               Reversion = F)
+elo_ratings_returned_v1 = elo_ratings_returned
 
 rm(team_elo_ratings,
-   elo_game_results)
+   elo_game_results,
+   elo_ratings_returned)
 
 ```
 
 
-
-## Initial Settings with Mean Reversion
+## Initial Settings + Mean Reversion: 1970-1990
 
 As it's constructed so far, the Elo ratings for a team in one season pick up right from where they left off in the previous season. This is particularly an issue in the world college football, given that players graduate and turnover in rosters year over year is high. We shouldn't expect, in other words, a team at the beginning of its 1980 season to be the exact same as it ended its 1979 season.
 
@@ -1185,7 +1232,7 @@ Currently, our Elo ratings do not reset in anyway, and this means we ended up be
 
 ```{r show results by week by season}
 
-elo_game_results %>%
+elo_ratings_returned_v1$elo_game_results %>%
         mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                        TRUE ~'no'))) %>%
         mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
@@ -1222,57 +1269,49 @@ elo_game_results %>%
 
 ```
 
-We can handle this by regressing each team back to the mean at the start of each season. I'll apply a 1/3 weight back to 1500 for FBS teams and a 1/3 weight back to 1200 for non FBS teams between seasons.
+We can handle this by regressing each team back to the mean at the start of each season. I'll apply a 1/4 weight back to 1500 for FBS teams and a 1/4 weight back to 1200 for non FBS teams between seasons.
 
-```{r re run elo ratings with mean reversion}
+```{r now re run with mean reversion}
 
-# set the initial ratings for the first game for every team
-initial_team_elo_ratings = team_games %>%
-        arrange(SEASON, WEEK, GAME_ID) %>%
-        group_by(TEAM) %>%
-        filter(SEASON == min(SEASON)) %>%
-        filter(WEEK == min(WEEK)) %>%
-        ungroup() %>%
-        mutate(TYPE = "Pre_Elo") %>%
-        mutate(TEAM_ELO = case_when(!is.na(CONFERENCE) ~ 1500,
-                                    TRUE ~ 1200)) %>%
-        select(SEASON, GAME_ID, WEEK, TEAM, TYPE, TEAM_ELO, CONFERENCE)
-
-# make a copy, this will be the one we update
-team_elo_ratings = initial_team_elo_ratings
-
-# game ids
-game_ids = games_data %>%
-        arrange(SEASON, WEEK, GAME_ID) %>%
-        select(GAME_ID) %>%
-        unique() %>%
-        pull(GAME_ID)
-
-# specify parameters
-k = 25
-v = 400
-
-# run 
-elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
+calc_elo_ratings_with_reversion = function(input_game_matchups,
+                            input_team_games,
+                            input_initial_team_elo_ratings,
+                            k,
+                            v,
+                            reversion = 1/4) {
+        
+        # get game ids 
+        game_ids = input_game_matchups %>%
+                arrange(SEASON, WEEK, GAME_ID) %>%
+                select(GAME_ID) %>%
+                unique() %>%
+                pull(GAME_ID)
+        
+        # define
+        team_elo_ratings = input_initial_team_elo_ratings
+        
+        # now loop over games and get results
+        elo_game_results = foreach (i = 1:length(game_ids), 
+                                    .combine = bind_rows) %do% {
                                    
                 # now pull relevant info from the selected game
                 # get the home team
-                home_team = games_data %>%
+                home_team = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(HOME_TEAM)
                 
                 # get their conference
-                home_team_conference = games_data %>%
+                home_team_conference = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(HOME_CONFERENCE)
                 
                 # get the away team
-                away_team = games_data %>%
+                away_team = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(AWAY_TEAM)
                 
                 # get their conference
-                away_team_conference = games_data %>%
+                away_team_conference = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(AWAY_CONFERENCE)
                                    
@@ -1303,37 +1342,39 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 
                 ## now look at the outcome
                 # get the outcome
-                home_team_outcome = games_data %>% 
+                home_team_outcome = input_game_matchups %>% 
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(OUTCOME)
                 
                 # get the margin of victory for the winner
-                winner_margin = games_data %>%
+                winner_margin = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         mutate(WIN_MARGIN = abs(HOME_POINTS-AWAY_POINTS)) %>%
                         pull(WIN_MARGIN)
                 
                 ### update team rating based on pre game elo, outcome, and expected score
                 # home team update
-                home_team_post_elo = update_team_rating(home_team_pre_elo,
-                                                        home_team_outcome,
-                                                        home_expected_score,
-                                                        winner_margin,
+                home_team_post_elo = update_team_rating(team_rating = home_team_pre_elo,
+                                                        opponent_rating = away_team_pre_elo,
+                                                        observed_score = home_team_outcome,
+                                                        winner_mov = winner_margin,
+                                                        expected_score = home_expected_score,
                                                         k_factor = k)
                 
                 # away team update
-                away_team_post_elo = update_team_rating(away_team_pre_elo,
-                                                        1-home_team_outcome,
-                                                        away_expected_score,
-                                                        winner_margin,
+                away_team_post_elo = update_team_rating(team_rating = away_team_pre_elo,
+                                                        opponent_rating = home_team_pre_elo,
+                                                        observed_score = 1-home_team_outcome,
+                                                        winner_mov = winner_margin,
+                                                        expected_score = away_expected_score,
                                                         k_factor = k)
                                     
                 # output each team's post game elo rating
                 post_elo_ratings = 
-                        tibble(SEASON =  games_data %>%
+                        tibble(SEASON =  input_game_matchups %>%
                                        filter(GAME_ID == game_ids[i]) %>%
                                        pull(SEASON),
-                               WEEK =  games_data %>%
+                               WEEK =  input_game_matchups %>%
                                        filter(GAME_ID == game_ids[i]) %>%
                                        pull(WEEK),
                                GAME_ID = game_ids[i],
@@ -1346,23 +1387,23 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 new_pre_elo_ratings = 
                         bind_rows(
                                 # home team
-                                tibble(SEASON =  team_games %>%
+                                tibble(SEASON =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(SEASON),
-                                       WEEK =  team_games %>%
+                                       WEEK =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(WEEK),
                                        TEAM = home_team,
-                                       GAME_ID =  team_games %>%
+                                       GAME_ID =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(GAME_ID),
-                                       CONFERENCE =  team_games %>%
+                                       CONFERENCE =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
@@ -1370,30 +1411,29 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                                        TYPE = 'Pre_Elo',
                                        TEAM_ELO = home_team_post_elo),
                                 # away team
-                                tibble(SEASON =  team_games %>%
+                                tibble(SEASON =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(SEASON),
-                                       WEEK =  team_games %>%
+                                       WEEK =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(WEEK),
                                        TEAM = away_team,
-                                       GAME_ID =  team_games %>%
+                                       GAME_ID =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(GAME_ID),
-                                       CONFERENCE =  team_games %>%
+                                       CONFERENCE =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(CONFERENCE),
                                        TYPE = 'Pre_Elo',
                                        TEAM_ELO = away_team_post_elo))
-                
                 
                 # revert new pre elo meetings to mean if new season
                 new_pre_elo_ratings = new_pre_elo_ratings %>%
@@ -1402,10 +1442,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                                                               pull(SEASON) ~ T,
                                                       TRUE ~ F)) %>%
                         mutate(TEAM_ELO = case_when(
-                                (NEW_SEASON == T & is.na(CONFERENCE)) ~ (1/3)*1200 + (2/3)*TEAM_ELO,
-                                (NEW_SEASON == T & !is.na(CONFERENCE)) ~ (1/3)*1500 + (2/3)*TEAM_ELO,
+                                (NEW_SEASON == T & is.na(CONFERENCE)) ~ (reversion)*1200 + (1-reversion)*TEAM_ELO,
+                                (NEW_SEASON == T & !is.na(CONFERENCE)) ~ (reversion)*1500 + (1-reversion)*TEAM_ELO,
                                TRUE ~ TEAM_ELO))
-                                                              
+                
                  # add post game elo and new pre game elo back in
                 team_elo_ratings = 
                         team_elo_ratings %>%
@@ -1419,10 +1459,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                  
                  # return the outcome to be stored from the loop
                 game_result = tibble(
-                         SEASON =  games_data %>%
+                         SEASON =  input_game_matchups %>%
                                               filter(GAME_ID == game_ids[i]) %>%
                                               pull(SEASON),
-                        WEEK =  games_data %>%
+                        WEEK =  input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                        pull(WEEK),
                         GAME_ID = game_ids[i],
@@ -1430,10 +1470,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                         AWAY_TEAM = away_team,
                         HOME_CONFERENCE = home_team_conference,
                         AWAY_CONFERENCE = away_team_conference,
-                        HOME_POINTS = games_data %>%
+                        HOME_POINTS = input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                 pull(HOME_POINTS),
-                        AWAY_POINTS = games_data %>%
+                        AWAY_POINTS = input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                 pull(AWAY_POINTS),
                         HOME_PROB = home_expected_score,
@@ -1448,11 +1488,46 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 
                 game_result
 
+                                    }
+        
+        
+        # return 
+        out = list(
+                "elo_game_results" =  elo_game_results,
+                "elo_team_ratings" = team_elo_ratings %>%
+                        mutate(K = k,
+                               V = v))
+        
+        # return
+        return(out)
+        
 }
 
 ```
 
+We'll now run this to see how it does.
+
+```{r run with mean reversion}
+
+elo_ratings_returned = calc_elo_ratings_with_reversion(input_game_matchups = games_data,
+                                        input_team_games = team_games,
+                                        input_initial_team_elo_ratings = initial_team_elo_ratings,
+                                        k=25,
+                                        v = 400,
+                                        reversion = 1/4)
+
+```
+
+```{r grab the results of v2}
+
+team_elo_ratings = elo_ratings_returned$elo_team_ratings
+elo_game_results = elo_ratings_returned$elo_game_results
+```
+
+
 ### SEC
+
+Let's look again at SEC teams over this time period - we should see them tighen up at the beginning of each season.
 
 ```{r now plot SEC with mena reversion}
 
@@ -1530,7 +1605,7 @@ elo_game_results %>%
                     event_level = 'second') %>%
         mutate(Model = 'Elo Mean Reversion') %>%
         bind_rows(
-                elo_game_results_v1 %>%
+                elo_ratings_returned_v1$elo_game_results %>%
                         mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                        TRUE ~'no'))) %>%
         group_by(SEASON) %>%
@@ -1564,7 +1639,7 @@ elo_game_results %>%
 
 ```
 
-Looking at the results week by week, we see a slight gain to the early weeks in the season.
+Hmmm. We end up with pretty similar results overall.
 
 ```{r show results by week by season with updated version}
 
@@ -1582,7 +1657,7 @@ elo_game_results %>%
                             event_level = 'second') %>%
         mutate(Model = 'Elo Mean Reversion') %>%
         bind_rows(.,
-                elo_game_results_v1 %>%
+                elo_ratings_returned_v1$elo_game_results %>%
                 mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                                TRUE ~'no'))) %>%
                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
@@ -1623,22 +1698,15 @@ elo_game_results %>%
 
 ```{r save v2}
 
-elo_game_results_v2 = elo_game_results %>%
-        mutate(K = k,
-               V = v,
-               Reversion = T)
-
-team_elo_ratings_v2 = team_elo_ratings %>%
-        mutate(K = k,
-               V = v,
-               Reversion = T)
+elo_ratings_returned_v2 = elo_ratings_returned
 
 rm(team_elo_ratings,
-   elo_game_results)
+   elo_game_results,
+   elo_ratings_returned)
 
 ```
 
-### Home Team Advantage
+## Initial Settings + Mean Reversion + Home Team Advantage: 1970-1990
 
 I've seen other Elo rating systems explicitly add points to teams that are at home as a means of accounting for home field advantage. Right now, I'm not doing that, so we should expect to see the home team outperform their Elo rating. Is that the case? I'll look at the performance of the predictions from each of the models so far.
 
@@ -1653,7 +1721,7 @@ class_metrics = metric_set(yardstick::precision,
                            yardstick::npv,
                            yardstick::ppv)
 
-elo_game_results_v1 %>%
+elo_ratings_returned_v1$elo_game_results %>%
         select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME) %>%
         mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                                TRUE ~'no'))) %>%
@@ -1662,7 +1730,7 @@ elo_game_results_v1 %>%
                                           levels = c("no", "yes"))) %>%
         yardstick::conf_mat(HOME_WIN, HOME_PRED, dnn = c("Home Pred", "Home Win"))
 
-elo_game_results_v2 %>%
+elo_ratings_returned_v2$elo_game_results %>%
         select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME) %>%
         mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                                TRUE ~'no'))) %>%
@@ -1674,7 +1742,7 @@ elo_game_results_v2 %>%
 
 # bind together
 bind_rows(
-elo_game_results_v1 %>%
+elo_ratings_returned_v1$elo_game_results %>%
         select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
         mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                                TRUE ~'no'))) %>%
@@ -1682,7 +1750,7 @@ elo_game_results_v1 %>%
                                              TRUE ~ 'no'),
                                           levels = c("no", "yes"))) %>%
         mutate(Model = 'Elo'),
-elo_game_results_v2 %>%
+elo_ratings_returned_v2$elo_game_results%>%
         select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
         mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
                                                TRUE ~'no'))) %>%
@@ -1699,77 +1767,115 @@ elo_game_results_v2 %>%
 
 ```
 
-The Elo ratings with mean reversion at the beginning of each season are generally better across the board, but both versions tend to do better when predicting that the home team will win (PPV). When the models predict that the home team will lose, they don't do as well (NPV). Home teams win slightly more than we would expect.
+The Elo ratings with mean reversion are basically the same overall, though both versions tend to do better when predicting that the home team will win (PPV). When the models predict that the home team will lose, they don't do as well (NPV). Home teams win slightly more than we would expect.
 
-I'll add a temporary 50 point bump for the home team, as this roughly maps to a 5% increase in the probabiltiy of winning. I won't add any bonus for games played at neutral sites. I'll now re run making this amendment.
+```{r look at probs for home vs away along with classification}
 
-```{r remove v2}
+elo_ratings_returned_v2$elo_game_results%>%
+        select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        mutate(Model = 'Elo Mean Reversion') %>%
+        ggplot(., aes(x=HOME_PROB,
+                      fill = HOME_WIN))+
+        geom_histogram(bins = 100)+
+        facet_wrap(HOME_WIN + Model ~.,
+                   ncol = 1)+
+        theme_phil()+
+        theme(legend.title = element_text())
 
-rm(elo_game_results,
-   team_elo_ratings)
+elo_ratings_returned_v2$elo_game_results %>%
+        select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        mutate(Model = 'Elo Mean Reversion') %>%
+        group_by(HOME_WIN) %>%
+        count(HOME_PRED) %>%
+        mutate(prop = n / sum(n)) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2)
 
 ```
 
+I'll add a 25 point bump to the Elo score for the home team, as this roughly maps to about a 3% increase in the probability of winning. I won't add any bonus for games played at neutral sites. I'll now re run making this home team adjustment.
 
-```{r run v3}
+```{r amend functions to include home team adjustment}
 
-# set the initial ratings for the first game for every team
-initial_team_elo_ratings = team_games %>%
-        arrange(SEASON, WEEK, GAME_ID) %>%
-        group_by(TEAM) %>%
-        filter(SEASON == min(SEASON)) %>%
-        filter(WEEK == min(WEEK)) %>%
-        ungroup() %>%
-        mutate(TYPE = "Pre_Elo") %>%
-        mutate(TEAM_ELO = case_when(!is.na(CONFERENCE) ~ 1500,
-                                    TRUE ~ 1200)) %>%
-        select(SEASON, GAME_ID, WEEK, TEAM, TYPE, TEAM_ELO, CONFERENCE)
+update_team_rating_adjusted <- function(team_rating,
+                               winner_elo_diff,
+                               winner_mov,
+                               observed_score,
+                               expected_score,
+                               k_factor = 10) {
+        
+        if (observed_score == 1 | observed_score ==0) {
+                mov_multi = log(winner_mov+1) * (2.2 / (((winner_elo_diff)*0.001) + 2.2))
+        } else {
+                mov_multi = 2.2*log(2)
+        }
+        
+        # multiplier for margin of victory
 
-# make a copy, this will be the one we update
-team_elo_ratings = initial_team_elo_ratings
+         # now compute updated rating taking into account initial rating and mov
+         updated_rating = 
+                 team_rating + 
+                 (mov_multi *
+                          k_factor * 
+                          (observed_score - expected_score))
+         
+         return(updated_rating)
+         
+}
 
-# game ids
-game_ids = games_data %>%
-        arrange(SEASON, WEEK, GAME_ID) %>%
-        select(GAME_ID) %>%
-        unique() %>%
-        pull(GAME_ID)
 
-# specify parameters
-k = 25
-v = 400
-
-# run 
-elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
+calc_elo_ratings_with_reversion_home_adjust = function(input_game_matchups,
+                            input_team_games,
+                            input_initial_team_elo_ratings,
+                            k,
+                            v,
+                            reversion = 1/4,
+                            home_adjust = 40) {
+        
+        # get game ids 
+        game_ids = input_game_matchups %>%
+                arrange(SEASON, WEEK, GAME_ID) %>%
+                select(GAME_ID) %>%
+                unique() %>%
+                pull(GAME_ID)
+        
+        # define
+        team_elo_ratings = input_initial_team_elo_ratings
+        
+        # now loop over games and get results
+        elo_game_results = foreach (i = 1:length(game_ids), 
+                                    .combine = bind_rows) %do% {
                                    
                 # now pull relevant info from the selected game
                 # get the home team
-                home_team = games_data %>%
+                home_team = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(HOME_TEAM)
                 
                 # get their conference
-                home_team_conference = games_data %>%
+                home_team_conference = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(HOME_CONFERENCE)
                 
                 # get the away team
-                away_team = games_data %>%
+                away_team = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(AWAY_TEAM)
                 
                 # get their conference
-                away_team_conference = games_data %>%
+                away_team_conference = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(AWAY_CONFERENCE)
-                
-                # is the game at a non neutral site?
-                neutral_site = games_data %>%
-                        filter(GAME_ID == game_ids[i]) %>%
-                        pull(NEUTRAL_SITE)
-                
-                # if not played at a neutral site, then bump the home team's score up in setting the pre game score
-                if (neutral_site == F) {home_team_adjust = 50} else {home_team_adjust = 0}
                                    
                 # get home elo rating for that game
                 home_team_pre_elo = team_elo_ratings %>%
@@ -1780,57 +1886,70 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                                          
                 # get away elo rating
                 away_team_pre_elo = team_elo_ratings %>%
-                                           filter(GAME_ID == game_ids[i]) %>%
-                                           filter(TEAM == away_team) %>%
-                                           filter(TYPE == 'Pre_Elo') %>%
-                                           pull(TEAM_ELO)
+                        filter(GAME_ID == game_ids[i]) %>%
+                        filter(TEAM == away_team) %>%
+                        filter(TYPE == 'Pre_Elo') %>%
+                        pull(TEAM_ELO)
+                
+                ### add adjustment for home team if not at a neutral site
+                # is the game at a non neutral site?
+                neutral_site = games_data %>%
+                        filter(GAME_ID == game_ids[i]) %>%
+                        pull(NEUTRAL_SITE)
+                
+                if (neutral_site == F) {home_team_adjust = home_adjust} else {home_team_adjust = 0}
         
                 ### get each opponent's expected score based on their pre game elo rating
                 # home expected score
-                # add in a 50 point bump here fpr the home team
                 home_expected_score = get_expected_score(home_team_pre_elo+home_team_adjust,
                                                          away_team_pre_elo,
                                                          V = v)
                 
                 # away expected score
-                # add in a 50 point bump for the home team
                 away_expected_score = get_expected_score(away_team_pre_elo,
                                                          home_team_pre_elo+home_team_adjust, 
                                                          V = v)
                 
                 ## now look at the outcome
                 # get the outcome
-                home_team_outcome = games_data %>% 
+                home_team_outcome = input_game_matchups %>% 
                         filter(GAME_ID == game_ids[i]) %>%
                         pull(OUTCOME)
                 
                 # get the margin of victory for the winner
-                winner_margin = games_data %>%
+                winner_margin = input_game_matchups %>%
                         filter(GAME_ID == game_ids[i]) %>%
                         mutate(WIN_MARGIN = abs(HOME_POINTS-AWAY_POINTS)) %>%
                         pull(WIN_MARGIN)
                 
+                # get the winner elo margin
+                if (home_team_outcome == 1) {winner_elo_diff = (home_team_pre_elo + home_team_adjust) - away_team_pre_elo}
+                else if (home_team_outcome == 0) {winner_elo_diff = away_team_pre_elo - (home_team_pre_elo + home_team_adjust)}
+                else if (home_team_outcome == 0.5) {winner_elo_diff = 0}
+                
                 ### update team rating based on pre game elo, outcome, and expected score
                 # home team update
-                home_team_post_elo = update_team_rating(home_team_pre_elo,
-                                                        home_team_outcome,
-                                                        home_expected_score,
-                                                        winner_margin,
-                                                        k_factor = k)
+                home_team_post_elo = update_team_rating_adjusted(team_rating = home_team_pre_elo,
+                                                                 winner_elo_diff = winner_elo_diff,
+                                                                 winner_mov = winner_margin,
+                                                                 observed_score = home_team_outcome,
+                                                                 expected_score = home_expected_score,
+                                                                 k_factor = k)
                 
                 # away team update
-                away_team_post_elo = update_team_rating(away_team_pre_elo,
-                                                        1-home_team_outcome,
-                                                        away_expected_score,
-                                                        winner_margin,
+                away_team_post_elo = update_team_rating_adjusted(team_rating = away_team_pre_elo,
+                                                        winner_elo_diff = winner_elo_diff,
+                                                        winner_mov = winner_margin,
+                                                        observed_score = 1-home_team_outcome,
+                                                        expected_score = away_expected_score,
                                                         k_factor = k)
                                     
                 # output each team's post game elo rating
                 post_elo_ratings = 
-                        tibble(SEASON =  games_data %>%
+                        tibble(SEASON =  input_game_matchups %>%
                                        filter(GAME_ID == game_ids[i]) %>%
                                        pull(SEASON),
-                               WEEK =  games_data %>%
+                               WEEK =  input_game_matchups %>%
                                        filter(GAME_ID == game_ids[i]) %>%
                                        pull(WEEK),
                                GAME_ID = game_ids[i],
@@ -1843,23 +1962,23 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                 new_pre_elo_ratings = 
                         bind_rows(
                                 # home team
-                                tibble(SEASON =  team_games %>%
+                                tibble(SEASON =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(SEASON),
-                                       WEEK =  team_games %>%
+                                       WEEK =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(WEEK),
                                        TEAM = home_team,
-                                       GAME_ID =  team_games %>%
+                                       GAME_ID =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(GAME_ID),
-                                       CONFERENCE =  team_games %>%
+                                       CONFERENCE =  input_team_games %>%
                                                filter(TEAM == home_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
@@ -1867,30 +1986,29 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                                        TYPE = 'Pre_Elo',
                                        TEAM_ELO = home_team_post_elo),
                                 # away team
-                                tibble(SEASON =  team_games %>%
+                                tibble(SEASON =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(SEASON),
-                                       WEEK =  team_games %>%
+                                       WEEK =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(WEEK),
                                        TEAM = away_team,
-                                       GAME_ID =  team_games %>%
+                                       GAME_ID =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(GAME_ID),
-                                       CONFERENCE =  team_games %>%
+                                       CONFERENCE =  input_team_games %>%
                                                filter(TEAM == away_team) %>%
                                                mutate(CURRENT = GAME_ID == game_ids[i]) %>%
                                                filter(lag(CURRENT, 1)==T) %>%
                                                pull(CONFERENCE),
                                        TYPE = 'Pre_Elo',
                                        TEAM_ELO = away_team_post_elo))
-                
                 
                 # revert new pre elo meetings to mean if new season
                 new_pre_elo_ratings = new_pre_elo_ratings %>%
@@ -1899,10 +2017,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                                                               pull(SEASON) ~ T,
                                                       TRUE ~ F)) %>%
                         mutate(TEAM_ELO = case_when(
-                                (NEW_SEASON == T & is.na(CONFERENCE)) ~ (1/3)*1200 + (2/3)*TEAM_ELO,
-                                (NEW_SEASON == T & !is.na(CONFERENCE)) ~ (1/3)*1500 + (2/3)*TEAM_ELO,
+                                (NEW_SEASON == T & is.na(CONFERENCE)) ~ (reversion)*1200 + (1-reversion)*TEAM_ELO,
+                                (NEW_SEASON == T & !is.na(CONFERENCE)) ~ (reversion)*1500 + (1-reversion)*TEAM_ELO,
                                TRUE ~ TEAM_ELO))
-                                                              
+                
                  # add post game elo and new pre game elo back in
                 team_elo_ratings = 
                         team_elo_ratings %>%
@@ -1916,10 +2034,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                  
                  # return the outcome to be stored from the loop
                 game_result = tibble(
-                         SEASON =  games_data %>%
+                         SEASON =  input_game_matchups %>%
                                               filter(GAME_ID == game_ids[i]) %>%
                                               pull(SEASON),
-                        WEEK =  games_data %>%
+                        WEEK =  input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                        pull(WEEK),
                         GAME_ID = game_ids[i],
@@ -1927,10 +2045,10 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                         AWAY_TEAM = away_team,
                         HOME_CONFERENCE = home_team_conference,
                         AWAY_CONFERENCE = away_team_conference,
-                        HOME_POINTS = games_data %>%
+                        HOME_POINTS = input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                 pull(HOME_POINTS),
-                        AWAY_POINTS = games_data %>%
+                        AWAY_POINTS = input_game_matchups %>%
                                 filter(GAME_ID == game_ids[i]) %>%
                                 pull(AWAY_POINTS),
                         HOME_PROB = home_expected_score,
@@ -1940,20 +2058,400 @@ elo_game_results = foreach (i = 1:length(game_ids), .combine = bind_rows) %do% {
                         AWAY_PRE_ELO = away_team_pre_elo,
                         AWAY_POST_ELO = away_team_post_elo,
                         HOME_OUTCOME = home_team_outcome,
+                        HOME_PRE_ELO_ADJUST = home_adjust,
                         NEUTRAL_SITE = neutral_site) %>%
                         mutate(K = k,
                                V = v)
                 
                 game_result
 
+                                    }
+        
+        
+        # return 
+        out = list(
+                "elo_game_results" =  elo_game_results,
+                "elo_team_ratings" = team_elo_ratings %>%
+                        mutate(K = k,
+                               V = v))
+        
+        # return
+        return(out)
+        
 }
 
 ```
 
+```{r run with home team adjustment}
+
+elo_ratings_returned = calc_elo_ratings_with_reversion_home_adjust(input_game_matchups = games_data,
+                                        input_team_games = team_games,
+                                        input_initial_team_elo_ratings = initial_team_elo_ratings,
+                                        k=25,
+                                        v = 400,
+                                        reversion = 1/4,
+                                        home_adjust = 25)
 
 ```
 
 
-Okay, so at this point we have everything we need to try out simulating an entire season.
+```{r grab the results from v3}
+
+team_elo_ratings = elo_ratings_returned$elo_team_ratings
+elo_game_results = elo_ratings_returned$elo_game_results
+
+```
+
+Still using the SEC as my sniff test.
+
+```{r sec v3}
+
+max_game = team_elo_ratings %>%
+        select(SEASON, GAME_ID, WEEK, TEAM, TYPE, TEAM_ELO) %>%
+        spread(TYPE, TEAM_ELO) %>%
+        select(SEASON, GAME_ID, WEEK, TEAM, Pre_Elo, Post_Elo) %>%
+        group_by(TEAM, SEASON) %>%
+        mutate(GAME = row_number()) %>% 
+        ungroup() %>%
+        summarize(max_game = max(GAME)) %>%
+        pull(max_game)
+
+team_elo_ratings %>%
+        select(SEASON, GAME_ID, WEEK, TEAM, TYPE, TEAM_ELO) %>%
+        spread(TYPE, TEAM_ELO) %>%
+        select(SEASON, GAME_ID, WEEK, TEAM, Pre_Elo, Post_Elo) %>%
+        group_by(TEAM, SEASON) %>%
+        mutate(GAME = row_number()) %>%
+        left_join(., team_games %>%
+                          select(SEASON, GAME_ID, WEEK, TEAM, CONFERENCE),
+                  by = c("SEASON", "GAME_ID", "WEEK", "TEAM")) %>%
+        filter(CONFERENCE == 'SEC') %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(LAST_GAME = GAME == max(GAME)) %>%
+        mutate(TEAM_LABEL = case_when(LAST_GAME == T ~ TEAM)) %>%
+        ggplot(., aes(x=GAME,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y=Post_Elo))+
+        geom_text_repel(
+                fontface = "bold",
+                size = 3,
+                direction = "y",
+                hjust = 0,
+                segment.size = .7,
+                segment.alpha = .5,
+                segment.linetype = "dotted",
+                box.padding = .4,
+                segment.curvature = -0.1,
+                segment.ncp = 3,
+                segment.angle = 20
+        ) +
+       # geom_point()+
+        geom_line(lwd = 1.1,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        facet_wrap(CONFERENCE + SEASON~.,
+                   ncol = 6)+
+        theme_phil()+
+        guides(label = "none",
+               color = "none")+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, max_game+1))
+
+```
+
+And now compare to the previous versions.
+
+```{r compare to previous v1 and v2}
+
+elo_game_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, games) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        mutate(Model = 'Elo Mean Reversion and Home Advantage') %>%
+        bind_rows(
+                elo_ratings_returned_v1$elo_game_results %>%
+                        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                        group_by(SEASON) %>%
+                        mutate(games = n_distinct(GAME_ID)) %>%
+                        group_by(SEASON, games) %>%
+                        mn_log_loss(truth = HOME_WIN,
+                                    estimate = HOME_PROB,
+                                    event_level = 'second') %>%
+                        mutate(Model = 'Elo')) %>%
+        bind_rows(
+            elo_ratings_returned_v2$elo_game_results %>%
+                        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                        group_by(SEASON) %>%
+                        mutate(games = n_distinct(GAME_ID)) %>%
+                        group_by(SEASON, games) %>%
+                        mn_log_loss(truth = HOME_WIN,
+                                    estimate = HOME_PROB,
+                                    event_level = 'second') %>%
+                        mutate(Model = 'Elo Mean Reversion')) %>%
+        ggplot(., aes(x=SEASON,
+                      color = Model,
+                      y=.estimate,
+                      size = games))+
+        geom_point()+
+        geom_line(lwd = 1,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.2)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("log-loss")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "navy",
+                                      "blue"))+
+        ggtitle("Average Log-Loss by Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+```
+
+I'll look at the overall classification results for each as well.
+
+```{r look at results}
+
+elo_ratings_returned$elo_game_results %>%
+        select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        yardstick::conf_mat(HOME_WIN,
+                            HOME_PRED,
+                            dnn = c("Home_Pred",
+                                    "Home_Win"))
+
+# bind together
+bind_rows(
+        elo_ratings_returned$elo_game_results %>%
+        select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        mutate(Model = 'Elo Mean Reversion and Home Advantage'),
+        elo_ratings_returned_v1$elo_game_results %>%
+                select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
+                mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                mutate(Model = 'Elo'),
+        elo_ratings_returned_v2$elo_game_results%>%
+                select(SEASON, WEEK, GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_PROB, AWAY_PROB, HOME_OUTCOME, K, V) %>%
+                mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 1 ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                mutate(Model = 'Elo Mean Reversion')) %>%
+        group_by(Model, K, V) %>%
+        class_metrics(truth = HOME_WIN,
+                      estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+```{r call this v3}
+
+elo_ratings_returned_v3 = elo_ratings_returned
+
+rm(elo_ratings_returned,
+   team_elo_ratings,
+   elo_game_results)
+
+```
+
+
+## Simulating Seasons: 1990-1995
+
+Okay, so at this point we have everything we need to try out simulating entire seasons. In order to simulate a season, we just need to know where the team's Elo rating starts at.
+
+```{r reset team games and games data}
+
+# get universe of games
+games_data = games_data_raw %>%
+        filter(SEASON >=1990 & SEASON <=1995) %>%
+        select(GAME_ID, SEASON, WEEK, VENUE, HOME_TEAM, AWAY_TEAM, HOME_CONFERENCE, AWAY_CONFERENCE, HOME_POINTS, AWAY_POINTS, NEUTRAL_SITE) %>%
+        mutate(OUTCOME = case_when(HOME_POINTS > AWAY_POINTS ~ 1,
+                                   HOME_POINTS == AWAY_POINTS ~ 0.5,
+                                   HOME_POINTS < AWAY_POINTS ~ 0)) %>%
+        arrange(SEASON, WEEK, GAME_ID)
+
+# now get this at the team level
+team_games = games_data %>%
+        select(SEASON, GAME_ID, WEEK, HOME_TEAM, HOME_CONFERENCE) %>%
+        rename(TEAM = HOME_TEAM,
+               CONFERENCE = HOME_CONFERENCE) %>%
+        bind_rows(., games_data %>%
+                          select(SEASON, GAME_ID, WEEK, AWAY_TEAM, AWAY_CONFERENCE) %>%
+                          rename(TEAM = AWAY_TEAM,
+                                 CONFERENCE = AWAY_CONFERENCE)) %>%
+        arrange(SEASON, WEEK, GAME_ID)
+
+# set as initial ratings
+initial_team_elo_ratings = team_games %>%
+        arrange(SEASON, WEEK, GAME_ID) %>%
+        group_by(TEAM) %>%
+        filter(SEASON == min(SEASON)) %>%
+        filter(WEEK == min(WEEK)) %>%
+        ungroup() %>%
+        mutate(TYPE = "Pre_Elo") %>%
+        left_join(.,
+                  elo_ratings_returned_v3$elo_team_ratings %>%
+                        filter(TYPE == 'Post_Elo') %>%
+                        select(SEASON, GAME_ID, WEEK, TEAM, CONFERENCE, TYPE, TEAM_ELO) %>%
+                        group_by(TEAM) %>%
+                        filter(SEASON == max(SEASON)) %>%
+                        filter(WEEK == max(WEEK)) %>%
+                        spread(TYPE, TEAM_ELO) %>%
+                        select(TEAM, CONFERENCE, Post_Elo) %>%
+                        mutate(TEAM_ELO = case_when(!is.na(CONFERENCE) ~ (1/4)*1500 + (3/4*Post_Elo),
+                                                   is.na(CONFERENCE) ~ (1/4)*1200 + (3/4*Post_Elo))) %>%
+                        mutate(TYPE = 'Pre_Elo') %>%
+                        arrange(desc(TEAM_ELO)) %>%
+                        ungroup() %>%
+                        select(TEAM, CONFERENCE, TYPE, TEAM_ELO),
+                  by = c("TEAM", "CONFERENCE", "TYPE")
+                  ) %>%
+        mutate(TEAM_ELO = case_when(is.na(TEAM_ELO) & is.na(CONFERENCE) ~ 1200,
+                                    is.na(TEAM_ELO) & !is.na(CONFERENCE) ~ 1500,
+                                    TRUE ~ TEAM_ELO))
+        
+```
+
+To simulate a season, I simulate each game based on the pre game Elo scores for each team. Say that Team A has a 67% chance of winning based on the two teams Elo scores. In that case, I can simulate the game by pulling from a Bernoulli distribution where p =.67. Based on that result, I then compute the outcome and update the ratings. I repeat this process N times for every game, meaning that the Elo ratings are themselves updated on the basis of each simulation.
+
+The snag with this approach is that I'm currently using a margin of victory multiplier to update ratings after each game. This would require not only simulating the winner, but also simulating the point margin. In simulating a season, I could simply ignore the margin of victory multiplier, or always set it equal to some specific margin of victory. Or, I could simulate the point differential directly and then use that to determine the outcome. This is where the point differentials I computed earlier come in.
+
+```{r look at the point differential model, include=F}
+
+library(broom.mixed)
+
+point_diff_v3 = elo_ratings_returned_v3$elo_game_results %>%
+        mutate(HOME_PRE_ELO = case_when(NEUTRAL_SITE == F ~ HOME_PRE_ELO + HOME_PRE_ELO_ADJUST,
+                                        TRUE ~ HOME_PRE_ELO)) %>%
+        mutate(HOME_PRE_ELO_DIFF = HOME_PRE_ELO - AWAY_PRE_ELO) %>%
+        mutate(HOME_POINT_DIFF = HOME_POINTS - AWAY_POINTS) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ stan_glm(HOME_POINT_DIFF ~ HOME_PRE_ELO_DIFF,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se="robust", conf.int=T)) %>%
+        mutate(preds = map(lm, predict)) %>%
+        mutate(sims = map(lm, posterior_predict, draws=1) %>% tidy_draws) %>%
+        mutate(glanced = map(lm, glance))
+
+```
+
+Looking at the results of a simple linear regression of the home team's point differential (home points - away points) on the home team's pre game elo differential, we see that a one point increase in the home team's Elo increases its expected point differential by 0.06. This means a 100 point difference in ELo is equivalent to a 6 point differential. 
+
+```{r look at point differential model from these seasons}
+
+# look at the model
+point_diff_v3 %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+
+# look at the results
+point_diff_v3 %>%
+        select(glanced) %>%
+        unnest()
+        
+# look at the model
+point_diff_v3 %>%
+        select(data, preds) %>%
+        unnest() %>%
+        mutate(preds = round(preds, 0)) %>%
+        ggplot(., aes(x=preds,
+                      y=HOME_POINT_DIFF))+
+        geom_point()+
+        theme_phil()+
+        xlab("Predicted Home Point Differential")+
+        ylab("Actual Home Point Differential")+
+        theme_phil()+
+        geom_hline(yintercept=0,
+                   linetype = 'dashed')+
+        geom_vline(xintercept =0,
+                   linetype = 'dashed')+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x',
+                    color = 'blue')+
+        stat_cor(
+                aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+                p.accuracy = 0.01,
+                color = 'blue')
+
+```
+
+
+This simple bivariate model explains about 36% of the variation in the home point differential, with a residual standard deviation of 16, so we shouldn't expect it to be dead on the money in predicting the spread. However, we can simulate from this model to get the simulated margin of victory for games, which we can then use in simulating games alogn with their margin of victory.
+
+```{r get initial ratings for next run of seasons}
+
+set.seed(2)
+point_diff_v3 %>% 
+        select(data, sims) %>%
+        unnest()
+        mutate(HOME_SCORE_DIFF_char = case_when(HOME_SCORE_DIFF > 0 ~ paste("+", HOME_SCORE_DIFF, sep=""),
+                                    HOME_SCORE_DIFF == 0 ~ paste("Tie"),
+                                    HOME_SCORE_DIFF < 0 ~ paste(HOME_SCORE_DIFF, sep=""))) %>%
+        mutate(sim_char = case_when(sim_1 > 0 ~ paste("+", sim_1, sep=""),
+                                    sim_1 == 0 ~ paste("Tie"),
+                                    sim_1 < 0 ~ paste(sim_1, sep="")),
+               GAME = paste(HOME_TEAM, " ", AWAY_TEAM, "\n",
+                            "Actual.:", HOME_TEAM,  HOME_SCORE_DIFF_char, "\n",
+                            "Sim:", HOME_TEAM, sim_char, sep="")) %>%
+        mutate(CORRECT = case_when(sim_1 >0 & HOME_SCORE_DIFF >0 ~ 'yes',
+                                   sim_1 <0 & HOME_SCORE_DIFF <0 ~ 'yes',
+                                   TRUE ~ 'no')) %>%
+        ggplot(., aes(x=HOME_SCORE_DIFF,
+                      color = CORRECT,
+                      label = GAME,
+                      y=sim_1))+geom_point()+
+        geom_text(check_overlap=T, 
+                  vjust=-0.5, size=2)+
+        theme_phil()+
+        scale_color_manual(values = c("red", "blue"))+
+        facet_wrap(SEASON + WEEK~.,
+                   ncol = 4)+
+        geom_vline(xintercept =0,
+                   linetype = 'dotted')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dotted')
+
+
+```
+
+
+```{r }
+
+```
+
+
+
+
 
 I'm going to simulate the 
