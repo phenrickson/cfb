@@ -581,9 +581,9 @@ We use all of this historical data to learn the expected points from a given sit
 
 How do these various features like down, distance, yards to goal, and time remaining affect the probability of the next scoring event? We use a model to learn this relationship from historical plays. I'll now proceed to building the model which I'll use for the bulk of the analysis.
 
-I'll set up training, validation, and test sets based around the season. I'm mostly going to build the model using plays from the 2010 season onwards, as the data quality of the play by play data starts to get worse the further back we go, though I'll do some backtesting of the model on older seasons.
+I'll set up training, validation, and test sets based around the season. I'm mostly going to build the model using plays from the 2007 season onwards, as the data quality of the play by play data starts to get worse the further back we go, though I'll do some backtesting of the model on older seasons.
 
-I'm going to use the seasons of 2010-2018 as my main training set, building and evaluating the model using a leave-one-season out approach, akin to k-fold cross validation using seasons as the folds. I'll use the 2019-2020 seasons as a validation set, and leave 2021 as my test set which I won't look at till later on.
+I'm going to use the seasons of 2007-2018 as my main training set, building and evaluating the model using a leave-one-season out approach, akin to k-fold cross validation using seasons as the folds. I'll use the 2019-2020 seasons as a validation set, and leave 2021 as my test set which I won't look at till later on.
 
 ```{r set up training valid test splits, echo =T}
 
@@ -633,7 +633,7 @@ plays_full = plays_data_score_events %>%
 
 # training set
 plays_train = plays_full %>%
-        filter(SEASON >= 2010 & SEASON <2019)
+        filter(SEASON >= 2007 & SEASON <2019)
 
 # validation set
 plays_valid = plays_full %>%
@@ -1346,6 +1346,8 @@ scored_plays = predicted_plays %>%
 
 ## Game Results
 
+### Texas A&M vs Alabama, 2012
+
 I'll look at a few games, play by play, to get a sense of how this is looking. I'll pick one game completely at random, in no way influenced by my fandom: Texas A&M vs Alabama in 2012.
 
 What were the most impactful plays in this game in terms of expected points added? I'll look at the 15 plays in this game with the largest absolute change.
@@ -1414,7 +1416,81 @@ scored_plays %>%
 
 In this case, we can still use the expected points of the situation to give us a measure of how many points the play added. In the case of Christine Michael's 1 yard TD run, the points added are pretty low, as you'd expect teams to score from that situation. By comparison, AJ McCarron's 54 yard pass on 3rd and 6 in the 4th quarter had a much higher points added, as they were in a third down situation at the midfield and made a huge play. For this reason, what I'm calling Points Added has been dubbed by others as a measure of a team's offensive explosiveness. For most of my analyses I'm condensing Expected Points Added and points Added into one metric that I'm calling Predicted Points Added.
 
-What's cool is that we can do this (right now) for any play from any game from 2010-2020. For instance, we can look at a team and ask, what were its highest predicted points added plays in each season? This is Wisconsin's top plays for each year.
+### Texas A&M vs Alabama, 2013
+
+Continuing the theme of randomly selecting games, let's look at the A&M vs Bama game in the following year.
+
+```{r tamu vs bama 2013 top ppa}
+
+scored_plays %>%
+        filter(SEASON == 2013) %>%
+        filter(HOME == 'Texas A&M' & AWAY == 'Alabama') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, Points_Added) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(Points_Added))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ Points_Added > 0,
+           j = "Points_Added",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ Points_Added < 0,
+           j = "Points_Added",
+           color = 'red')
+
+```
+
+In terms of the most points added/lost on scoring plays, I probably would have expected the Evans 95 yard TD to rank at the top, but interestingly it's actually a pick six that Manziel threw on 2nd and 1 in Bama's territory.
+
+## Top Plays by Year
+
+What's cool is that we can do this type of analysis for any play from any game from 2007-2020. For instance, we can look at a team and ask, what were its highest predicted points added plays in each season? I'll look at a selection of teams: Texas A&M, Wisconsin, Notre Dame, and Ohio State.
+
+### Texas A&M
+
+```{r look at tamu game play by play}
+
+scored_plays %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Texas A&M') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+### Wisconsin
 
 ```{r look at a wisconsin game play by play}
 
@@ -1447,12 +1523,83 @@ scored_plays %>%
            j = "PPA",
            color = 'red')
 
+```
+
+
+### Ohio State
+
+```{r look at osu game play by play}
+
+scored_plays %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Ohio State') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
 
 ```
 
- What were the highest predicted points added plays (including scoring plays) from each season?
+```{r notre dame play by play}
 
-```{r look at a game from 2014}
+scored_plays %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Notre Dame') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+
+### All Teams
+
+What were the highest predicted points added plays (including scoring plays) from each season?
+
+```{r top ppa plays by season}
 
 scored_plays %>%
         select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
@@ -2159,7 +2306,7 @@ scored_plays %>%
         
 ```
 
-For a dominant team like Alabama, we should see their offensive efficiency be high and their defensive efficiency be high as well - the blue should almost always outstrip the red.
+For a dominant team like Alabama, under Saban we should see their offensive efficiency be high and their defensive efficiency be high as well - the blue should almost always be well above the red.
 
 ```{r look at alabama offense and defense by season by game, fig.height=8}
 
@@ -2251,7 +2398,7 @@ scored_plays %>%
 
 Evidently they were so good at stopping Tennesee in 2011 that it breaks my axis.
 
-For a mediocre team, like Kansas, we should see the opposite type of graph here.
+For a team like Kansas that has been mediocre for the last decade, we should see the opposite type of graph here (except for 2007!).
 
 ```{r look at kansas offense and defense by season by game, fig.height=8}
 
@@ -2427,7 +2574,7 @@ yearly_defense_epa_by_play = scored_plays %>%
         
 ```
 
-Putting this all together, I can rank a teams offense/defense by year and then sort to see where the top teams of all time tend to rank. Here are the top 50 teams using a composite score of both, including only offenses and defenses with at least 400 plays in a season.
+Putting this all together, I can rank a teams offense/defense by year and then sort to see where the top teams of all time tend to rank. Here are the top 50 teams using a composite score of both, including only offenses and defenses with at least 400 plays in a season. It's important to keep in mind that these are not adjusted by opponent quality.
 
 ```{r look at overall offense defense per team season}
 
@@ -2693,6 +2840,7 @@ yearly_teams_type = bind_rows(yearly_offense_epa_by_play,
         select(SEASON, TEAM, starts_with("OFFENSE_PPA"), starts_with("DEFENSE_PPA"), starts_with("OFFENSE_Plays"), starts_with("DEFENSE_Plays"))
 
 ```
+
 Filtering to teams with at least 200 such plays in a season, which teams had the most efficient passing offense in terms of predicted points added?
 
 ```{r pass efficiency by teams}
@@ -2777,6 +2925,8 @@ yearly_teams_type %>%
 
 ```
 
+## Ranking Teams by Overall Pass/Run Efficiency
+
 Putting this all together we can break down teams overall as before, only now explicitly looking at teams based on their pass and run offense/defense efficiency. Florida State 2013 still jumps to the top, evidently their passing defense that year was fantastic in addition to their passing offense. The picture is mostly unchanged from looking at just the overall numbers, but breaking it down can reveal which teams were more balanced while others were pass/run heavy.
 
 ```{r look at A&M by pass run efficiency}
@@ -2838,7 +2988,11 @@ yearly_teams_type %>%
 
 ```
 
-We can also look at individual teams year over year to see how their offense/defense/overall.
+## Examining Teams Year over Year
+
+We can also look at individual teams year over year to see how their offense/defense run/pass efficiency changed.
+
+### Oregon 
 
 For instance, Oregon was great in the early 2010s then had a few years in which they were down.
 
@@ -2867,6 +3021,8 @@ yearly_teams_type %>%
 
 ```
 
+### Florida State
+
 Florida State had that amazing year, but has really fallen back after Jimbo's bad year and eventual departure.
 
 ```{r look at teams florida state}
@@ -2894,6 +3050,7 @@ yearly_teams_type %>%
 
 ```
 
+### Wisconsin
 
 Wisconsin has generally been pretty good but not quite elite during this time period, people usually hound them for their passing game lately, how do they compare year over year?
 
@@ -2921,6 +3078,8 @@ yearly_teams_type %>%
            bg = overall_col_func) 
 
 ```
+
+### Iowa State
 
 What about a historically weaker team that has been on the rise lately? Iowa State?
 
@@ -2950,6 +3109,153 @@ yearly_teams_type %>%
 
 ```
 
+### Alabama
+
+Looking at Alabama's 2007 season earlier made me wonder how much we'll see Bama's teams change/rate over the seasons.
+
+```{r look at individual teams bama}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Alabama') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+### Ohio State
+
+I don't really know anything about Ohio State but I'll include them here.
+
+```{r look at individual teams ohio state}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Ohio State') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+### Notre Dame
+
+What has been Notre Dame's top team during this time period?
+
+```{r notre dame top team}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Notre Dame') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+### Texas Tech
+
+How has Texas Tech's pass efficiency rated over the years? I'm expecting them to have really strong passing offenses and terrible defenses.
+
+```{r look at individual teams texas tech}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Texas Tech') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+### Baylor
+
+How good was Baylor under RGIII? 
+
+```{r look at individual teams baylor}
+
+yearly_teams_type %>%
+        filter(TEAM == 'Baylor') %>%
+        # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+        #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+   #     filter(TEAM == 'Texas')  %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        head(25) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
+```
+
+### Texas A&M
+
 And of course the team I keep randomly selecting, Texas A&M.
 
 ```{r look at individual teams tamu}
@@ -2974,6 +3280,36 @@ yearly_teams_type %>%
            bg = ppa_col_func) %>%
                 bg(., j=c("Overall_PPA"),
            bg = overall_col_func) 
+
+```
+
+## Top Pass/Rush Offense/Defense Efficiency by Year
+
+Finally, I'll look at this by year.
+
+```{r look at by year}
+
+yearly_teams_type %>%
+        filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 &
+                  OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-contains("Plays")) %>%
+        mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>%
+        mutate(SEASON = as.character(SEASON)) %>%
+        group_by(SEASON) %>%
+        slice_max(., Overall_PPA,
+                  n=1) %>%
+     #   arrange(desc(Overall_PPA)) %>%
+        flextable() %>%  
+        autofit() %>%
+        bg(., j=c("OFFENSE_PPA_Pass", 
+                  "OFFENSE_PPA_Run",
+                  "DEFENSE_PPA_Pass",
+                  "DEFENSE_PPA_Run"),
+           bg = ppa_col_func) %>%
+                bg(., j=c("Overall_PPA"),
+           bg = overall_col_func) 
+
 
 ```
 
