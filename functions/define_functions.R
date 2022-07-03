@@ -1,5 +1,209 @@
 # define functions
 
+### functions for elo ratings
+# get expected score for two teams based on elo
+# input elo ratings and scaling factor V
+get_expected_score = function(team_rating, opponent_rating, V=400) {
+        
+        return(1 / (1 + 10^((opponent_rating - team_rating) / V)))
+        
+}
+
+dump("get_expected_score",
+     file = here::here("functions", "get_expected_score.R"))
+
+# calculate post game elo ratings
+# based on: 
+# pre game elo ratings
+# margin of victory
+# update factor k in calculating team rating
+# update scaling factor V in difference between team ratings
+get_new_elos = function(home_rating, 
+                        away_rating,
+                        home_margin,
+                        home_field_advantage,
+                        k,
+                        v) {
+        
+        # get observed home score
+        # if the home team wins, then home score = 1
+        # if the home team loses, then home score = 0
+        # in a tie, home score = 0.5
+        if (home_margin > 0) {home_score = 1} else
+                if (home_margin < 0) {home_score = 0} else
+                {home_score = 0.5}
+        
+        # get observed away score, 1-home
+        away_score = 1-home_score
+        
+        ## determine whether there is home field advantage
+        
+        ## get home and away expected scores
+        # get expected home score based on the pre game rating and home field advantage
+        home_expected_score = get_expected_score(home_rating + home_field_advantage,
+                                                 away_rating,
+                                                 V=v)
+        
+        
+        # get expected away score based on pre game rating
+        away_expected_score = get_expected_score(away_rating,
+                                                 home_rating + home_field_advantage,
+                                                 V=v)
+        
+        ## define margin of victory multiplier based on winner
+        if (home_margin > 0) {
+                mov_multi = log(abs(home_margin)+1) * (2.2 / (((home_rating + home_field_advantage - away_rating)*0.001) + 2.2))
+        } else if (home_margin <0) {
+                mov_multi = log(abs(home_margin)+1) * (2.2 / (((away_rating - home_rating + home_field_advantage)*0.001) + 2.2))
+        } else {
+                mov_multi = 2.2*log(2)
+        }
+        
+        ## update ratings
+        # update home rating
+        home_new_rating = home_rating + 
+                (mov_multi *
+                         k * 
+                         (home_score - home_expected_score))
+        
+        # update away rating
+        away_new_rating = away_rating + 
+                (mov_multi *
+                         k * 
+                         (away_score - away_expected_score))
+        
+        return(c(home_new_rating,
+                 away_new_rating,
+                 home_expected_score,
+                 away_expected_score))
+}
+
+dump("get_new_elos",
+     file = here::here("functions", "get_new_elos.R"))
+
+# function to loop over games and calculate elo ratings given selected parameters
+calc_elo_ratings = function(games,
+                            teams = list(),
+                            team_seasons = list(),
+                            home_field_advantage,
+                            reversion,
+                            k,
+                            v) {
+        
+        
+        # ### create an empty list for teams
+        # # this will store their current elo rating
+        # teams = list()
+        # team_seasons = list()
+        
+        # define an empty tibble to store the game outcomes
+        game_outcomes = tibble()
+        
+        # loop over games
+        for(i in 1:nrow(games)) {
+                
+                ### get the individual game 
+                game = games[i,]
+                
+                ### get pre game elo ratings
+                # look for team in teams list
+                # if not defined, set to 1500 for FBS teams and 1200 for non FBS
+                
+                # get home elo rating
+                if (game$HOME_TEAM %in% names(teams))
+                {home_rating = teams[[game$HOME_TEAM]]} else 
+                        if (!is.na(game$HOME_CONFERENCE)) {home_rating = 1500} else {home_rating = 1200}
+                
+                # get away elo rating
+                if (game$AWAY_TEAM %in% names(teams))
+                {away_rating = teams[[game$AWAY_TEAM]]} else 
+                        if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
+                
+                # check whether its a neutral site game to apply home field advantage adjustmnet
+                if (game$NEUTRAL_SITE==T) {home_field_advantage = 0} else 
+                        if (game$NEUTRAL_SITE==F) {home_field_advantage = 25}
+                
+                # check whether the team has already played in a season
+                # check whether the season of the game is the same season 
+                # as the current team season value
+                # if not, apply a mean reversion
+                
+                # set reversion amount
+                # home team
+                if (length(team_seasons[[game$HOME_TEAM]]) ==0) {team_seasons[[game$HOME_TEAM]] = game$SEASON} else
+                        if (game$SEASON == team_seasons[[game$HOME_TEAM]]) {home_rating = home_rating} else 
+                                if (
+                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                )
+                                {home_rating = ((reversion*1500)+ (1-reversion)*home_rating)} else
+                                        if (
+                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                        )
+                                        {home_rating = ((reversion*1200)+(1-reversion)*home_rating)}
+                
+                # away team
+                if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
+                        if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
+                                if (
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                )
+                                {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
+                                        if (
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                        )
+                                        {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
+                
+                ## get the score margin based on the ome team
+                home_margin = game$HOME_POINTS - game$AWAY_POINTS
+                
+                # get updated elo for both teams
+                new_elos = get_new_elos(home_rating,
+                                        away_rating,
+                                        home_margin,
+                                        home_field_advantage,
+                                        k,
+                                        v)
+                
+                # add pre game elo ratings to the selected game
+                game$HOME_PREGAME_ELO = home_rating
+                game$AWAY_PREGAME_ELO = away_rating
+                
+                # add pre game prob
+                game$HOME_PROB = new_elos[3]
+                game$AWAY_PROB = new_elos[4]
+                
+                # add post game elo ratings to the selected game
+                game$HOME_POSTGAME_ELO = new_elos[1]
+                game$AWAY_POSTGAME_ELO = new_elos[2]
+                
+                # update the list storing the current elo rating for each team
+                teams[[game$HOME_TEAM]] = new_elos[1]
+                teams[[game$AWAY_TEAM]] = new_elos[2]
+                
+                # upaate the list storing the current team season
+                team_seasons[[game$HOME_TEAM]] = game$SEASON
+                team_seasons[[game$AWAY_TEAM]] = game$SEASON
+                
+                # store 
+                game_outcomes = bind_rows(game_outcomes,
+                                          game)
+                
+                # log output
+                cat("\r", i, "of", nrow(games), "games completed");  flush.console()
+                
+        }
+        
+        return(list(
+                "game_outcomes" = game_outcomes,
+                "team_seasons" = team_seasons,
+                "teams" = teams)
+        )
+        
+}
+
+dump("calc_elo_ratings",
+     file = here::here("functions", "calc_elo_ratings.R"))
+
 
 # function for calculating expected points from .pred columns from the model
 # takes a df with these fiels as input and calculates the expected points
