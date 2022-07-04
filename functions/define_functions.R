@@ -88,7 +88,8 @@ calc_elo_ratings = function(games,
                             home_field_advantage,
                             reversion,
                             k,
-                            v) {
+                            v,
+                            verbose=T) {
         
         
         # ### create an empty list for teams
@@ -121,7 +122,7 @@ calc_elo_ratings = function(games,
                 
                 # check whether its a neutral site game to apply home field advantage adjustmnet
                 if (game$NEUTRAL_SITE==T) {home_field_advantage = 0} else 
-                        if (game$NEUTRAL_SITE==F) {home_field_advantage = 25}
+                        if (game$NEUTRAL_SITE==F) {home_field_advantage = home_field_advantage}
                 
                 # check whether the team has already played in a season
                 # check whether the season of the game is the same season 
@@ -189,12 +190,34 @@ calc_elo_ratings = function(games,
                                           game)
                 
                 # log output
-                cat("\r", i, "of", nrow(games), "games completed");  flush.console()
+                if (verbose == T) {cat("\r", i, "of", nrow(games), "games completed");  flush.console()}
                 
         }
         
+        # create a table at the team level that is easy to examine the results
+        team_outcomes = game_outcomes %>% 
+                select(GAME_ID, 
+                       SEASON,
+                       WEEK,
+                       GAME_DATE,
+                       starts_with("HOME_")) %>%
+                set_names(., gsub("HOME_", "", names(.))) %>%
+                bind_rows(.,
+                          game_outcomes %>% 
+                                  select(GAME_ID, 
+                                         SEASON,
+                                         WEEK,
+                                         GAME_DATE,
+                                         starts_with("AWAY_")) %>%
+                                  set_names(., gsub("AWAY_", "", names(.)))) %>%
+                mutate(home_field_advantage = home_field_advantage,
+                       reversion = reversion,
+                       k = k,
+                       v = v)
+        
         return(list(
                 "game_outcomes" = game_outcomes,
+                "team_outcomes" = team_outcomes,
                 "team_seasons" = team_seasons,
                 "teams" = teams)
         )
