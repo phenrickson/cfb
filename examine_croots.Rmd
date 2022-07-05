@@ -1,0 +1,561 @@
+---
+title: "Ranking Teams by Croots"
+author: "Phil Henrickson"
+date: "6/7/2022"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+    css: "styles.css"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(broom)
+library(broom.mixed)
+library(tidybayes)
+
+conflict_prefer("lag", "dplyr")
+
+```
+
+```{r load functions}
+
+source(here::here("functions/theme_phil.R"))
+source(here::here("functions/clean_plays_func.R"))
+source(here::here("functions/make_time_features_func.R"))
+rm(a)
+```
+
+```{r get games and croots data}
+
+# get games
+games_data_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.GAMES')) %>%
+        as_tibble() %>%
+        mutate(ID = as.numeric(ID)) %>%
+        rename(GAME_ID = ID)
+
+# get recruit position rankings
+recruiting_players_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_PLAYERS')) %>%
+        as_tibble()
+
+# get recruiting teams
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS))
+
+```
+
+```{r get team conference year table}
+
+team_conference = games_data_raw %>% 
+  select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>% 
+  rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>% 
+  bind_rows(.,
+            games_data_raw %>%
+                    select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>% 
+                    rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>%
+  select(SEASON, TEAM, CONFERENCE) %>%
+  unique()
+
+```
+
+
+# The Data
+
+The data we have on recruits is at the player level.
+
+```{r look at the recruiting data}
+
+set.seed(1)
+recruiting_players_raw %>%
+        sample_n(5)
+
+```
+
+We have a bunch of info on players, but mostly we want to look at a team's overall recruiting rating by position.
+
+```{r teams by season, warning=F, message=F}
+
+recruits_table = recruiting_players_raw %>%
+        select(YEAR, NAME, COMMITTEDTO, POSITION, RANKING, RATING, STARS) 
+
+recruits_table %>%
+        select(YEAR, NAME, COMMITTEDTO, POSITION, RANKING, RATING, STARS) %>%
+        datatable(escape=F,
+                  filter = 'top',
+                  options = list(pageLength = 25,
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(list(className = 'dt-center', targets = which(names(recruits_table)!='NAME')-1))),
+                             #    columnDefs=list(list(width = '30px', targets = c(which(names(prob_table)!='Name')-1)))),
+                                                # list(width = '400px', targets = c(which(names(prob_table)=='Name')-1)))),
+                                       #  targets = seq(3, ncol(prob_table)-1))),
+                  rownames = F)
+
+```
+
+## Team Recruiting Composite
+
+We also have team's overall recruiting rankings, which looks to be the team's composite score from 247.
+
+```{r summarize by teams over this time period}
+
+recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        filter(YEAR == 2021)
+
+```
+
+For each team, I'll compute an exponentially weighted moving average and a weighted moving average over four year windows.
+
+```{r weighted class}
+
+library(TTR)
+
+max_year = max(recruiting_teams_raw$YEAR)
+
+recruiting_teams_average = 
+        recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(POINTS, n=4)) %>%
+        mutate(WMA = WMA(POINTS, n =4, wts = c(.35, .25, .25, .15))) %>%
+        ungroup()
+
+
+recruiting_teams_average %>%
+        gather("variable", "value",
+               -YEAR, -RANK, -TEAM) %>%
+        left_join(., team_conference %>%
+                          rename(YEAR = SEASON),
+                  by = c("TEAM", "YEAR")) %>%
+        filter(CONFERENCE == 'SEC') %>%
+        filter(variable %in% c("WMA", "POINTS")) %>%
+        group_by(TEAM) %>%
+        mutate(LAST_YEAR = max(YEAR)) %>%
+        mutate(TEAM_LABEL = case_when(YEAR == LAST_YEAR ~ TEAM)) %>%
+        ggplot(., aes(x=YEAR,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y = value))+
+        geom_line(stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  lwd = 1.1,
+                  span = 0.25)+
+        theme_phil()+
+        facet_wrap(variable ~.,
+                   ncol = 2)+
+        geom_text_repel(
+                fontface = "bold",
+                size = 3,
+                direction = "y",
+                hjust = 0,
+                segment.size = .7,
+                segment.alpha = .5,
+                segment.linetype = "dotted",
+                box.padding = .4,
+                segment.curvature = -0.1,
+                segment.ncp = 3,
+                segment.angle = 20
+        )+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, max_year+2))+
+        guides(color = "none")
+
+```
+
+# Predicting Games via Team Recruiting Scores
+
+I'll now join up each team's recruiting rankings with the games data. I want to see how the difference in teach team's composite rating affects the outcome of each game.
+
+```{r join games with recruiting rankings}
+
+games_and_recruiting = games_data_raw %>%
+        left_join(.,
+                  recruiting_teams_average %>%
+                          ungroup() %>%
+                          filter(!is.na(EMA)) %>%
+                          mutate(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_EMA = EMA,
+                                 HOME_RECRUITING_WMA = WMA) %>%
+                          select(YEAR, starts_with("HOME")) %>%
+                          rename(SEASON = YEAR),
+                  by = c("SEASON", "HOME_TEAM"))  %>%
+        left_join(., 
+                  recruiting_teams_average %>%
+                          ungroup() %>%
+                          filter(!is.na(EMA)) %>%
+                          mutate(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_EMA = EMA,
+                                 AWAY_RECRUITING_WMA = WMA) %>%
+                          select(YEAR, starts_with("AWAY")) %>%
+                          rename(SEASON = YEAR),
+                  by = c("SEASON", "AWAY_TEAM")) %>%
+        filter(SEASON > 2006)
+
+```
+
+## Splitting the Data
+
+```{r split into train and test}
+
+games_full = games_and_recruiting %>%
+        mutate(HOME_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    AWAY_POINTS > HOME_POINTS ~ 'no')) %>%
+        mutate(HOME_WIN = factor(HOME_WIN,
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_FIELD_ADVANTAGE = case_when(NEUTRAL_SITE == F ~ 1,
+                                                TRUE ~ 0)) %>%
+        mutate_at(c("HOME_RECRUITING_WMA",
+                    "HOME_RECRUITING_EMA",
+                    "AWAY_RECRUITING_WMA",
+                    "AWAY_RECRUITING_EMA"),
+                  ~ replace_na(., 0)) %>%
+        mutate(HOME_RECRUITING_DIFF_WMA  = HOME_RECRUITING_WMA - AWAY_RECRUITING_WMA,
+               HOME_RECRUITING_DIFF_EMA = HOME_RECRUITING_EMA - AWAY_RECRUITING_EMA)
+
+games_train = games_full %>%
+        filter(SEASON < 2015)
+
+games_valid = games_full %>%
+        filter(SEASON >=2015 & SEASON < 2019)
+
+games_test = games_full %>%
+        filter(SEASON >=2019)
+
+```
+
+Looking at games in the training set, at what rate does the home team win as a function of the difference in the home-away recruiting ranings?
+
+```{r look at outcomes by recruiting diff}
+
+games_train %>%
+        mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING_EMA - AWAY_RECRUITING_EMA) %>%
+        ggplot(., aes(x=HOME_RECRUITING_DIFF,
+                      fill = HOME_WIN))+
+        geom_histogram(bins = 100)+
+        facet_wrap(HOME_WIN ~.,
+                   ncol = 1)+
+        theme_phil()+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')
+
+games_train %>%
+        mutate(HOME_RECRUITING_EMA_BIN = plyr::round_any(HOME_RECRUITING_DIFF_EMA,
+                                                         10)) %>%
+        mutate(HOME_RECRUITING_EMA_BIN = case_when(HOME_RECRUITING_EMA_BIN < -200 ~ 200,
+                                                   HOME_RECRUITING_EMA_BIN > 200 ~ 100,
+                                                   TRUE ~ HOME_RECRUITING_EMA_BIN)) %>%
+        group_by(HOME_RECRUITING_EMA_BIN, HOME_WIN) %>%
+        count() %>%
+        group_by(HOME_RECRUITING_EMA_BIN) %>%
+        mutate(prop = n / sum(n)) %>%
+        mutate(games = sum(n)) %>%
+        filter(HOME_WIN == 'yes') %>%
+        ggplot(., aes(x=HOME_RECRUITING_EMA_BIN,
+                      y=prop))+
+        geom_point(aes(size=games))+
+        geom_line()+
+        theme_phil()+
+        geom_hline(yintercept = c(0, 0.5,0.9),
+                   linetype='dashed')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed') +
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'))+
+        xlab("Home Weighted Recruiting Rating - Away Weighted Recruiting Rating")+
+        ylab("Pr(Home Team Wins)")+
+        geom_smooth(method = 'loess',
+                    color = 'grey60',
+                    formula = 'y ~ x')
+        
+```
+
+Just from looking at the training data, we can see that a home team with an advantage of 100 points in their team's recruiting rating (using a weighted average over the last four years) wins games a little under 90% of the time. 
+
+## Training Models
+
+I'll now fit a logistic regression on home win as a function of the two different recruiting differentials, as well as a dummy for whether the game was neutral site.
+
+```{r now fit a simple model, include=F}
+
+train_fit = games_train %>%
+        nest() %>%
+        mutate(glm_wma = map(data, ~ stan_glm(HOME_WIN ~ HOME_FIELD_ADVANTAGE + HOME_RECRUITING_DIFF_WMA + HOME_RECRUITING_DIFF_WMA*HOME_FIELD_ADVANTAGE,
+                                          family = binomial(link = "logit"),
+                                          data = .x))) %>%
+        mutate(glm_ema = map(data, ~ stan_glm(HOME_WIN ~ HOME_FIELD_ADVANTAGE + HOME_RECRUITING_DIFF_WMA + HOME_RECRUITING_DIFF_WMA*HOME_FIELD_ADVANTAGE,
+                                          family = binomial(link = "logit"),
+                                          data = .x)))
+
+```
+
+```{r examine results} 
+
+train_fit %>%
+        mutate(tidied_wma = map(glm_wma, ~ .x %>% 
+                                    tidy(se = "robust", conf.int=T))) %>%
+        mutate(tidied_ema = map(glm_ema, ~ .x %>% 
+                                    tidy(se = "robust", conf.int=T))) %>%
+        select(tidied_wma, tidied_ema)  %>%
+        gather("model", "value") %>%
+        unnest(value) %>%
+        mutate_if(is.numeric, round, 4)
+
+```
+Both models return pretty similar results - a 100 point difference in recruiting rankings maps to about 30% increase in win probability?
+
+```{r look at the predicted probabilities}
+
+train_preds = train_fit %>%
+        mutate(preds_wma = map(glm_wma, ~ .x %>% predict(newdata = games_train, 
+                                                         type = 'response') %>%
+                                       as_tibble() %>%
+                                       bind_cols(., games_train))) %>%
+        mutate(preds_ema = map(glm_ema, ~ .x %>%  
+                                       predict(newdata = games_train, type = 'response') %>%
+                                       as_tibble() %>%
+                                       bind_cols(., games_train))) %>%
+        select(preds_wma, preds_ema) %>%
+        gather("method", "preds") %>%
+        mutate(method = gsub("preds_", "", method)) %>%
+        unnest(preds)  %>%
+        rename(.pred = value)
+
+train_preds %>%
+        select(method, .pred, HOME_WIN, GAME_ID, SEASON, HOME_TEAM, AWAY_TEAM) %>%
+        arrange(GAME_ID) %>%
+       # spread(method, .pred) %>%
+        ggplot(., aes(x=.pred,
+                      fill = HOME_WIN))+
+        geom_histogram(bins = 100)+
+        facet_wrap(HOME_WIN ~ method)+
+        theme_phil()+
+        geom_vline(xintercept = 0.5,
+                   linetype = 'dotted')+
+        scale_fill_manual(values = c("red",
+                                     "navy"))+
+        theme(legend.title = element_text())
+```
+
+
+```{r plot predicted probabilites by recruiting diff}
+
+# log loss
+train_preds %>%
+        bind_rows(.,
+        bind_cols(train_preds %>%
+                          select(-method, -.pred),
+                          tibble(method = 'home',
+                                 .pred = games_train %>% 
+                                         group_by(HOME_WIN) %>% 
+                                         count() %>%
+                                         ungroup() %>%
+                                         mutate(prop = n / sum(n)) %>% 
+                                         filter(HOME_WIN == 'yes') %>% 
+                                         pull(prop)
+                          ))) %>%
+        group_by(method, SEASON) %>%
+        yardstick::mn_log_loss(truth = HOME_WIN,
+                               estimate = .pred,
+                               event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        spread(method, .estimate) %>%
+        select(SEASON, .metric, .estimator, home, ema, wma)
+
+# roc auc
+train_preds %>%
+        bind_rows(.,
+        bind_cols(train_preds %>%
+                          select(-method, -.pred),
+                          tibble(method = 'home',
+                                 .pred = games_train %>% 
+                                         group_by(HOME_WIN) %>% 
+                                         count() %>%
+                                         ungroup() %>%
+                                         mutate(prop = n / sum(n)) %>% 
+                                         filter(HOME_WIN == 'yes') %>% 
+                                         pull(prop)
+                          ))) %>%
+        group_by(method, SEASON) %>%
+        yardstick::roc_auc(truth = HOME_WIN,
+                               estimate = .pred,
+                               event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        spread(method, .estimate) %>%
+        select(SEASON, .metric, .estimator, home, ema, wma)
+
+# accuracy
+train_preds %>%
+        bind_rows(.,
+        bind_cols(train_preds %>%
+                          select(-method, -.pred),
+                          tibble(method = 'home',
+                                 .pred = games_train %>% 
+                                         group_by(HOME_WIN) %>% 
+                                         count() %>%
+                                         ungroup() %>%
+                                         mutate(prop = n / sum(n)) %>% 
+                                         filter(HOME_WIN == 'yes') %>% 
+                                         pull(prop)
+                          ))) %>%
+        mutate(.pred_class = factor(case_when(.pred > .5 ~ 'yes',
+                                       TRUE ~ 'no'),
+                                    levels = c("no", "yes"))) %>%
+        group_by(method, SEASON) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                               estimate = .pred_class,
+                               event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        spread(method, .estimate) %>%
+        select(SEASON, .metric, .estimator, home, ema, wma)
+
+
+```
+
+Now predict the validation set with each model.
+
+```{r predict validation set, warning=T,}
+
+valid_preds = train_fit %>%
+        mutate(preds_wma = map(glm_wma, ~ .x %>% predict(newdata = games_valid, 
+                                                         type = 'response') %>%
+                                       as_tibble() %>%
+                                       bind_cols(., games_valid))) %>%
+        mutate(preds_ema = map(glm_ema, ~ .x %>%  
+                                       predict(newdata = games_valid, type = 'response') %>%
+                                       as_tibble() %>%
+                                       bind_cols(., games_valid))) %>%
+        select(preds_wma, preds_ema) %>%
+        gather("method", "preds") %>%
+        mutate(method = gsub("preds_", "", method)) %>%
+        unnest(preds)  %>%
+        rename(.pred = value)
+
+# validation set
+valid_preds %>%
+        select(method, .pred, HOME_WIN, GAME_ID, SEASON, HOME_TEAM, AWAY_TEAM) %>%
+        arrange(GAME_ID) %>%
+       # spread(method, .pred) %>%
+        ggplot(., aes(x=.pred,
+                      fill = HOME_WIN))+
+        geom_histogram(bins = 100)+
+        facet_wrap(HOME_WIN ~ method)+
+        theme_phil()+
+        geom_vline(xintercept = 0.5,
+                   linetype = 'dotted')+
+        scale_fill_manual(values = c("red",
+                                     "navy"))+
+        theme(legend.title = element_text())
+
+```
+
+```{r scatter plot of validation}
+
+valid_preds %>%
+        select(method, .pred, HOME_WIN, GAME_ID, SEASON, HOME_TEAM, AWAY_TEAM) %>%
+        arrange(GAME_ID) %>%
+        spread(method, .pred) %>%
+        mutate(GAME_LABEL = paste(HOME_TEAM,
+                                  AWAY_TEAM,
+                                  SEASON)) %>%
+        ggplot(., aes(x=wma,
+                      y=ema,
+                      label = GAME_LABEL,
+                      color = HOME_WIN))+
+        geom_point()+
+        theme_phil()+
+        scale_color_manual(values = c("red",
+                                      "navy"))+
+        geom_vline(xintercept = 0.5,
+                   linetype = 'dashed')+
+        geom_hline(yintercept=0.5,
+                   linetype = 'dashed')+
+        facet_wrap(HOME_WIN~.)+
+        geom_text(check_overlap = T,
+                  vjust=-1,
+                  size=2.5)
+
+```
+
+Assessment on validation set
+
+```{r validation set assessment}
+
+valid_preds %>%
+        bind_rows(.,
+        bind_cols(valid_preds %>%
+                          select(-method, -.pred),
+                          tibble(method = 'home',
+                                 .pred = games_train %>% 
+                                         group_by(HOME_WIN) %>% 
+                                         count() %>%
+                                         ungroup() %>%
+                                         mutate(prop = n / sum(n)) %>% 
+                                         filter(HOME_WIN == 'yes') %>% 
+                                         pull(prop)
+                          ))) %>%
+        group_by(method, SEASON) %>%
+        yardstick::mn_log_loss(truth = HOME_WIN,
+                               estimate = .pred,
+                               event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        spread(method, .estimate) %>%
+        select(SEASON, .metric, .estimator, home, ema, wma)
+
+```
+
