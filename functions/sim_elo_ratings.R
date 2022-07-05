@@ -104,6 +104,9 @@ function(games,
                 game$HOME_PROB = new_elos[3]
                 game$AWAY_PROB = new_elos[4]
                 
+                # add the margin
+                game$HOME_MARGIN = home_margin
+                
                 # add post game elo ratings to the selected game
                 game$HOME_POSTGAME_ELO = new_elos[1]
                 game$AWAY_POSTGAME_ELO = new_elos[2]
@@ -126,6 +129,7 @@ function(games,
         
         # create a table at the team level that is easy to examine the results
         team_outcomes = game_outcomes %>% 
+                mutate(HOME_OPPONENT = AWAY_TEAM) %>%
                 select(GAME_ID, 
                        SEASON,
                        WEEK,
@@ -134,6 +138,8 @@ function(games,
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
+                                  mutate(AWAY_OPPONENT = HOME_TEAM) %>%
+                                  mutate(AWAY_MARGIN = -HOME_MARGIN) %>%
                                   select(GAME_ID, 
                                          SEASON,
                                          WEEK,
@@ -144,7 +150,6 @@ function(games,
                        reversion = reversion,
                        k = k,
                        v = v)
-        
         
        #  # append simulated season to empty tibbles
        # sim_game_outcomes = bind_rows(sim_game_outcomes,

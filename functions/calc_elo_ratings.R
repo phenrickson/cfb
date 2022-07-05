@@ -8,12 +8,6 @@ function(games,
                             v,
                             verbose=T) {
         
-        
-        # ### create an empty list for teams
-        # # this will store their current elo rating
-        # teams = list()
-        # team_seasons = list()
-        
         # define an empty tibble to store the game outcomes
         game_outcomes = tibble()
         
@@ -117,7 +111,9 @@ function(games,
                        SEASON,
                        WEEK,
                        GAME_DATE,
-                       starts_with("HOME_")) %>%
+                       starts_with("HOME_"), 
+                       AWAY_POINTS) %>%
+                rename(OPP_POINTS = AWAY_POINTS) %>%
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
@@ -125,7 +121,9 @@ function(games,
                                          SEASON,
                                          WEEK,
                                          GAME_DATE,
-                                         starts_with("AWAY_")) %>%
+                                         starts_with("AWAY_"),
+                                         HOME_POINTS) %>%
+                                  rename(OPP_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,

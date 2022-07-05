@@ -194,7 +194,9 @@ calc_elo_ratings = function(games,
                        SEASON,
                        WEEK,
                        GAME_DATE,
-                       starts_with("HOME_")) %>%
+                       starts_with("HOME_"), 
+                       AWAY_POINTS) %>%
+                rename(OPP_POINTS = AWAY_POINTS) %>%
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
@@ -202,7 +204,9 @@ calc_elo_ratings = function(games,
                                          SEASON,
                                          WEEK,
                                          GAME_DATE,
-                                         starts_with("AWAY_")) %>%
+                                         starts_with("AWAY_"),
+                                         HOME_POINTS) %>%
+                                  rename(OPP_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,
@@ -224,7 +228,7 @@ dump("calc_elo_ratings",
 # tweak base function
 simulateX <- function(object, nsim = 1, seed = NULL, X, ...) {
         object$fitted.values <- predict(object, X)
-        as.vector(simulate(object = object, nsim = nsim, seed = seed, ...))
+        pull(simulate(object = object, nsim = nsim, seed = seed, ...))
 }
 dump("simulateX",
      file = here::here("functions", "simulateX.R"))
@@ -238,7 +242,7 @@ sim_game_margin = function(home_rating,
 
         # using base lm with custom simulate function
         sim <- simulateX(points_model, nsim = 1,
-                               X = data.frame(HOME_ELO_DIFF = home_rating - away_rating))
+                               X = data.frame(HOME_ELO_DIFF = (home_rating - away_rating)))
         
         return(round(sim, 0))
 }
@@ -329,8 +333,8 @@ sim_elo_ratings = function(games,
                 
                 ## simulate the margin via points model
                 home_margin = sim_game_margin(home_rating, 
-                                  away_rating,
-                                  points_model)
+                                              away_rating,
+                                              points_model)
                 
                 # adjust for ties
                 # if ties =F, then a margin of 0 will give home team a 1 point win
@@ -351,6 +355,9 @@ sim_elo_ratings = function(games,
                 # add pre game prob
                 game$HOME_PROB = new_elos[3]
                 game$AWAY_PROB = new_elos[4]
+                
+                # add the margin
+                game$HOME_MARGIN = home_margin
                 
                 # add post game elo ratings to the selected game
                 game$HOME_POSTGAME_ELO = new_elos[1]
@@ -374,6 +381,7 @@ sim_elo_ratings = function(games,
         
         # create a table at the team level that is easy to examine the results
         team_outcomes = game_outcomes %>% 
+                mutate(HOME_OPPONENT = AWAY_TEAM) %>%
                 select(GAME_ID, 
                        SEASON,
                        WEEK,
@@ -382,6 +390,8 @@ sim_elo_ratings = function(games,
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
+                                  mutate(AWAY_OPPONENT = HOME_TEAM) %>%
+                                  mutate(AWAY_MARGIN = -HOME_MARGIN) %>%
                                   select(GAME_ID, 
                                          SEASON,
                                          WEEK,
@@ -392,24 +402,6 @@ sim_elo_ratings = function(games,
                        reversion = reversion,
                        k = k,
                        v = v)
-        
-        
-       #  # append simulated season to empty tibbles
-       # sim_game_outcomes = bind_rows(sim_game_outcomes,
-       #                            game_outcomes %>%
-       #                                    mutate(sim = s))
-       #  
-       # sim_team_outcomes = bind_rows(sim_team_outcomes,
-       #                               team_outcomes %>%
-       #                                       mutate(sim = s))
-       # 
-       # # counter
-       # if (verbose == T) {cat("\r", s, "of", nsims, "sims completed");  flush.console()}
-       #  
-       #  }
-        
-        # return(list("sim_game_outcomes" = sim_game_outcomes,
-        #             "sim_team_outcomes" = sim_team_outcomes))
         
         return(list(
                 "game_outcomes" = game_outcomes,
