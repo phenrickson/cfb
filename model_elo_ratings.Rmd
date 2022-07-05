@@ -1774,7 +1774,11 @@ What is this relationship? I'll regress the point spread on the difference in pr
 
 ```{r fit linear model to each year, include=F}
 
+library(tidybayes)
+library(broom.mixed)
+
 # fit linear models at each year
+suppressMessages({
 nested_lm_points = elo_train$game_outcomes %>%
         mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
         mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
@@ -1782,6 +1786,7 @@ nested_lm_points = elo_train$game_outcomes %>%
         # now fit linear models, i'll do so using stan
         mutate(lm = map(data, ~ stan_glm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
                              data = .x)))
+})
 
 # fit linear model after first few years in training
 lm_points = elo_train$game_outcomes %>%
@@ -1806,7 +1811,7 @@ points_model = elo_train$game_outcomes %>%
                              data = .x))) %>%
         mutate(tidied = map(lm, tidy, conf.int=T)) %>%
         mutate(glanced = map(lm, glance)) %>%
-        pluck("lm",)
+        pluck("lm",1)
 
 ```
 
@@ -1829,8 +1834,6 @@ lm_points %>%
 
 ```{r tidy and plot the effect}
 
-library(tidybayes)
-library(broom.mixed)
 
 # plot the coef
 nested_lm_points %>%
@@ -2118,6 +2121,8 @@ sim_elo_ratings
 
 ```
 
+## Example: Simulating the 2001 Season
+
 To show this works, I'll simulate the entire 2001 season starting with the Elo ratings we computed on games from 1970-2000.
 
 ```{r set up parallel}
@@ -2130,10 +2135,11 @@ plan(multisession, workers = 7)
 
 ```{r simulate 2001 season}
 
-sim_seasons = future_replicate(1,
+set.seed(1999)
+sim_seasons = future_replicate(1000,
                   sim_elo_ratings(valid_games %>%
                                           filter(SEASON == 2001) %>%
-                                          filter(WEEK < 15),
+                                          filter(WEEK < 16),
                                   teams = elo_train$teams,
                                   team_seasons = elo_train$team_seasons,
                                   home_field_advantage = selected_pars$home_field_advantage,
@@ -2144,323 +2150,501 @@ sim_seasons = future_replicate(1,
                                   ties =F,
                                   points_model = points_model))
 
-beepr::beep(3)
-
-```
-
-
-```{r get the simulated seasons}
-
+# grab the outcomes by team
 sim_team_outcomes = rbindlist(sim_seasons['team_outcomes',],
           idcol = T)
 
-sim_team_outcomes %>%
+```
+
+## The Big 12
+
+I'll plot the results of these simulations for every team in the Big 12. This plot shows the simulated postgame Elo ratings for each team in this conference for the 2001 season, where each line is one possible path that the team's season might take based on the simulated results.
+
+```{r get the simulated seasons}
+
+# elo rating
+
+team_outcomes_temp = sim_team_outcomes %>%
         filter(SEASON == 2001) %>%
         filter(CONFERENCE == 'Big 12') %>%
+        filter(WEEK < 15) %>%
+        mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
+        arrange(.id, SEASON, TEAM, GAME_DATE) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        ungroup() %>%
         left_join(., teamcolors %>%
                           filter(league == 'ncaa') %>%
                           mutate(TEAM = location),
                           by = c("TEAM")) %>%
-        ggplot(., aes(x=GAME_DATE,
+        left_join(., games_data_raw %>%
+                          select(GAME_ID, AWAY_TEAM, HOME_TEAM),
+                  by = c("GAME_ID")) %>%
+        mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
+                                          OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT)))
+
+team_outcomes_temp %>%
+        bind_rows(.,
+                  team_outcomes_temp %>%
+                          group_by(TEAM) %>%
+                          filter(GAME_DATE == max(GAME_DATE)) %>%
+                          mutate(GAME = max(GAME) +1, 
+                                 OPPONENT_LABEL = 'Season End',
+                                 PREGAME_ELO = POSTGAME_ELO)) %>%
+        ggplot(., aes(x=GAME,
                       color = name,
                       group = .id,
-                      y = POSTGAME_ELO)) +
-        geom_line(alpha = 0.05)+
+                      y = PREGAME_ELO)) +
+        geom_line(alpha = 0.08)+
         # geom_line(stat = 'smooth',
         #           method = 'loess',
         #           formula = 'y ~ x',
         #           span = 0.25,
         #           alpha = 0.5)+
         theme_phil()+
-        facet_wrap(SEASON + TEAM ~.,
-                   ncol =)+
+        facet_wrap(paste(TEAM, SEASON) ~.,
+                   ncol =4)+
         scale_color_teams(name = "TEAM")+
         guides(color = 'none')+
-        ggtitle("Simulated Elo Ratings by Season")
+        ggtitle("Simulated Elo Ratings",
+                subtitle = str_wrap("Each line is one result from simulating a team's season. Displaying 1000 simulations.", 120))+
+        scale_x_continuous(breaks = int_breaks)+
+                coord_cartesian(ylim = c(1100, 2200))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        ylab("Pregame Elo Rating")+
+        xlab("Game")
 
 ```
 
-I'll simulate for Pittsburgh just for Rob.
+This ends up painting a pretty interesting picture of how a team's season might unfold. In each simulation of a season, a team's Elo rating is updated after each game, which affects how likely they are to win their next game, which affects their Elo rating for the next game, and so on. When we see many lines overlap, this is because there is a typical path based on a team's schedule for how their season is likely to unfold.
+
+Let's zoom into the simulations for Kansas State's 2001 season. I'll plot Kansas State's pregame Elo rating in every simulation across each game in this season. Going into the season, based on their ratings from the last season, they are slight favorites on the road at USC, but it's almost a toss up. The result of this game sends KState on two pretty different paths. Regardless of how they played at USC, they're likely to win against New Mexico State (and only marginally increase their Elo rating). But, in the simulations were they beat USC, they were more likely to beat Oklahoma; when they lost to USC, they were less likely to beat Oklahoma.
 
 
-```{r run simulation for seasons}
+```{r look at texas tech 2001}
 
-sims_elo_returned = foreach(s = 1:100) %do% {
+team = 'Kansas State'
 
-       out =  sim_season_with_reversion_home_adjust(input_game_matchups = games_data,
-                                                         input_team_games = team_games,
-                                                         input_initial_team_elo_ratings = initial_team_elo_ratings,
-                                                         input_points_model = points_model,
-                                                         k = 25,
-                                                         v = 400,
-                                                         reversion = 1/4,
-                                                         home_adjust = 25)
-     
-       out
-       
-}
-
-```
-
-```{r look at the results for one season}
-
-sims_elo_returned %>%
-        rbindlist(., idcol=T) %>%
-        mutate(TEAM = HOME_TEAM,
-               OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'win',
-                                   HOME_OUTCOME == 0 ~ 'loss',
-                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-               POINT_DIFF = HOME_POINT_DIFF) %>%
-        select(SEASON, GAME_ID, TEAM, OUTCOME, POINT_DIFF) %>%
-        mutate(HOST = 'HOME') %>%
-        bind_rows(.,
-                  sims_elo_returned %>%
-                          rbindlist(., idcol=T) %>%
-                          mutate(TEAM = AWAY_TEAM,
-                                 OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'loss',
-                                   HOME_OUTCOME == 0 ~ 'win',
-                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-                                 POINT_DIFF = -HOME_POINT_DIFF) %>%
-                          select(SEASON, GAME_ID, TEAM, OUTCOME, POINT_DIFF) %>%
-                          mutate(HOST='AWAY')) %>%
-        group_by(SEASON, TEAM) %>%
-        count(OUTCOME) %>%
-        spread(OUTCOME, n) %>%
-        select(SEASON, TEAM, win, loss, tie) %>%
-        arrange(desc(win)) %>% 
-        ungroup() %>%
-        mutate_if(is.numeric, replace_na, 0)
-
-```
-
-Predicted wins vs actual
-
-```{r compare predicted vs actual wins for simulation}
-
-games_data %>%
-        mutate_if(is.numeric, round, 2) %>%
-        mutate(TEAM = HOME_TEAM,
-               OUTCOME = case_when(OUTCOME == 1 ~ 'win',
-                                   OUTCOME == 0 ~ 'loss',
-                                   OUTCOME == 0.5 ~ 'tie'),
-               POINT_DIFF = HOME_POINTS - AWAY_POINTS,
-               OPPONENT = AWAY_TEAM) %>%
-        select(SEASON, GAME_ID, TEAM, OPPONENT, OUTCOME, POINT_DIFF) %>%
-        mutate(HOST = 'HOME') %>%
-        bind_rows(.,
-                  games_data %>%
-                          mutate(TEAM = AWAY_TEAM,
-                                 OUTCOME = case_when(OUTCOME == 1 ~ 'loss',
-                                                     OUTCOME == 0 ~ 'win',
-                                                     OUTCOME == 0.5 ~ 'tie'),
-                                 POINT_DIFF = AWAY_POINTS - HOME_POINTS,
-                                 OPPONENT = HOME_TEAM) %>%
-                          select(SEASON, GAME_ID, TEAM, OUTCOME, OPPONENT, POINT_DIFF) %>%
-                          mutate(HOST='AWAY')) %>%
-        arrange(GAME_ID) %>%
-        group_by(SEASON, TEAM) %>%
-        count(OUTCOME) %>%
-        spread(OUTCOME, n) %>%
-        select(SEASON, TEAM, win, loss, tie) %>%
-        arrange(desc(win)) %>% 
-        ungroup() %>%
-        mutate_if(is.numeric, replace_na, 0) %>%
-        rename(actual_wins = win) %>%
-        select(SEASON, TEAM, actual_wins) %>%
+# elo rating
+team_temp = 
+sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(TEAM == team) %>%
+        mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
         left_join(.,
-                sims_elo_returned %>%
-                        rbindlist(., idcol=T) %>%
-                        mutate(TEAM = HOME_TEAM,
-                               OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'win',
-                                                   HOME_OUTCOME == 0 ~ 'loss',
-                                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-                               POINT_DIFF = HOME_POINT_DIFF) %>%
-                        select(SEASON, GAME_ID, TEAM, OUTCOME, POINT_DIFF) %>%
-                        mutate(HOST = 'HOME') %>%
-                        bind_rows(.,
-                                  sims_elo_returned %>%
-                                          rbindlist(., idcol=T) %>%
-                                          mutate(TEAM = AWAY_TEAM,
-                                                 OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'loss',
-                                                   HOME_OUTCOME == 0 ~ 'win',
-                                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-                                                 POINT_DIFF = -HOME_POINT_DIFF) %>%
-                                          select(SEASON, GAME_ID, TEAM, OUTCOME, POINT_DIFF) %>%
-                                          mutate(HOST='AWAY')) %>%
-                        group_by(SEASON, TEAM) %>%
-                        count(OUTCOME) %>%
-                        spread(OUTCOME, n) %>%
-                        select(SEASON, TEAM, win, loss, tie) %>%
-                        arrange(desc(win)) %>% 
-                        ungroup() %>%
-                        mutate_if(is.numeric, replace_na, 0) %>%
-                        rename(pred_wins = win) %>%
-                        select(SEASON, TEAM, pred_wins),
-                by = c("SEASON", "TEAM")) %>%
-        left_join(.,
-                  team_games %>%
-                          select(SEASON, CONFERENCE, TEAM) %>%
-                          unique(),
-                  by = c("SEASON", "TEAM")) %>%
-        filter(!is.na(CONFERENCE)) %>%
-        ggplot(., aes(x=pred_wins,
-                      label = TEAM,
-                      y = actual_wins))+
-        geom_point(position=ggforce::position_jitternormal())+
-        geom_text_repel(size=2.5)+
-        facet_wrap(CONFERENCE ~.)+
-        theme_bw()+
-        geom_abline(slope=1,
-                    intercept=0,
-                    linetype = 'dashed')
+                  games_data_raw %>%
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                  by = c("GAME_ID")) %>%
+        mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
+                                          OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT))) %>%
+        arrange(.id, SEASON, TEAM, GAME_DATE) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) 
+
+team_temp %>%
+        bind_rows(.,
+                  team_temp %>% 
+                          filter(GAME_DATE == max(GAME_DATE)) %>%
+                          mutate(GAME = max(GAME) +1, 
+                                 OPPONENT_LABEL = 'Season End',
+                                 PREGAME_ELO = POSTGAME_ELO)) %>%
+        ggplot(., aes(x=GAME,
+                      color = name,
+                      group = .id,
+                      y = PREGAME_ELO)) +
+        geom_vline(xintercept = seq(1, max(team_temp$GAME+1)),
+                   alpha = 0.8,
+                   linetype = 'dotted')+
+        geom_text(aes(label = OPPONENT_LABEL,
+                      x = GAME,
+                      y = 1300),
+                  size = 4)+
+        geom_line(alpha = 0.25)+
+        theme_phil()+
+        facet_wrap(paste(TEAM, SEASON) ~.,
+                   ncol =4)+
+        scale_color_teams(name = "TEAM")+
+        guides(color = 'none')+
+        ggtitle("Simulated Elo Ratings",
+                subtitle = str_wrap("Each line is one result from simulating a team's season. Displaying 1000 simulations.", 120))+
+        coord_cartesian(ylim = c(1200, 2200))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        ylab("Pregame Elo Rating")+
+        xlab("Game")+
+        scale_x_continuous(breaks = int_breaks)+
+        theme(panel.grid.minor = element_blank(),
+              panel.grid.major = element_blank())
+
+```
+
+### Win Totals
+
+The simulated Elo ratings can tell us the general expected story for a team's season. But what we probably care about is just the wins. I'll make a similar plot but show each team's simulated win count over the course of a season.
+
+```{r show the win totals for 2001}
+
+# wins
+sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(WEEK < 15) %>%
+        filter(CONFERENCE == 'Big 12') %>%
+        mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                               TRUE ~ 0)) %>%
+        arrange(.id, SEASON, TEAM, GAME_DATE) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(wins = cumsum(WIN)) %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        ggplot(., aes(x=GAME,
+                      color = name,
+                      group = .id,
+                      y = wins)) +
+        geom_line(position=position_jitter(w=0.0, h=0.2),
+                  alpha = 0.03,
+                  lwd = 1.04)+
+        # geom_line(stat = 'smooth',
+        #           method = 'loess',
+        #           formula = 'y ~ x',
+        #           span = 0.25,
+        #           alpha = 0.08)+
+        theme_phil()+
+        facet_wrap(SEASON + TEAM ~.,
+                   ncol =4)+
+        scale_color_teams(name = "TEAM")+
+        guides(color = 'none')+
+        ggtitle("Simulated Wins by Team over Season",
+                subtitle = str_wrap("Each line is one result from simulating a team's season. Displaying 1000 simulations.", 120))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        xlab("Game")+
+        ylab("Win Total")
         
 ```
 
+For win totals, we probably mostly care about showing the distribution of wins for each team at the end of the season. 
 
+```{r distribution of wins by 2001 season}
 
-```{r sims elo returned}
-
-sims_elo_returned %>%
-        rbindlist(., idcol=T) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        mutate(TEAM = HOME_TEAM,
-               TEAM_PRE_ELO = HOME_PRE_ELO,
-               TEAM_POST_ELO = HOME_POST_ELO,
-               OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'win',
-                                   HOME_OUTCOME == 0 ~ 'loss',
-                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-               POINT_DIFF = HOME_POINT_DIFF,
-               OPPONENT = AWAY_TEAM) %>%
-        select(GAME_ID, TEAM, TEAM_PRE_ELO, TEAM_POST_ELO, OPPONENT, OUTCOME, POINT_DIFF) %>%
-        mutate(HOST = 'HOME') %>%
-        bind_rows(.,
-                  sims_elo_returned %>%
-                          rbindlist(., idcol=T) %>%
-                          mutate(TEAM = AWAY_TEAM,
-                                 TEAM_PRE_ELO = AWAY_PRE_ELO,
-                                 TEAM_POST_ELO = AWAY_POST_ELO,
-                                 OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'loss',
-                                   HOME_OUTCOME == 0 ~ 'win',
-                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-                                 POINT_DIFF = -HOME_POINT_DIFF,
-                                 OPPONENT = HOME_TEAM) %>%
-                          select(GAME_ID, TEAM, TEAM_PRE_ELO, TEAM_POST_ELO, OUTCOME, OPPONENT, POINT_DIFF) %>%
-                          mutate(HOST='AWAY')) %>%
-        arrange(GAME_ID) %>%
-      #  arrange(GAME_ID) %>%
-                filter(TEAM == 'Texas A&M')
-
-```
-
-```{r sim multiple times}
-
-sims_elo_returned = foreach(s = 1:100) %do% {
-
-       out =  sim_season_with_reversion_home_adjust(input_game_matchups = games_data,
-                                                         input_team_games = team_games,
-                                                         input_initial_team_elo_ratings = initial_team_elo_ratings,
-                                                         input_points_model = points_model,
-                                                         k = 25,
-                                                         v = 400,
-                                                         reversion = 1/4,
-                                                         home_adjust = 25)
-     
-       out
-       
-}
-
-```
-
-```{r look at simulations}
-
-sims_elo_returned %>%
-        rbindlist(., idcol=T) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        mutate(TEAM = HOME_TEAM,
-               TEAM_PRE_ELO = HOME_PRE_ELO,
-               TEAM_POST_ELO = HOME_POST_ELO,
-               OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'win',
-                                   HOME_OUTCOME == 0 ~ 'loss',
-                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-               POINT_DIFF = HOME_POINT_DIFF,
-               OPPONENT = AWAY_TEAM) %>%
-        select(SEASON, GAME_ID, TEAM, TEAM_PRE_ELO, TEAM_POST_ELO, OPPONENT, OUTCOME, POINT_DIFF, .id) %>%
-        mutate(HOST = 'HOME') %>%
-        bind_rows(.,
-                  sims_elo_returned %>%
-                          rbindlist(., idcol=T) %>%
-                          mutate(TEAM = AWAY_TEAM,
-                                 TEAM_PRE_ELO = AWAY_PRE_ELO,
-                                 TEAM_POST_ELO = AWAY_POST_ELO,
-                                 OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'loss',
-                                   HOME_OUTCOME == 0 ~ 'win',
-                                   HOME_OUTCOME == 0.5 ~ 'tie'),
-                                 POINT_DIFF = -HOME_POINT_DIFF,
-                                 OPPONENT = HOME_TEAM) %>%
-                          select(SEASON, GAME_ID, TEAM, TEAM_PRE_ELO, TEAM_POST_ELO, OUTCOME, OPPONENT, POINT_DIFF, .id) %>%
-                          mutate(HOST='AWAY')) %>%
-        left_join(.,
-                  team_games %>%
-                          select(SEASON, CONFERENCE, TEAM) %>%
-                          unique(),
-                  by = c("SEASON", "TEAM")) %>%
-        filter(CONFERENCE == 'Big Ten') %>%
-        group_by(SEASON, TEAM, .id) %>%
-        count(OUTCOME) %>%
-        filter(OUTCOME == 'win') %>%
-        ggplot(., aes(x=n))+
-        geom_histogram(bins=30)+
-        facet_wrap(SEASON + TEAM~.)+
-        theme_bw()
-
-```
-
-```{r sim seasons}
-
-mode_func <- function(codes){
-  which.max(tabulate(codes))
-}
-
-sims_elo_returned %>%
-        rbindlist(., idcol=T) %>%
-     mutate_if(is.numeric, round, 2) %>%
-     mutate(TEAM = HOME_TEAM,
-           TEAM_PRE_ELO = HOME_PRE_ELO,
-           TEAM_POST_ELO = HOME_POST_ELO,
-            OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'win',
-                                HOME_OUTCOME == 0 ~ 'loss',
-                                HOME_OUTCOME == 0.5 ~ 'tie'),
-            POINT_DIFF = HOME_POINT_DIFF,
-            OPPONENT = AWAY_TEAM) %>%
-     select(SEASON, GAME_ID, TEAM, TEAM_PRE_ELO, TEAM_POST_ELO, OPPONENT, OUTCOME, POINT_DIFF, .id) %>%
-     mutate(HOST = 'HOME') %>%
-     bind_rows(.,
-               sims_elo_returned %>%
-                   rbindlist(., idcol=T) %>%
-                   mutate(TEAM = AWAY_TEAM,
-                          TEAM_PRE_ELO = AWAY_PRE_ELO,
-                          TEAM_POST_ELO = AWAY_POST_ELO,
-                          OUTCOME = case_when(HOME_OUTCOME == 1 ~ 'loss',
-                                              HOME_OUTCOME == 0 ~ 'win',
-                                              HOME_OUTCOME == 0.5 ~ 'tie'),
-                          POINT_DIFF = -HOME_POINT_DIFF,
-                          OPPONENT = HOME_TEAM) %>%
-                   select(SEASON, GAME_ID, TEAM, TEAM_PRE_ELO, TEAM_POST_ELO, OUTCOME, OPPONENT, POINT_DIFF, .id) %>%
-                   mutate(HOST='AWAY')) %>%
-     left_join(.,
-               team_games %>%
-                   select(SEASON, CONFERENCE, TEAM) %>%
-                   unique(),
-               by = c("SEASON", "TEAM")) %>%
-     group_by(SEASON, TEAM, .id) %>%
-     count(OUTCOME) %>%
-        filter(OUTCOME == 'win') %>% 
+season_totals = sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(WEEK < 15) %>%
+        filter(CONFERENCE == 'Big 12') %>%
+        mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                               TRUE ~ 0)) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        summarize(WINS = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(SEASON, TEAM, WINS) %>%
+        count() %>%
         group_by(SEASON, TEAM) %>%
-        summarize(mean_wins = mean(n),
-                  mode_wins = mode_func(n),
-                  .groups = 'drop') %>% 
-        arrange(desc(mode_wins)) %>%
-        mutate_if(is.numeric, round, 2)
+        mutate(perc = round(n / sum(n),2))
+
+season_totals %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        ggplot(., aes(x=WINS,
+                      y = n,
+                      color = name,
+                      label = paste(WINS,
+                                    perc,
+                                    sep = "\n"),
+                      fill = name))+
+        geom_col()+
+        geom_text(vjust = -0.5,
+                  size = 3)+
+        theme_phil()+
+        facet_wrap(SEASON + TEAM ~.,
+                   ncol=4)+
+        scale_fill_teams(name = "TEAM")+
+        scale_color_teams(name = "TEAM")+
+        guides(fill = 'none',
+               color = 'none')+
+        ylab("Number of Simulations")+
+        xlab("Season Win Total")+
+        ggtitle("Simulated Win Totals by Team over Season",
+                subtitle = str_wrap(" Displaying total wins by team in 1000 simulations of selected sason.", 120))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        coord_cartesian(ylim = c(0, 300))
+
+```
+
+We can put all this info into one table by counting the number of simulations in which each team fell into number of wins. That will give us our probabilities for each team's win total going into this season.
+
+```{r probability table for 2001 big 12}
+
+col_func = 
+function(x) {
+        
+        breaks = c(0, 5, 10, 15, 20, 40)
+        colorRamp=colorRampPalette(c("white", "grey60"))
+        col_palette <- colorRamp(length(breaks))
+        mycut <- cut(x, 
+                     breaks = breaks,
+                     include.lowest = TRUE, 
+                     right=T,
+                     label = FALSE)
+        col_palette[mycut]
+        
+}
+
+season_totals %>%
+        select(SEASON, TEAM, WINS, perc) %>%
+        mutate(perc = perc *100) %>%
+        pivot_wider(.,
+                    id_cols = c("SEASON", "TEAM"),
+                    values_from = c("perc"),
+                    names_from = c("WINS")) %>%
+        ungroup() %>%
+        mutate_if(is.numeric,
+                  replace_na, 0) %>%
+        left_join(., season_totals %>%
+                          select(SEASON, TEAM, WINS, n, perc) %>%
+                          mutate(perc = perc *100) %>%
+                          group_by(SEASON, TEAM) %>%
+                          mutate(points = sum(WINS*n)) %>%
+                          distinct(SEASON, TEAM, points) %>%
+                          ungroup(),
+                  by = c("SEASON", "TEAM")) %>%
+        arrange(desc(points)) %>%
+        mutate(SEASON  = factor(SEASON)) %>%
+        select(-points) %>%
+        select(SEASON, TEAM, `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `11`, `12`) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j = c(paste(seq(0, 12, 1))),
+           bg = col_func) %>%
+        add_header_row(.,
+                       values = c("", "Simulated Win Totals"),
+                       colwidths = c(1, 14))
+
+```
+
+### ACC
+
+I'll also look at the ACC.
+
+```{r look at ACC}
+
+team_outcomes_temp = sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(CONFERENCE == 'ACC') %>%
+        mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
+        arrange(.id, SEASON, TEAM, GAME_DATE) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        ungroup() %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        left_join(., games_data_raw %>%
+                          select(GAME_ID, AWAY_TEAM, HOME_TEAM),
+                  by = c("GAME_ID")) %>%
+        mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
+                                          OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT)))
+
+team_outcomes_temp %>%
+        bind_rows(.,
+                  team_outcomes_temp %>%
+                          group_by(TEAM) %>%
+                          filter(GAME_DATE == max(GAME_DATE)) %>%
+                          mutate(GAME = max(GAME) +1, 
+                                 OPPONENT_LABEL = 'Season End',
+                                 PREGAME_ELO = POSTGAME_ELO)) %>%
+        ggplot(., aes(x=GAME,
+                      color = name,
+                      group = .id,
+                      y = PREGAME_ELO)) +
+        geom_line(alpha = 0.08)+
+        # geom_line(stat = 'smooth',
+        #           method = 'loess',
+        #           formula = 'y ~ x',
+        #           span = 0.25,
+        #           alpha = 0.5)+
+        theme_phil()+
+        facet_wrap(paste(TEAM, SEASON) ~.,
+                   ncol =3)+
+        scale_color_teams(name = "TEAM")+
+        guides(color = 'none')+
+        ggtitle("Simulated Elo Ratings",
+                subtitle = str_wrap("Each line is one result from simulating a team's season. Displaying 1000 simulations.", 120))+
+        scale_x_continuous(breaks = int_breaks)+
+                coord_cartesian(ylim = c(1100, 2200))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        ylab("Pregame Elo Rating")+
+        xlab("Game")
+
+
+```
+
+And FSU.
+
+```{r show fsu 2001}
+
+team = 'Florida State'
+
+# elo rating
+team_temp = 
+sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(TEAM == team) %>%
+        mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
+        left_join(.,
+                  games_data_raw %>%
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                  by = c("GAME_ID")) %>%
+        mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
+                                          OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT))) %>%
+        arrange(.id, SEASON, TEAM, GAME_DATE) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) 
+
+team_temp %>%
+        bind_rows(.,
+                  team_temp %>% 
+                          filter(GAME_DATE == max(GAME_DATE)) %>%
+                          mutate(GAME = max(GAME) +1, 
+                                 OPPONENT_LABEL = 'Season End',
+                                 PREGAME_ELO = POSTGAME_ELO)) %>%
+        ggplot(., aes(x=GAME,
+                      color = name,
+                      group = .id,
+                      y = PREGAME_ELO)) +
+        geom_vline(xintercept = seq(1, max(team_temp$GAME+1)),
+                   alpha = 0.8,
+                   linetype = 'dotted')+
+        geom_text(aes(label = OPPONENT_LABEL,
+                      x = GAME,
+                      y = 1300),
+                  size = 4)+
+        geom_line(alpha = 0.25)+
+        theme_phil()+
+        facet_wrap(paste(TEAM, SEASON) ~.,
+                   ncol =4)+
+        scale_color_teams(name = "TEAM")+
+        guides(color = 'none')+
+        ggtitle("Simulated Elo Ratings",
+                subtitle = str_wrap("Each line is one result from simulating a team's season. Displaying 1000 simulations.", 120))+
+        coord_cartesian(ylim = c(1200, 2200))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        ylab("Pregame Elo Rating")+
+        xlab("Game")+
+        scale_x_continuous(breaks = int_breaks)+
+        theme(panel.grid.minor = element_blank(),
+              panel.grid.major = element_blank())
+
+```
+
+
+```{r distribution of wins by 2001 season}
+
+season_totals = sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(CONFERENCE == 'ACC') %>%
+        mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                               TRUE ~ 0)) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        summarize(WINS = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(SEASON, TEAM, WINS) %>%
+        count() %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(perc = round(n / sum(n),2))
+
+season_totals %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        ggplot(., aes(x=WINS,
+                      y = n,
+                      color = name,
+                      label = paste(WINS,
+                                    perc,
+                                    sep = "\n"),
+                      fill = name))+
+        geom_col()+
+        geom_text(vjust = -0.5,
+                  size = 3)+
+        theme_phil()+
+        facet_wrap(SEASON + TEAM ~.,
+                   ncol=3)+
+        scale_fill_teams(name = "TEAM")+
+        scale_color_teams(name = "TEAM")+
+        guides(fill = 'none',
+               color = 'none')+
+        ylab("Number of Simulations")+
+        xlab("Season Win Total")+
+        ggtitle("Simulated Win Totals by Team over Season",
+                subtitle = str_wrap(" Displaying total wins by team in 1000 simulations of selected sason.", 120))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5))+
+        coord_cartesian(ylim = c(0, max(season_totals$n)+50))
+
+```
+
+
+```{r probability table for 2001 big 12}
+
+col_func = 
+function(x) {
+        
+        breaks = c(0, 5, 10, 15, 20, 40)
+        colorRamp=colorRampPalette(c("white", "deepskyblue1"))
+        col_palette <- colorRamp(length(breaks))
+        mycut <- cut(x, 
+                     breaks = breaks,
+                     include.lowest = TRUE, 
+                     right=T,
+                     label = FALSE)
+        col_palette[mycut]
+        
+}
+
+season_totals %>%
+        select(SEASON, TEAM, WINS, perc) %>%
+        mutate(perc = perc *100) %>%
+        pivot_wider(.,
+                    id_cols = c("SEASON", "TEAM"),
+                    values_from = c("perc"),
+                    names_from = c("WINS")) %>%
+        ungroup() %>%
+        mutate_if(is.numeric,
+                  replace_na, 0) %>%
+        left_join(., season_totals %>%
+                          select(SEASON, TEAM, WINS, n, perc) %>%
+                          mutate(perc = perc *100) %>%
+                          group_by(SEASON, TEAM) %>%
+                          mutate(points = sum(WINS*n)) %>%
+                          distinct(SEASON, TEAM, points) %>%
+                          ungroup(),
+                  by = c("SEASON", "TEAM")) %>%
+        arrange(desc(points)) %>%
+        mutate(SEASON  = factor(SEASON)) %>%
+        select(-points) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j = c(paste(seq(0, 12, 1))),
+           bg = col_func)
+
 
 ```
 
