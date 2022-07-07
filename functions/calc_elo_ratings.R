@@ -31,7 +31,7 @@ function(games,
                 {away_rating = teams[[game$AWAY_TEAM]]} else 
                         if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
                 
-                # check whether its a neutral site game to apply home field advantage adjustmnet
+                # check whether its a neutral site game to apply home field advantage adjustment
                 if (game$NEUTRAL_SITE==T) {home_field_advantage = 0} else 
                         if (game$NEUTRAL_SITE==F) {home_field_advantage = home_field_advantage}
                 
@@ -77,6 +77,7 @@ function(games,
                                         v)
                 
                 # add pre game elo ratings to the selected game
+                # do not include the adjustment for home advantage in the pre game
                 game$HOME_PREGAME_ELO = home_rating
                 game$AWAY_PREGAME_ELO = away_rating
                 

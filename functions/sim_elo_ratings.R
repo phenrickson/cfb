@@ -151,23 +151,6 @@ function(games,
                        k = k,
                        v = v)
         
-       #  # append simulated season to empty tibbles
-       # sim_game_outcomes = bind_rows(sim_game_outcomes,
-       #                            game_outcomes %>%
-       #                                    mutate(sim = s))
-       #  
-       # sim_team_outcomes = bind_rows(sim_team_outcomes,
-       #                               team_outcomes %>%
-       #                                       mutate(sim = s))
-       # 
-       # # counter
-       # if (verbose == T) {cat("\r", s, "of", nsims, "sims completed");  flush.console()}
-       #  
-       #  }
-        
-        # return(list("sim_game_outcomes" = sim_game_outcomes,
-        #             "sim_team_outcomes" = sim_team_outcomes))
-        
         return(list(
                 "game_outcomes" = game_outcomes,
                 "team_outcomes" = team_outcomes,
