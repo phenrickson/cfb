@@ -43,7 +43,8 @@ function(sim_team_outcomes,
                 group_by(SEASON, TEAM, CONFERENCE) %>% 
                 mutate(max_week = max(WEEK)) %>%
                 filter(WEEK == max_week) %>% 
-                summarize(ELO = mean(POSTGAME_ELO), .groups = 'drop') %>%
+                summarize(ELO = mean(POSTGAME_ELO), 
+                          sd = sd(POSTGAME_ELO), .groups = 'drop') %>%
                 arrange(desc(ELO))
         
         season_totals = sim_team_outcomes %>%
@@ -108,8 +109,8 @@ function(sim_team_outcomes,
                 bg(., j = c(paste(seq(0, 12, 1))),
                    bg = col_func) %>%
                 add_header_row(.,
-                               values = c("","", paste("Simulated Win Totals for", season, "Season")),
-                               colwidths = c(1, 2, 13)) %>%
+                               values = c("","", "Simulated", paste("Simulated Win Totals for", season, "Season")),
+                               colwidths = c(1, 1, 1, 13)) %>%
                 flextable::align(j = c("End Elo", paste(seq(0, 12, 1))),
                                  part = "all",
                                  align = "center") %>%

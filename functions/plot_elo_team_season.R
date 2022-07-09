@@ -60,7 +60,8 @@ function(sim_team_outcomes,
                 mutate(perc = replace_na(as.character(perc), "")) %>%
                 mutate(expected_win = replace_na(as.character(expected_win), "")) %>%
                 mutate(PLOT_LABEL = case_when(OPPONENT_LABEL == team_record ~ OPPONENT_LABEL,
-                                              TRUE ~ paste(expected_win,
+                                              TRUE ~ paste(
+                                                      #expected_win,
                                               perc, 
                                               OPPONENT_LABEL,
                                               sep = '\n')))
@@ -100,6 +101,14 @@ function(sim_team_outcomes,
                          label = plot_team_data %>% filter(.id == 1) %>% pull(PLOT_LABEL),
                          size = 4,
                          color = unique(plot_team_data$primary)
-                         )
+                         )+
+                geom_hline(yintercept = c(1575),
+                                          linetype = 'dashed',
+                                          color = 'grey60')+
+                annotate("text",
+                         x=0.25,
+                         y=1585,
+                         color = 'grey60',
+                         label = 'FBS Average')
         
 }

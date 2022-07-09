@@ -4,6 +4,12 @@ function(sim_team_outcomes,
                                        conference,
                                        week) {
         
+        mode_func <- function(x) {
+                ux <- unique(x)
+                ux[which.max(tabulate(match(x, ux)))]
+        }
+        
+        
         season_totals = sim_team_outcomes %>%
                 filter(SEASON == season) %>%
                 filter(WEEK < week) %>%

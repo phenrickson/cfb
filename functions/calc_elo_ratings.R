@@ -113,8 +113,10 @@ function(games,
                        WEEK,
                        GAME_DATE,
                        starts_with("HOME_"), 
+                       AWAY_TEAM,
                        AWAY_POINTS) %>%
-                rename(OPP_POINTS = AWAY_POINTS) %>%
+                rename(OPPONENT = AWAY_TEAM,
+                       OPPONENT_POINTS = AWAY_POINTS) %>%
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
@@ -123,8 +125,10 @@ function(games,
                                          WEEK,
                                          GAME_DATE,
                                          starts_with("AWAY_"),
+                                         HOME_TEAM,
                                          HOME_POINTS) %>%
-                                  rename(OPP_POINTS = HOME_POINTS) %>%
+                                  rename(OPPONENT = HOME_TEAM,
+                                         OPPONENT_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,

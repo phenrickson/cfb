@@ -98,7 +98,7 @@ plot_elo_conference_season = function(sim_team_outcomes,
                                   filter(league == 'ncaa') %>%
                                   mutate(TEAM = location),
                           by = c("TEAM")) %>%
-                left_join(., games_data_raw %>%
+                left_join(., games_data_tidied %>%
                                   select(GAME_ID, AWAY_TEAM, HOME_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -183,7 +183,7 @@ plot_elo_team_season = function(sim_team_outcomes,
                 filter(WEEK < week) %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_raw %>%
+                          games_data_tidied %>%
                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -223,7 +223,7 @@ plot_elo_team_season = function(sim_team_outcomes,
                           team_temp %>% 
                                   filter(GAME_DATE == max(GAME_DATE)) %>%
                                   mutate(GAME = max(GAME) +1, 
-                                         OPPONENT_LABEL = paste("Season End", "Elo", sep="\n"),
+                                         OPPONENT_LABEL = paste("Season End", "Elo", "\n", sep="\n"),
                                     #     OPPONENT_LABEL = paste("Predicted", "\n", "Record:", "\n", team_record, "\n", "\n"),
                                          PREGAME_ELO = POSTGAME_ELO)) %>%
                 left_join(., team_wins, 
@@ -231,7 +231,8 @@ plot_elo_team_season = function(sim_team_outcomes,
                 mutate(perc = replace_na(as.character(perc), "")) %>%
                 mutate(expected_win = replace_na(as.character(expected_win), "")) %>%
                 mutate(PLOT_LABEL = case_when(OPPONENT_LABEL == team_record ~ OPPONENT_LABEL,
-                                              TRUE ~ paste(expected_win,
+                                              TRUE ~ paste(
+                                                      #expected_win,
                                               perc, 
                                               OPPONENT_LABEL,
                                               sep = '\n')))
@@ -271,7 +272,15 @@ plot_elo_team_season = function(sim_team_outcomes,
                          label = plot_team_data %>% filter(.id == 1) %>% pull(PLOT_LABEL),
                          size = 4,
                          color = unique(plot_team_data$primary)
-                         )
+                         )+
+                geom_hline(yintercept = c(1575),
+                                          linetype = 'dashed',
+                                          color = 'grey60')+
+                annotate("text",
+                         x=0.25,
+                         y=1585,
+                         color = 'grey60',
+                         label = 'FBS Average')
         
 }
 
@@ -284,6 +293,12 @@ plot_wins_conference_season = function(sim_team_outcomes,
                                        season,
                                        conference,
                                        week) {
+        
+        mode_func <- function(x) {
+                ux <- unique(x)
+                ux[which.max(tabulate(match(x, ux)))]
+        }
+        
         
         season_totals = sim_team_outcomes %>%
                 filter(SEASON == season) %>%
@@ -515,7 +530,7 @@ table_wins_team_season = function(sim_team_outcomes,
                 filter(WEEK < week) %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_raw %>%
+                          games_data_tidied %>%
                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -610,7 +625,8 @@ table_wins_season = function(sim_team_outcomes,
                 group_by(SEASON, TEAM, CONFERENCE) %>% 
                 mutate(max_week = max(WEEK)) %>%
                 filter(WEEK == max_week) %>% 
-                summarize(ELO = mean(POSTGAME_ELO), .groups = 'drop') %>%
+                summarize(ELO = mean(POSTGAME_ELO), 
+                          sd = sd(POSTGAME_ELO), .groups = 'drop') %>%
                 arrange(desc(ELO))
         
         season_totals = sim_team_outcomes %>%
@@ -675,8 +691,8 @@ table_wins_season = function(sim_team_outcomes,
                 bg(., j = c(paste(seq(0, 12, 1))),
                    bg = col_func) %>%
                 add_header_row(.,
-                               values = c("","", paste("Simulated Win Totals for", season, "Season")),
-                               colwidths = c(1, 2, 13)) %>%
+                               values = c("","", "Simulated", paste("Simulated Win Totals for", season, "Season")),
+                               colwidths = c(1, 1, 1, 13)) %>%
                 flextable::align(j = c("End Elo", paste(seq(0, 12, 1))),
                                  part = "all",
                                  align = "center") %>%
@@ -1033,8 +1049,10 @@ calc_elo_ratings = function(games,
                        WEEK,
                        GAME_DATE,
                        starts_with("HOME_"), 
+                       AWAY_TEAM,
                        AWAY_POINTS) %>%
-                rename(OPP_POINTS = AWAY_POINTS) %>%
+                rename(OPPONENT = AWAY_TEAM,
+                       OPPONENT_POINTS = AWAY_POINTS) %>%
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
@@ -1043,8 +1061,10 @@ calc_elo_ratings = function(games,
                                          WEEK,
                                          GAME_DATE,
                                          starts_with("AWAY_"),
+                                         HOME_TEAM,
                                          HOME_POINTS) %>%
-                                  rename(OPP_POINTS = HOME_POINTS) %>%
+                                  rename(OPPONENT = HOME_TEAM,
+                                         OPPONENT_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,
