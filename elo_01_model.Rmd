@@ -1,0 +1,3433 @@
+---
+title: "Calculating CFB Elo Ratings"
+author: "Phil Henrickson"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+    css: "styles.css"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(jsonlite)
+library(forcats)
+library(teamcolors)
+conflict_prefer("lag", "dplyr")
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+```
+
+```{r get colors for ncaa teams}
+
+# look at colors for ncca
+ncaa_colors = teamcolors %>%
+        filter(league == 'ncaa') 
+
+# define palette for ncaa
+#league_pal("ncaa", 1)
+
+```
+
+```{r flextable settings}
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r load functions}
+
+# integer plotting function
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+source(here::here("functions/theme_phil.R"))
+rm(a)
+
+```
+
+```{r get games}
+
+# get games
+games_data_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        # remove extraneous conferences
+        mutate(ID = as.numeric(ID)) %>%
+        rename(GAME_ID = ID) %>%
+        mutate(GAME_DATE = as.Date(START_DATE))
+
+# get list of conferences that only appear in 2022
+fbs_conferences = c(
+        games_data_raw %>% 
+                filter(SEASON <=2022) %>%
+                group_by(SEASON, HOME_CONFERENCE) %>%
+                count() %>% group_by(HOME_CONFERENCE) %>%
+                mutate(seasons = n_distinct(SEASON)) %>%
+                ungroup() %>%
+                filter(seasons != 1) %>% 
+                filter(!is.na(HOME_CONFERENCE)) %>%
+                pull(HOME_CONFERENCE), 
+        games_data_raw %>% 
+                filter(SEASON <=2022) %>%
+                group_by(SEASON, AWAY_CONFERENCE) %>%
+                count() %>% group_by(AWAY_CONFERENCE) %>%
+                mutate(seasons = n_distinct(SEASON)) %>%
+                ungroup() %>%
+                filter(seasons != 1) %>%
+                filter(!is.na(AWAY_CONFERENCE)) %>%
+                pull(AWAY_CONFERENCE)) %>%
+        unique()
+
+# list of new conferences
+fcs_conferences = c(games_data_raw %>% 
+                filter(SEASON <=2022) %>%
+                group_by(SEASON, HOME_CONFERENCE) %>%
+                count() %>% group_by(HOME_CONFERENCE) %>%
+                mutate(seasons = n_distinct(SEASON)) %>%
+                ungroup() %>%
+                filter(seasons == 1) %>%
+                pull(HOME_CONFERENCE), 
+        games_data_raw %>% 
+                filter(SEASON <=2022) %>%
+                group_by(SEASON, AWAY_CONFERENCE) %>%
+                count() %>% group_by(AWAY_CONFERENCE) %>%
+                mutate(seasons = n_distinct(SEASON)) %>%
+                ungroup() %>%
+                filter(seasons == 1) %>%
+                pull(AWAY_CONFERENCE)) %>%
+        unique()
+
+# add flag for fbs game
+games_data_tidied = games_data_raw %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(GAME_MONTH = lubridate::month(GAME_DATE)) %>%
+        arrange(GAME_DATE) %>%
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           NEUTRAL_SITE == T & 
+                                                           GAME_MONTH >= 11 ~ T, TRUE ~ F)) %>%
+        mutate(FBS_GAME = (HOME_CONFERENCE%in% fbs_conferences | AWAY_CONFERENCE %in% fbs_conferences) | SEASON <= 1954) %>%
+        # filter(!(HOME_CONFERENCE %in% fcs_conferences)) %>%
+        # filter(!(AWAY_CONFERENCE %in% fcs_conferences)) %>%
+        mutate(HOME_CONFERENCE = case_when(HOME_CONFERENCE %in% fcs_conferences ~ NA_character_,
+                                           TRUE ~ HOME_CONFERENCE)) %>%
+        mutate(AWAY_CONFERENCE = case_when(HOME_CONFERENCE %in% fcs_conferences ~ NA_character_,
+                                           TRUE ~ HOME_CONFERENCE))
+```
+
+```{r get other data sets}
+
+# recruiting
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+
+# recruiting
+ranking_teams_data_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RANKINGS')) %>%
+        as_tibble() %>%
+        arrange(SEASON, WEEK)
+
+# make a table of team conference by season
+team_conference_season = games_data_raw %>% 
+  select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>% 
+  rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>% 
+  bind_rows(.,
+            games_data_raw %>%
+                    select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>% 
+                    rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>%
+  select(SEASON, TEAM, CONFERENCE) %>%
+  unique()
+
+```
+
+```{r clean up the ranking data}
+
+# flatten out the initial json
+ranking_teams_flattened = lapply(ranking_teams_data_raw$POLLS,
+       function(x) fromJSON(x, flatten=T))
+
+# name with the season and week
+names(ranking_teams_flattened) = paste(ranking_teams_data_raw$SEASON,
+                                       ranking_teams_data_raw$WEEK,
+                                       sep = ";")
+
+# create a function to assign the name of the poll to the rankings
+tidy_rankings = function(x) {
+        
+        polls = x[1]$poll
+        names(x[2]$ranks) = polls
+        
+        ranks = rbindlist(x[2]$ranks,
+                          idcol = T,
+                          fill = T) %>%
+                rename(poll = .id)
+        
+        return(ranks)
+        
+        # df = x %$% ranks %>%
+        #         arrange(rank)
+        # 
+        # df$poll = x
+        
+}
+
+# map the function over every element of the list to create a df, then bind that all together
+rankings_tidied = rbindlist(purrr::map(ranking_teams_flattened, tidy_rankings),
+           fill = T,
+           idcol=T) %>%
+        separate(.id, into = c("SEASON", "WEEK"), sep=";")
+
+```
+
+# Elo Ratings for CFB
+
+Using what we went over in the previous section, we have what we need in order to build out Elo Ratings for college football games. The data we're using is at the game level, in which we have features indicating the season, the week, the location, the teams, and the score. 
+
+```{r game level data for all teams}
+
+set.seed(8)
+games_data_tidied %>%
+        filter(SEASON > 2000 & SEASON < 2017) %>%
+        sample_n(5) %>%
+        select(GAME_ID, SEASON, WEEK, VENUE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        mutate(HOME_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    TRUE ~ 'no')) %>%
+        mutate(GAME_ID = as.character(GAME_ID),
+               SEASON = as.character(SEASON)) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+We also have additional features on team conferences, attendance, start time, betting line, as well as information from an existing Elo Model. We'll set that aside for now, as our goal here is to go through the process of developing our own Elo model. 
+
+We lose some information the further we go back, but we have outcomes of games back to the very first game between Rutgers and Princeton in 1869.
+
+```{r get outcomes since 1869}
+
+games_data_tidied %>%
+        filter(SEASON < 2022) %>%
+        group_by(SEASON) %>%
+        summarize(n_games = n_distinct(GAME_ID)) %>%
+        ggplot(., aes(x=SEASON,
+                      y=n_games))+
+        geom_col()+
+        theme_phil()
+
+```
+
+We could start this analysis going back all the way to 1869 as the starting point, but I'll start at 1970 for now since I'm at least somewhat familiar with teams in this era and will be able to eyeball some of the results
+
+I'll set every team FBS's initial rating to 1500, non FBS teams to 1200, and the scaling factor to 400. The appropriate value for K is something that I'll want to explore empirically, but I'll start it at 25 and go from there. 
+
+I'm using two more functions here to determine elo ratings. The first determines how Elo ratings are updated after each game, looking at each team's pre game Elo rating and then determing their new rating baed on the outcome and the settings for $K$ and $V$. I also have added in the option to add a slight bump to the Elo rating for the home team in order to capture home field advantage, I'll leave it at zero for now.
+
+```{r load function for updating elo ratings, echo=T}
+
+# functions for updating elo ratings\
+# load function
+source(here::here("functions/get_expected_score.R"))
+source(here::here("functions/get_new_elos.R"))
+
+# updating
+get_new_elos
+
+```
+
+The next function is what I'll use to calculate Elo ratings based on historical data, using a set of games as an input and settings for the various options to calculate Elo ratings.
+
+```{r load function for getting elo ratings based on historical games}
+
+source(here::here("functions/calc_elo_ratings.R"))
+
+calc_elo_ratings
+
+```
+
+## Initial Settings
+
+Let's run from 1970 to 2000 to see how the results change each team's Elo rating over the course of a couple decades. This means we loop over every game, look at the result, and then update each team's Elo rating based on the outcome and the margin of victory (as well as our other settings).
+
+```{r run v1 from 1970 to 2000, include=F}
+
+# now loop through a set of games
+games = games_data_tidied %>%
+        filter(SEASON >=1970) %>%
+        filter(SEASON <= 2000) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# run over games
+elo_returned = calc_elo_ratings(games,
+                          home_field_advantage = 0,
+                          reversion = 0,
+                          k = 25,
+                          v = 400)
+
+```
+
+Running this gives us a the pre and post game elo for every team for every game over the selected time period.
+
+```{r show example}
+
+set.seed(1999)
+
+elo_returned$game_outcomes %>%
+        sample_n(5) %>%
+        arrange(GAME_DATE) %>%
+        rename(DATE = GAME_DATE,
+               HOME = HOME_TEAM,
+               AWAY = AWAY_TEAM,
+               HOME_PRE_ELO = HOME_PREGAME_ELO,
+               AWAY_PRE_ELO = AWAY_PREGAME_ELO,
+               HOME_POST_ELO = HOME_POSTGAME_ELO,
+               AWAY_POST_ELO = AWAY_POSTGAME_ELO) %>%
+        select(SEASON, HOME, AWAY, HOME_POINTS, AWAY_POINTS, HOME_PRE_ELO, AWAY_PRE_ELO, HOME_POST_ELO, AWAY_POST_ELO) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate_if(is.numeric, round, 0) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+### Examples
+
+We can see how these ratings adjust for selected teams over time. At the current settings, here is each SEC team's Elo ratings fared over the selected time period.
+
+```{r get SEC v1, fig.height=8}
+
+elo_returned$team_outcomes %>%
+        filter(CONFERENCE == 'SEC') %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(LAST_GAME = GAME == max(GAME)) %>%
+        mutate(TEAM_LABEL = case_when(LAST_GAME == T ~ TEAM)) %>%
+        left_join(.,
+                  teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+      #  mutate(name = TEAM) %>%
+        ggplot(., aes(x=GAME,
+                      label = TEAM_LABEL,
+                      color = name,
+                      y=POSTGAME_ELO))+
+       geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = 0,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20
+       ) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        facet_wrap(CONFERENCE + SEASON~.,
+                   ncol = 7)+
+        theme_phil()+
+        guides(label = "none",
+               color = "none")+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, 15))+
+        scale_color_teams(name = "TEAM")+
+        ggtitle("Elo Ratings at Initial Settings")
+
+```
+
+And here's the Big 10.
+
+```{r get big ten v1, fig.height=8}
+
+elo_returned$team_outcomes %>%
+        filter(CONFERENCE == 'Big Ten') %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(LAST_GAME = GAME == max(GAME)) %>%
+        mutate(TEAM_LABEL = case_when(LAST_GAME == T ~ TEAM)) %>%
+        left_join(.,
+                  teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+      #  mutate(name = TEAM) %>%
+        ggplot(., aes(x=GAME,
+                      label = TEAM_LABEL,
+                      color = name,
+                      y=POSTGAME_ELO))+
+       geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = -1,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20
+       ) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        facet_wrap(CONFERENCE + SEASON~.,
+                   ncol = 7)+
+        theme_phil()+
+        guides(label = "none",
+               color = "none")+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, 15))+
+        scale_color_teams(name = "TEAM")+
+        ggtitle("Elo Ratings at Initial Settings")
+
+```
+
+And the Southwest Conference (RIP).
+
+```{r get swc v1, fig.height=8}
+
+elo_returned$team_outcomes %>%
+        filter(CONFERENCE == 'Southwest') %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(LAST_GAME = GAME == max(GAME)) %>%
+        mutate(TEAM_LABEL = case_when(LAST_GAME == T ~ TEAM)) %>%
+        left_join(.,
+                  teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+      #  mutate(name = TEAM) %>%
+        ggplot(., aes(x=GAME,
+                      label = TEAM_LABEL,
+                      color = name,
+                      y=POSTGAME_ELO))+
+       geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = 0,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20
+       ) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        facet_wrap(CONFERENCE + SEASON~.,
+                   ncol = 7)+
+        theme_phil()+
+        guides(label = "none",
+               color = "none")+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, 15))+
+        scale_color_teams(name = "TEAM")+
+        ggtitle("Elo Ratings at Initial Settings")
+
+```
+
+### Results
+
+How do we evaluate how *good* these Elo ratings are? First, we can look at the log loss for the predicted score for the home team (ie, the probability the home team wins) compared to the outcome for the home team.
+
+How did we do? I'll compare the result of the Elo ratings to a baseline model that assigns the home team a 60% chance of winning. 
+
+```{r log loss by week by season}
+
+# log loss
+elo_returned$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, games) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        mutate(method = 'Elo') %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                          mutate(HOME_PROB = .6) %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                          mn_log_loss(truth = HOME_WIN,
+                                    estimate = HOME_PROB,
+                                    event_level = 'second') %>%
+                          mutate(method = 'Home Win')
+                  ) %>%
+        ggplot(., aes(x=SEASON,
+                      color = method,
+                      y=.estimate,
+                      size = games))+
+        geom_point()+
+        geom_line(lwd = 1,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.2)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("log-loss")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "grey40"))+
+        ggtitle("Average Log-Loss by Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+```
+
+As we would hope, the Elo ratings outperform simply predicting that the home team will win.
+
+We can also just look at the number of games correctly predicted, and find similar results.
+
+```{r accuracy by each for initial version}
+
+# accuracy
+elo_returned$game_outcomes %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >= .5 ~ 'yes', TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, games) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                    estimate = HOME_PRED,
+                    event_level = 'second') %>%
+        mutate(method = 'Elo') %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                          mutate(HOME_PRED = factor('yes',
+                                                    levels = c('no', 'yes'))) %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                             yardstick::accuracy(truth = HOME_WIN,
+                                                 estimate = HOME_PRED,
+                                                 event_level = 'second') %>%
+                          mutate(method = 'Home Win')
+                  ) %>%
+        ggplot(., aes(x=SEASON,
+                      color = method,
+                      y=.estimate,
+                      size = games))+
+        geom_point()+
+        geom_line(lwd = 1,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("Accuracy")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "grey40"))+
+        ggtitle("Average Accuracy by Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+```
+
+```{r save v1 results for comparison}
+
+elo_returned_v1 = elo_returned
+
+```
+
+
+
+<!-- I'll save the Elo ratings computed with these settings so we can see how they compare with changes to the parameters/methodology. -->
+
+<!-- ```{r save v1 results} -->
+
+<!-- elo_ratings_returned_v1 = elo_ratings_returned -->
+
+<!-- rm(team_elo_ratings, -->
+<!--    elo_game_results, -->
+<!--    elo_ratings_returned) -->
+
+<!-- ``` -->
+
+
+## Adding Mean Reversion
+
+As it's constructed so far, the Elo ratings for a team in one season pick up right from where they left off in the previous season. This is particularly an issue in the world college football, given that players graduate and turnover in rosters year over year is high. We shouldn't expect, in other words, a team at the beginning of its 1980 season to be the exact same as it ended its 1979 season.
+
+Currently, our Elo ratings do not reset in anyway, and this means we ended up being a little bit worse at the beginning of each season.
+
+```{r look at results by season and week}
+
+## accuracy
+elo_returned$game_outcomes %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >= .5 ~ 'yes', TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, WEEK, games) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                    estimate = HOME_PRED,
+                    event_level = 'second') %>%
+        mutate(method = 'Elo') %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                          mutate(HOME_PRED = factor('yes',
+                                                    levels = c('no', 'yes'))) %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          group_by(SEASON, WEEK) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, WEEK, games) %>%
+                          yardstick::accuracy(truth = HOME_WIN,
+                                                 estimate = HOME_PRED,
+                                                 event_level = 'second') %>%
+                          mutate(method = 'Home Win')) %>%
+        ggplot(., aes(x=WEEK,
+                      group = method,
+                      color = method,
+                      by = SEASON,
+                      y=.estimate))+
+        geom_point(aes(size = games),
+                   alpha = 0.5)+
+        geom_smooth(
+                  stat = 'smooth',
+                  method = 'loess',
+                  se=F,
+                  formula = 'y ~ x')+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("Accuracy")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "grey40"))+
+        ggtitle("Accuracy by Week of Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+# elo_returned$game_outcomes %>%
+#         mutate(HOME_PRED = factor(case_when(HOME_PROB >= .5 ~ 'yes', TRUE ~ 'no'),
+#                                   levels = c("no", "yes"))) %>%
+#         mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+#                                        TRUE ~'no'))) %>%
+#         group_by(SEASON, WEEK) %>%
+#         mutate(games = n_distinct(GAME_ID)) %>%
+#         group_by(SEASON, WEEK, games) %>%
+#         yardstick::mn_log_loss(truth = HOME_WIN,
+#                     estimate = HOME_PROB,
+#                     event_level = 'second') %>%
+#         mutate(method = 'Elo') %>%
+#         bind_rows(.,
+#                   elo_returned$game_outcomes %>%
+#                           mutate(HOME_PROB = .6) %>%
+#                           mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+#                                        TRUE ~'no'))) %>%
+#                           group_by(SEASON, WEEK) %>%
+#                           mutate(games = n_distinct(GAME_ID)) %>%
+#                           group_by(SEASON, WEEK, games) %>%
+#                           yardstick::mn_log_loss(truth = HOME_WIN,
+#                                                  estimate = HOME_PROB,
+#                                                  event_level = 'second') %>%
+#                           mutate(method = 'Home Win')) %>%
+#         ggplot(., aes(x=WEEK,
+#                       group = method,
+#                       color = method,
+#                       by = SEASON,
+#                       y=.estimate))+
+#         geom_point(aes(size = games),
+#                    alpha = 0.5)+
+#         geom_smooth(
+#                   stat = 'smooth',
+#                   method = 'loess',
+#                   se=F,
+#                   formula = 'y ~ x')+
+#         theme_phil()+
+#         theme(legend.title = element_text())+
+#         guides(size = guide_legend(title = 'Number of Games',
+#                                    title.position = 'top'),
+#                color = guide_legend(title.position = 'top'))+
+#             scale_x_continuous(breaks = int_breaks)+
+#         ylab("Log Loss")+
+#         scale_color_manual(values = c("deepskyblue1",
+#                                       "grey40"))+
+#         ggtitle("Average Log-Loss by Week of Season")+
+#         coord_cartesian(ylim = c(0, 1))
+
+
+```
+
+One way we can try to improve this is by regressing each team back towards the mean at the start of each season. If we think about Elo ratings in a Bayesian way, we started each team out with a mostly uninformative prior that we updated based on new information. By the end of a season we have a much better idea about how good a team is. But, between seasons, teams can change quite a bit, and we should become less certain about what we know about a team at the start of a season. 
+
+I'll handle this by mean reverting FBS and non FBS teams slightly back to their original setting (1500 and 1200, respectively) at the start of each season. To start, I'll set this reversion to 1/4, meaning that a team's rating at the start of a season is 3/4 the result of its prior games and 1/4 back to the mean. Good teams will get pulled down slightly and bad teams will get pulled up.
+
+```{r now re run with mean reversion, include=F}
+
+rm(elo_returned)
+
+# run over games
+elo_returned = calc_elo_ratings(games,
+                          home_field_advantage = 0,
+                          reversion = 1/4,
+                          k = 25,
+                          v = 400)
+
+```
+
+### Examples
+
+How do the ratings with mean reversion compare to the ratings with no reversion?
+
+I'll take a team like Wisconsin and compare their pregame ratings over this time period under both version. At the start, the two ratings are the same, as Wisconsin hasn't played enough games to shift that far from the initial setting of 1500. But over the years, we can see how reverting Wisconsin a bit at the start of each season changes its rating. Over the course of 40 odd years, this difference starts to really add up in terms of the scale.
+
+```{r look at the same team for both versions, fig.height=8}
+
+bind_rows(elo_returned_v1$team_outcomes %>%
+                  mutate(method = 'Elo'),
+        elo_returned$team_outcomes %>%
+                mutate(method = 'Elo + Mean Reversion')) %>%
+        left_join(.,
+                          teamcolors %>%
+                                  filter(league == 'ncaa') %>%
+                                  mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        filter(TEAM == 'Wisconsin') %>%
+        group_by(method, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(LAST_GAME = GAME == max(GAME)) %>%
+        mutate(TEAM_LABEL = case_when(LAST_GAME == T ~ PREGAME_ELO)) %>%
+      #  mutate(name = TEAM) %>%
+        ggplot(., aes(x=GAME,
+                      linetype = method,
+                      by = name,
+                      label = round(TEAM_LABEL,0),
+                      color = name,
+                      y=PREGAME_ELO))+
+       geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = 0,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20
+       ) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        facet_wrap(CONFERENCE + SEASON~.,
+                   ncol = 7)+
+        theme_phil()+
+        guides(label = "none",
+               color = "none")+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, 15),
+                        ylim = c(1200, 2200))+
+        scale_color_teams(name = "TEAM")
+
+```
+
+If we look at all Big Ten teams over this time period, after we add reversion we should see the ratings tighten up at the beginning of each season.
+
+```{r now plot SEC with mena reversion, fig.height=8}
+
+elo_returned$team_outcomes %>%
+        mutate(method = 'Elo + Reversion') %>%
+        filter(CONFERENCE == 'Big Ten') %>%
+        mutate(SEASON_WEEK = factor(paste(SEASON, WEEK))) %>%
+        ungroup() %>%
+        left_join(.,
+                  teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                  by = c("TEAM"))  %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(LAST_GAME = GAME == max(GAME)) %>%
+        mutate(TEAM_LABEL = case_when(LAST_GAME == T ~ TEAM)) %>%
+      #  mutate(name = TEAM) %>%
+        ggplot(., aes(x=GAME,
+                      by = name,
+                      label = TEAM_LABEL,
+                      color = name,
+                      y=PREGAME_ELO))+
+       geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = 0,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20
+       ) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        facet_wrap(CONFERENCE + SEASON~.,
+                   ncol = 7)+
+        theme_phil()+
+        guides(label = "none",
+               color = "none")+
+        coord_cartesian(clip = 'off',
+                        xlim = c(NA, 15))+
+        scale_color_teams(name = "TEAM")
+
+
+```
+
+### Results
+
+I'll now compare the initial ratings to the updated ratings that include mean reversion. Looking at the two methods season over season, there's not much difference between them and if anything the initial version seems to do a bit better in the 80s. I could do like, a Wald test, to compare the two formally, but who has time for that.
+
+```{r compare initial to reversion accuracy and log loss}
+
+# accracy
+elo_returned_v1$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >= .5 ~ 'yes',
+                                            TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, games) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                    estimate = HOME_PRED,
+                    event_level = 'second') %>%
+        mutate(method = 'Elo ') %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                                  mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          mutate(HOME_PRED = factor(case_when(HOME_PROB >= .5 ~ 'yes',
+                                            TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                          yardstick::accuracy(truth = HOME_WIN,
+                                              estimate = HOME_PRED,
+                                              event_level = 'second') %>%
+                          mutate(method = 'Elo + Mean Reversion')) %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                          mutate(HOME_PRED = factor('yes',
+                                                    levels = c("no", "yes"))) %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                         yardstick::accuracy(truth = HOME_WIN,
+                                    estimate = HOME_PRED,
+                                    event_level = 'second') %>%
+                          mutate(method = 'Home Win')
+                  ) %>%
+        ggplot(., aes(x=SEASON,
+                      color = method,
+                      y=.estimate,
+                      size = games))+
+        geom_point()+
+        geom_line(lwd = 1,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.2)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("Accuracy")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "navy",
+                                      "grey40"))+
+        ggtitle("Average Accuracy by Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+# log loss
+elo_returned_v1$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, games) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        mutate(method = 'Elo ') %>%
+        bind_rows(.,
+                     elo_returned$game_outcomes %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                          mn_log_loss(truth = HOME_WIN,
+                                    estimate = HOME_PROB,
+                                    event_level = 'second') %>%
+                          mutate(method = 'Elo + Mean Reversion')) %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                          mutate(HOME_PROB = .6) %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                          mn_log_loss(truth = HOME_WIN,
+                                    estimate = HOME_PROB,
+                                    event_level = 'second') %>%
+                          mutate(method = 'Home Win')
+                  ) %>%
+        ggplot(., aes(x=SEASON,
+                      color = method,
+                      y=.estimate,
+                      size = games))+
+        geom_point()+
+        geom_line(lwd = 1,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.2)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("log-loss")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "navy",
+                                      "grey40"))+
+        ggtitle("Average Log-Loss by Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+```
+
+If anything this reversion seems to be hurting the results over this time period. I wonder if we do better in the early weeks but worse in the latter?
+
+```{r show results by week by season with updated version}
+
+elo_returned_v1$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, WEEK, games) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        mutate(method = 'Elo ') %>%
+        bind_rows(.,
+                     elo_returned$game_outcomes %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                         group_by(SEASON, WEEK) %>%
+                        mutate(games = n_distinct(GAME_ID)) %>%
+                        group_by(SEASON, WEEK, games) %>%
+                        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+                          mutate(method = 'Elo + Mean Reversion')) %>%
+        bind_rows(.,
+                  elo_returned$game_outcomes %>%
+                          mutate(HOME_PROB = .6) %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                       group_by(SEASON, WEEK) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, WEEK, games) %>%
+                          mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+                          mutate(method = 'Home Win')
+                  ) %>%
+        ggplot(., aes(x=WEEK,
+                      group = method,
+                      color = method,
+                      by = SEASON,
+                      y=.estimate))+
+        geom_point(aes(size = games),
+                   alpha = 0.5)+
+        geom_smooth(
+                  stat = 'smooth',
+                  method = 'loess',
+                  se=F,
+                  formula = 'y ~ x')+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'),
+               color = guide_legend(title.position = 'top'))+
+            scale_x_continuous(breaks = int_breaks)+
+        ylab("Log Loss")+
+        scale_color_manual(values = c("deepskyblue1",
+                                      "navy",
+                                      "grey40"))+
+        ggtitle("Log Loss by Week of Season")+
+        coord_cartesian(ylim = c(0, 1))
+
+```
+
+Hmmm. The opposite, if anything. I'll try tuning the reversion at different settings, I have another idea of how to handle season over season changes, but we need to have recruiting data for that.
+
+```{r save v2}
+
+elo_returned_v2 = elo_returned
+
+```
+
+## Adding Home Field Advantage
+
+I've seen other Elo rating systems explicitly add points to teams that are at home as a means of accounting for home field advantage. Right now, I'm not doing that, so we should expect to see the home team outperform their Elo rating. Is that the case? I'll look at the performance of the predictions from each of the models so far. Generally speaking, we don't do as well detecting when predicting the away team is going to win.
+
+```{r results by home team}
+
+class_metrics = metric_set(yardstick::precision,
+                           yardstick::recall,
+                           yardstick::f_meas,
+                           yardstick::accuracy,
+                           yardstick::bal_accuracy,
+                           yardstick::kap,
+                           yardstick::npv,
+                           yardstick::ppv)
+
+# v1 initial settings
+elo_returned_v1$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        yardstick::conf_mat(HOME_WIN, HOME_PRED,
+                            dnn = c("Home Pred", "Home Win"))
+
+# v2 mean reversion
+elo_returned_v2$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        yardstick::conf_mat(HOME_WIN, HOME_PRED, 
+                            dnn = c("Home Pred", "Home Win"))
+
+# bind together
+bind_rows(
+         elo_returned_v1$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo'),
+         elo_returned_v2$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo + Mean Reversion')) %>%
+        group_by(method) %>%
+        class_metrics(truth = HOME_WIN,
+                      estimate = HOME_PRED, 
+                      event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+The Elo ratings with mean reversion are basically the same overall, though both versions tend to do better when predicting that the home team will win (PPV). When the models predict that the home team will lose, they don't do as well (NPV). Right now, we tend to under predict how much the home team wins.
+
+```{r look at probs for home vs away along with classification}
+
+library(jcolors)
+
+elo_returned_v2$game_outcomes %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        mutate(method = 'Elo + Mean Reversion') %>%
+        mutate(PRED_CORRECT = HOME_PRED == HOME_WIN) %>%
+        ggplot(., aes(x=HOME_PROB,
+                      fill = PRED_CORRECT))+
+        geom_histogram(bins = 100, alpha = 0.7)+
+        facet_wrap(HOME_WIN + method ~.,
+                   ncol = 1)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+      #  scale_fill_jcolors()+
+        geom_vline(xintercept = 0.5,
+                   linetype = 'dashed')+
+        scale_fill_manual(values = c("red", "blue"))
+        
+
+```
+
+One other parameter I want to toggle here is a home team advantage. I'll start by adding a 25 point bump to the Elo score for the home team, as this roughly maps to about a 3% increase in the probability of winning. I won't add any bonus for games played at neutral sites. I'll now re run making this home team adjustment.
+
+```{r amend functions to include home team adjustment, include=F}
+
+rm(elo_returned)
+
+# run over games
+elo_returned = calc_elo_ratings(games,
+                          home_field_advantage = 25,
+                          reversion = 1/4,
+                          k = 25,
+                          v = 400)
+
+elo_returned_v3 = elo_returned
+
+```
+
+### Results
+
+I'll now compare the various versions we've computed so far, summarizing to their performance over the entire time period we've looked at.
+
+```{r compare performance between all methods}
+
+# bind together
+bind_rows(
+         elo_returned_v1$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo'),
+         elo_returned_v2$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo + Mean Reversion'),
+         elo_returned_v3$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo + Mean Reversion + Home Advantage')) %>%
+        group_by(method) %>%
+        class_metrics(truth = HOME_WIN,
+                      estimate = HOME_PRED, 
+                      event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit()
+
+bind_rows(
+         elo_returned_v1$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo'),
+         elo_returned_v2$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo + Mean Reversion'),
+         elo_returned_v3$game_outcomes %>%
+                 mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                 mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                 mutate(method = 'Elo + Mean Reversion + Home Advantage')) %>%
+        group_by(method) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+The home field advantage makes us slightly more accurate by picking up a few more home wins, but generally speaking the differences are all still pretty negligible.
+
+## Tuning Over All Parameters
+
+At this point, we've covered a few different parameters that we can toggle when computing Elo ratings: the K factor, the scaling factor (V), mean reversion, and home field advantage. I'll now tune over these directly and see we do by changing these to a variety of different settings.
+
+```{r tune elo rating, include=F}
+
+k_pars = seq(5, 50, 15)
+v_pars = 400
+reversion_pars = seq(0, 0.3, 0.1)
+home_pars = seq(0, 75, 15)
+
+# make grid
+grid_pars = expand.grid(k = k_pars,
+            v = v_pars,
+            reversion = reversion_pars,
+            home_field_advantage = home_pars)
+
+```
+
+```{r set parallel core, eval=F}
+
+doParallel::registerDoParallel(
+        parallel::detectCores()-1
+        )
+
+```
+
+
+```{r loop over parameters, eval=F}
+
+# loop over settings in tuning grid in parallel
+elo_tuning_results = foreach(i = 1:nrow(grid_pars), .combine = bind_rows) %dopar% {
+        
+        # get par row
+        pars = grid_pars[i,]
+        
+        # compute elo
+        elo_returned = calc_elo_ratings(games,
+                          home_field_advantage = pars$home_field_advantage,
+                          reversion = pars$reversion,
+                          k = pars$k,
+                          v = pars$v,
+                          verbose = F)
+        
+        # grab game outcomes
+        out = elo_returned$game_outcomes %>%
+                mutate(home_field_advantage = pars$home_field_advantage,
+                       reversion = pars$reversion,
+                       k = pars$k,
+                       v = pars$v)
+            
+        # progress           
+        cat("\r", i, "of", nrow(grid_pars), "grid parameters completed");  flush.console()
+        
+        # return
+        out
+        
+}
+
+registerDoSEQ()
+
+```
+
+```{r register seq, eval=F}
+
+save(elo_tuning_results,
+     file = here::here("data/elo_tuning_results.Rdata"))
+
+```
+
+Once that's finished we can look at how the different ratings performed across the combination of tuning parameters.
+
+```{r check on tuning results}
+
+load(here::here("data/elo_tuning_results.Rdata"))
+
+# log loss
+elo_tuning_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        arrange(.estimate) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        head(10) %>%
+        flextable() %>%
+        autofit()
+
+# roc auc
+elo_tuning_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        roc_auc(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        arrange(desc(.estimate)) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        head(10) %>%
+        flextable() %>%
+        autofit()
+
+# prediction metrics
+elo_tuning_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        class_metrics(truth = HOME_WIN,
+                      estimate = HOME_PRED, 
+                      event_level = 'second') %>%
+        filter(.metric == 'f_meas') %>%
+        arrange(desc(.estimate)) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+```{r plot across tuning parameters}
+
+elo_tuning_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        mutate(home_field_advantage = factor(home_field_advantage)) %>%
+        ggplot(., aes(x=k,
+                      y=.estimate,
+                      color = home_field_advantage))+
+        facet_wrap(v + reversion~.,
+                   ncol = 2)+
+        theme_bw()+
+        geom_point()+
+        geom_line()+
+        scale_color_viridis_d()
+
+```
+
+As before, we get pretty similar results across the board. I'll go with parameters with the lowest log loss over the selected time period.
+
+```{r select tuning parametets}
+
+best_pars = elo_tuning_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        arrange(.estimate) %>%
+        slice_min(., order_by = .estimate, n=3) %>%
+        select(k, v, reversion, home_field_advantage)
+
+```
+
+
+## Validating Selected Parameters
+
+At the best candidates for the selected parameters, I'll compute the Elo ratings over the time period we've used so far. I'll then evaluate their performance over the next decade of games.
+
+```{r get games for time periods}
+
+# now loop through a set of games
+train_games = games_data_tidied %>%
+        filter(SEASON >=1970) %>%
+        filter(SEASON <= 2000) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# valid
+valid_games = games_data_tidied %>%
+        filter(SEASON > 2000) %>%
+        filter(SEASON <= 2010) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+```
+
+
+```{r get results on validation set}
+
+elo_valid_results = foreach(i = 1:nrow(best_pars), .combine = bind_rows) %do% {
+        
+        # get par row
+        pars = best_pars[i,]
+        
+        # compute elo
+        elo_train = calc_elo_ratings(train_games,
+                          home_field_advantage = pars$home_field_advantage,
+                          reversion = pars$reversion,
+                          k = pars$k,
+                          v = pars$v,
+                          verbose = F)
+        
+        # now use the ratings from this for the valid set
+        elo_valid = calc_elo_ratings(valid_games,
+                                     teams = elo_train$teams,
+                                     team_seasons = elo_train$team_seasons,
+                          home_field_advantage = pars$home_field_advantage,
+                          reversion = pars$reversion,
+                          k = pars$k,
+                          v = pars$v,
+                          verbose = F)
+        
+        # grab game outcomes
+        out = elo_valid$game_outcomes %>%
+                mutate(home_field_advantage = pars$home_field_advantage,
+                       reversion = pars$reversion,
+                       k = pars$k,
+                       v = pars$v)
+            
+        # progress           
+        cat("\r", i, "of", nrow(best_pars), "grid parameters completed");  flush.console()
+        
+        # return
+        out 
+        
+}
+
+```
+
+Of these candidate parameters, which approach did the best for the next decade of games?
+
+```{r next set of games}
+
+elo_valid_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        mn_log_loss(truth = HOME_WIN,
+                    estimate = HOME_PROB,
+                    event_level = 'second') %>%
+        arrange(.estimate) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit()
+
+elo_valid_results %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        group_by(k, v, reversion, home_field_advantage) %>%
+        class_metrics(truth = HOME_WIN,
+                    estimate = HOME_PRED,
+                    event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        flextable() %>%
+        autofit()
+
+
+```
+
+Again, the results are pretty consistent, so I'll go with the values stated previously.
+
+```{r get elo ratings for trainng and valid, include=F}
+
+selected_pars = best_pars[2,]
+
+# compute elo on train
+elo_train = calc_elo_ratings(train_games,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+        
+# now use the ratings from this as the initial ratings for the validation set
+elo_valid = calc_elo_ratings(valid_games,
+                             teams = elo_train$teams,
+                             team_seasons = elo_train$team_seasons,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+
+```
+
+# Elo Ratings and the Margin of Victory
+
+All of the work so far has been focused on predicting the winner of games in terms of both the probability and the label. 
+
+But, a nice feature of the Elo rating framework is that it also extends to predicting the difference in points between the two teams. Here is the relationship between the point differential (Home Points - Away Points) and difference in pre game Elo ratings (Home Pre Elo - Away Pre Elo) from the seasons 1980 to 2000.
+
+```{r we can also look at the predicted spread vs the actual, fig.height=8}
+
+elo_train$game_outcomes %>%
+        filter(SEASON >= 1980) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        ggplot(., aes(x=HOME_ELO_DIFF, y=HOME_SCORE_DIFF))+
+        geom_point(alpha=0.25)+
+        facet_wrap(SEASON ~., ncol =5) +
+        theme_phil()+
+        geom_vline(xintercept =0,
+                   linetype = 'dotted')+
+        geom_hline(yintercept =0,
+                   linetype = 'dotted')+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x')+
+        ggtitle("Predicted Point Spread via Pre Game Elo Scores")+
+        xlab("Home Pregame Elo - Away Pre Game Elo")+
+        ylab("Home Points - Away Points")
+
+```
+
+I'm omitting the first few years, as as the initial few seasons are being used to learn the Elo scores, but once we have a few seasons worth of data we start to see a pretty consistent relatioship between the difference in Elo ratings and the game's point differential.
+
+## Regression
+
+What is this relationship? I'll regress the point spread on the difference in pregame Elo ratings for each of these individual years and over all years. Then, we'll look at the coefficent on the difference in Elo ratings.
+
+```{r fit linear model to each year, include=F}
+
+library(tidybayes)
+library(broom.mixed)
+library(mgcv)
+
+# fit linear models at each year
+suppressMessages({
+nested_lm_points = elo_train$game_outcomes %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest(-SEASON) %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ stan_glm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x)))
+})
+
+# fit linear model after first few years in training
+lm_points = elo_train$game_outcomes %>%
+        filter(SEASON >=1975) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest() %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ stan_glm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance))
+
+# fit linear model after first few years in training
+points_model = elo_train$game_outcomes %>%
+        filter(SEASON >=1975) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest() %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        pluck("lm",1)
+
+```
+
+For the model trained on most of the training set of games, the estimated effect of HOME_ELO_DIFF was about .05. The intercept is a little over 0.65, which indicates the expected point differential in which the two teams have equivalent Elo ratings. This would be higher than if we were not adjusting for the home field advantage in the Elo ratings directly. This would suggest that our adjust isn't nearly enough to capture the entirety of the home field advantage, but we'll stick with it.
+
+The coefficient of .05 for the Elo diff means that a 20 point lead in Elo translates to about a point on the spread. This is linear, so a 200 point lead translates to about a 10 point expected margin of victory.
+
+```{r look at lm points}
+
+lm_points %>%
+        select(tidied) %>%
+        unnest(tidied) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit
+
+```
+
+This effect has changed a bit over time, which we can see by looking at model fit to each season. But it's been hovering around .05 for the time period shown here.
+
+```{r tidy and plot the effect}
+
+# plot the coef
+nested_lm_points %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        select(SEASON, tidied) %>%
+        unnest(tidied) %>%
+        filter(term == 'HOME_ELO_DIFF') %>%
+        ggplot(., aes(x=SEASON,
+                      y=estimate,
+                      ymin = conf.low,
+                      ymax = conf.high))+
+        geom_point()+
+        geom_pointrange()+
+        theme_phil()+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed',
+                   lwd = 1.1)+
+        geom_hline(yintercept = 0.05,
+                   linetype = 'dotted',
+                   color ='grey60',
+                   lwd = 1.1)
+
+```
+
+This isn't to say that a 200 point lead on Elo means a 10 point spread is suddenly a sure thing. We can look at the standard deviation of the residuals (sigma) from each model to get a sense of how far off, on average, predictions for the point differential were. Generally, sigma was around 16, meaning the predictions were off by 16 points *on average*.
+
+```{r look at the uncertainty}
+
+# show sigma for model trained on multiple seasons
+lm_points %>%
+        select(glanced) %>%
+        unnest(glanced) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit
+        
+# # show sigma by season
+# nested_lm_points %>%
+#         mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+#         mutate(glanced = map(lm, glance)) %>%
+#         select(SEASON, tidied, glanced) %>%
+#         select(SEASON, glanced) %>% 
+#         unnest() %>%
+#         select(SEASON, algorithm, nobs, sigma) %>%
+#         ggplot(., aes(x=SEASON, y = sigma)) +
+#         geom_point(aes(size=nobs))+
+#         geom_line()+
+#         theme_phil()
+
+```
+
+That number seems laughably high, but it's skewed somewhat by the model being *really off* for certain games. The in sample mean absolute error was closer to 12 points, with an Rsquared of around .38.
+
+```{r look at the distribution of predicted vs actual}
+
+library(forcats)
+
+lm_points %>%
+        mutate(fitted = map(lm, ~ predict(.x))) %>%
+        select(data, fitted) %>%
+        unnest() %>%
+        mutate(resid = round(fitted,0) - HOME_SCORE_DIFF) %>%
+        ggplot(., aes(x=fitted, y=HOME_SCORE_DIFF))+
+        geom_point(alpha = 0.2)+
+        theme_phil()+
+        geom_abline(slope =1, 
+                    intercept=0)+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        geom_hline(yintercept=0,
+                   linetype = 'dashed')+
+        stat_cor(
+                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+                  label.x = 3,
+                  p.accuracy = .01)
+
+lm_points %>%
+        mutate(fitted = map(lm, ~ predict(.x))) %>%
+        select(data, fitted) %>%
+        unnest() %>%
+        mutate(resid = round(fitted,0) - HOME_SCORE_DIFF) %>%
+        yardstick::mae(truth = HOME_SCORE_DIFF,
+                       estimate = fitted) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit()
+
+# lm_points %>%
+#         mutate(fitted = map(lm, ~ predict(.x))) %>%
+#         select(data, fitted) %>%
+#         unnest() %>%
+#         mutate(resid = round(fitted,0) - HOME_SCORE_DIFF) %>%
+#         mutate(SEASON = factor(SEASON)) %>%
+#         ggplot(., aes(x=resid,
+#                       y=fct_rev(SEASON)))+
+#         stat_density_ridges(quantile_lines = T,
+#                             quantiles = c(0.1, 0.5, 0.9))+
+#         theme_phil()+
+#         geom_vline(xintercept = c(-21, -7, 0, 7, 21),
+#                    linetype = 'dotted')
+        
+```
+
+## Simulating the Margin of Victory
+
+What's the point of this? In addition to using Elo ratings to predict the outcomes of games, we can also use them to simulate the expected point differential. I'll use one game as an example illustrate.
+
+Let's go to a week 1 game in 2001: Wisconsin vs Virginia. Based on computed Elo ratings, Wisconsin was the favorite going into this game, with around a 130 point advantage in pregame Elo. As the home team, this means Wisconsin is about a 10.5 point favorite according to our model (home team advantage). That's the point estimate, but we can simulate from the model a few thousand times and plot the distribution of the simulations to see the uncertainty around the estimate.
+
+```{r predict the point differential for one game in , fig.height=4}
+
+# get model object out
+lm_train_points = lm_points %>%
+        pluck("lm", 1)
+
+# get sample game
+sample_game = elo_valid$game_outcomes %>% 
+        filter(GAME_ID == 212370275) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS)
+
+# simulate this - add predicted draws
+sample_sims = sample_game %>%
+        add_predicted_draws(lm_train_points)
+
+# plot the simulations
+sample_sims %>%
+        # mutate(HOME_WIN = case_when(sim > 0 ~ 'yes',
+        #                             TRUE ~ 'no')) %>%
+        ggplot(., aes(x=.prediction))+
+        geom_histogram(bins = 100)+
+        geom_vline(xintercept = sample_game$HOME_SCORE_DIFF,
+                   lwd = 1.1,
+                   color = 'red')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dotted')+
+        theme_phil()+
+        xlab("Simulated Point Differential")
+
+# show distribution
+sample_sims %>%
+        median_qi(.width =c(.5, .8)) %>%
+        select(.prediction, .lower, .upper, .width) %>%
+        mutate_if(is.numeric, round, 1) %>%
+        flextable() %>%
+        autofit()
+        
+
+```
+
+The 50% prediction interval for the game ranged from about -1 to 21, while the 80% interval ranged from about -11 to 31. 
+
+What was the actual score? Wisconsin 26, Virginia 17, for a point differential of 9. So in this case, the model did kinda nail it, but the point is the uncertainty is generally quite high with our estimates. If we look at all games from week 1, we can see that the model got some right and some wrong - the actual margin is in red, the prediction interval is in black.
+
+```{r use model to simulate 2001}
+
+# get sample game
+sample_games = elo_valid$game_outcomes %>% 
+        filter(SEASON == 2001 & WEEK ==1) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS)
+
+# simulate this - add predicted draws
+sample_sims = sample_games%>%
+        add_predicted_draws(lm_train_points)
+
+# # now predict the 2001 season
+# p = sample_sims %>%
+#         ggplot(aes(y = paste(HOME_TEAM,
+#                              AWAY_TEAM,
+#                              sep = "-"),
+#                    x = .prediction))+
+#         stat_density_ridges(color = 'white',
+#                             quantile_lines = T,
+#                             alpha =0.8)+
+#         geom_segment(data = sample_games,
+#                    aes(y=paste(HOME_TEAM,
+#                                AWAY_TEAM,
+#                                sep = "-"),
+#                        yend = paste(HOME_TEAM,
+#                                AWAY_TEAM,
+#                                sep = "-"),
+#                        x = HOME_SCORE_DIFF,
+#                        xend = HOME_SCORE_DIFF))
+#         geom_vline(data = sample_games,
+#                    aes(y=paste(HOME_TEAM,
+#                                AWAY_TEAM,
+#                                sep = "-"),
+#                        xintercept = HOME_SCORE_DIFF))
+#                    linetype = 'dashed')+
+#         theme_phil()
+# 
+# s
+# 
+# suppressMessages(print(p))+
+#         geom_vline(data = sample_sims,)
+# # 
+#         geom_pointinterval(position = position_dodge(width = .3))+
+#         geom_point(data = sample_sims %>%
+#                            median_qi(.width = c(0.5, .8)),
+#                    aes(x = HOME_SCORE_DIFF),
+#                    size = 4,
+#                    color = 'red')+
+#         theme_phil()+
+#         geom_vline(xintercept = 0
+#         ylab("Game")+
+#         xlab("Home Points - Away Points")
+# 
+sample_sims %>%
+        median_qi(.width = c(0.5, .8)) %>%
+        ggplot(aes(y = paste(HOME_TEAM,
+                             AWAY_TEAM,
+                             sep = "-"),
+                   x = .prediction, xmin = .lower, xmax = .upper))+
+        geom_pointinterval(position = position_dodge(width = .3))+
+        geom_point(data = sample_sims %>%
+                           median_qi(.width = c(0.5, .8)),
+                   aes(x = HOME_SCORE_DIFF),
+                   size = 4,
+                   color = 'red')+
+        theme_phil()+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        ylab("Game")+
+        xlab("Home Points - Away Points")
+#         
+```
+
+We can do this for the entire season and look to see how the model generally did over the entire 2001 season.
+
+```{r look at sims for 2001 season, fig.height=8}
+
+elo_valid$game_outcomes %>% 
+        filter(SEASON == 2001) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        add_predicted_draws(lm_train_points, ndraws = 1) %>%
+        mutate(.pred = round(.prediction, 0)) %>%
+        mutate(HOME_SCORE_DIFF_char = case_when(HOME_SCORE_DIFF > 0 ~ paste("+", HOME_SCORE_DIFF, sep=""),
+                                    HOME_SCORE_DIFF == 0 ~ paste("Tie"),
+                                    HOME_SCORE_DIFF < 0 ~ paste(HOME_SCORE_DIFF, sep=""))) %>%
+        mutate(sim_char = case_when(.pred > 0 ~ paste("+", .pred, sep=""),
+                                    .pred == 0 ~ paste("Tie"),
+                                    .pred < 0 ~ paste(.pred, sep="")),
+               GAME = paste(HOME_TEAM, " ", AWAY_TEAM, "\n",
+                            "Actual: ", HOME_TEAM, " ", HOME_SCORE_DIFF_char, "\n",
+                            "Sim: ", HOME_TEAM, " ", sim_char, sep="")) %>%
+        mutate(CORRECT = case_when(.pred >0 & HOME_SCORE_DIFF >0 ~ 'yes',
+                                   .pred <0 & HOME_SCORE_DIFF <0 ~ 'yes',
+                                   TRUE ~ 'no')) %>%
+        ggplot(., aes(x=HOME_SCORE_DIFF,
+                      color = CORRECT,
+                      label = GAME,
+                      y=.pred))+geom_point()+
+        facet_wrap(SEASON + WEEK ~., ncol =3)+
+        geom_text(check_overlap=T, 
+                  vjust=-0.5, size=2)+
+        theme_phil()+
+       scale_color_manual(values = c("red", "blue"))+
+        geom_vline(xintercept =0,
+                   linetype = 'dotted')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dotted')+
+        xlab("Simulated Point Diff")+
+        ylab("Actual Point Diff")
+
+
+```
+
+<!-- ```{r simulate and compare point differential} -->
+
+<!-- set.seed(2) -->
+<!-- foo %>% -->
+<!--         filter(SEASON == 2001) %>% -->
+<!--         mutate(sim = map(lm, simulate)) %>% -->
+<!--         select(SEASON, data, sim) %>% -->
+<!--         unnest() %>% -->
+<!--         mutate(sim_1 = round(sim_1, 0)) %>% -->
+<!--         mutate(HOME_SCORE_DIFF_char = case_when(HOME_SCORE_DIFF > 0 ~ paste("+", HOME_SCORE_DIFF, sep=""), -->
+<!--                                     HOME_SCORE_DIFF == 0 ~ paste("Tie"), -->
+<!--                                     HOME_SCORE_DIFF < 0 ~ paste(HOME_SCORE_DIFF, sep=""))) %>% -->
+<!--         mutate(sim_char = case_when(sim_1 > 0 ~ paste("+", sim_1, sep=""), -->
+<!--                                     sim_1 == 0 ~ paste("Tie"), -->
+<!--                                     sim_1 < 0 ~ paste(sim_1, sep="")), -->
+<!--                GAME = paste(HOME_TEAM, " ", AWAY_TEAM, "\n", -->
+<!--                             "Actual.:", HOME_TEAM,  HOME_SCORE_DIFF_char, "\n", -->
+<!--                             "Sim:", HOME_TEAM, sim_char, sep="")) %>% -->
+<!--         mutate(CORRECT = case_when(sim_1 >0 & HOME_SCORE_DIFF >0 ~ 'yes', -->
+<!--                                    sim_1 <0 & HOME_SCORE_DIFF <0 ~ 'yes', -->
+<!--                                    TRUE ~ 'no')) %>% -->
+<!--         ggplot(., aes(x=HOME_SCORE_DIFF, -->
+<!--                       color = CORRECT, -->
+<!--                       label = GAME, -->
+<!--                       y=sim_1))+geom_point()+ -->
+<!--         geom_text(check_overlap=T, -->
+<!--                   vjust=-0.5, size=2)+ -->
+<!--         theme_phil()+ -->
+<!--         scale_color_manual(values = c("red", "blue"))+ -->
+<!--         facet_wrap(SEASON + WEEK~., -->
+<!--                    ncol = 4)+ -->
+<!--         geom_vline(xintercept =0, -->
+<!--                    linetype = 'dotted')+ -->
+<!--         geom_hline(yintercept = 0, -->
+<!--                    linetype = 'dotted') -->
+
+<!-- ``` -->
+
+
+```{r rm elements computed so far}
+
+rm(elo_returned,
+   elo_returned_v1,
+   elo_returned_v2,
+   elo_returned_V3)
+
+```
+
+# Simulating an Entire Season
+
+Okay, so at this point we have everything we need to try out simulating entire seasons. 
+
+To simulate a season, we simulate each game based on the pre game Elo scores for each team. Say that Team A has a 67% chance of winning based on the two teams Elo scores. In that case, I can simulate the game by pulling from a Bernoulli distribution where p =.67. Based on that result, I then compute the outcome and update the ratings. I repeat this process N times for every game, meaning that the Elo ratings are themselves updated on the basis of each simulated result. If I simulate a season 1000 times, I get a distribution of simulated outcomes for every game and team, which I can then use to obtain probabilities of specific events. 
+
+The snag with this approach is that I'm using a margin of victory multiplier to update ratings after each game. To use this approach, I need to not only simulate the winner, but also the point margin of each game.  This is where the model to predict the point differential comes in.
+
+I can simulate the outcome and margin of each game by pulling one simulation from the points model, then use this to update the ratings. 
+
+```{r load sim elo ratings func}
+
+source(here::here("functions", "simulateX.R"))
+source(here::here("functions", "sim_game_margin.R"))
+source(here::here("functions", "sim_elo_ratings.R"))
+
+# show functions
+sim_game_margin
+sim_elo_ratings
+
+```
+
+## The 2001 Season
+
+To show this works, I'll simulate the entire 2001 season starting with the Elo ratings we computed on games from 1970-2000.
+
+```{r set up parallel, include=F}
+
+library(future.apply)
+plan(multisession, workers = 7)
+
+```
+
+
+```{r simulate 2001 season}
+
+set.seed(1999)
+sim_seasons = future_replicate(1000,
+                  sim_elo_ratings(valid_games %>%
+                                          filter(SEASON == 2001),
+                                  teams = elo_train$teams,
+                                  team_seasons = elo_train$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+# get outcomes into data frames
+sim_team_outcomes = rbindlist(sim_seasons['team_outcomes',],
+          idcol = T)
+
+sim_game_outcomes = rbindlist(sim_seasons['game_outcomes',],
+                              idcol = T)
+
+```
+
+```{r define functions for plotting season sims}
+
+source(here::here("functions", "plot_elo_conference_season.R"))
+source(here::here("functions", "plot_elo_team_season.R"))
+source(here::here("functions", "plot_wins_conference_season.R"))
+source(here::here("functions", "table_wins_conference_season.R"))
+source(here::here("functions", "table_wins_team_season.R"))
+
+```
+
+## Simulated Elo Paths
+
+I'll plot the results of these simulations for every team in the Big 12. This plot shows the simulated postgame Elo ratings for each team in this conference for the 2001 season, where each line is one possible path that the team's season might take based on the simulated results.
+
+```{r plot big 12 elo for 2001}
+
+plot_elo_conference_season(sim_team_outcomes,
+                           2001,
+                           'Big Ten',
+                           15)
+
+```
+
+This ends up painting a pretty interesting picture of how each team's season might unfold. In each simulation of a season, a team's Elo rating is updated after each game, which affects how likely they are to win their next game, which affects their Elo rating for the next game, and so on. When we see many lines overlap, this is because there is a typical path based on a team's schedule for how their season is likely to unfold.
+
+Let's zoom into the simulations for Kansas State's 2001 season. I'll plot Kansas State's pregame Elo rating in every simulation across each game in this season. Going into the season, based on their ratings from the last season, they were slight favorites on the road at USC, but it could easily go the other way. The result of this game sends KState on two pretty different paths. Regardless of how they played at USC, they're likely to win against New Mexico State (and only marginally increase their Elo rating). But, in the simulations where they beat USC, they were more likely to beat Oklahoma; when they lost to USC, they were less likely to beat Oklahoma.
+
+After each of these games, we would be able to update our Elo rating and simulate the rest of the season. But before any games happen, summing up the simulations gives us our preseason probabilities for each matchup.
+
+```{r look at K state 2001}
+
+plot_elo_team_season(sim_team_outcomes,
+                     2001,
+                     'Kansas State',
+                     15)
+
+```
+
+Interestingly, Kansas State had a poor year in 2001 relative to our expectations. Prior to the season, they were favorites to win 9 out of their 11 games. We'll dive into win totals next to take a look at this.
+
+```{r looking now at our expected record}
+
+table_wins_team_season(sim_team_outcomes,
+                       season = 2001,
+                       'Kansas State',
+                       15)
+
+```
+
+## Win Totals
+
+The simulated Elo ratings can tell us the general expected story for a team's season. But what we probably care about is just the wins. I'll make a similar plot but show each team's simulated win count over the course of a season.
+
+```{r show the win totals for 2001}
+
+# wins
+sim_team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        filter(WEEK < 15) %>%
+        filter(CONFERENCE == 'Big 12') %>%
+        mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                               TRUE ~ -1)) %>%
+        arrange(.id, SEASON, TEAM, GAME_DATE) %>%
+        group_by(.id, SEASON, TEAM) %>%
+        mutate(GAME = row_number()) %>%
+        mutate(wins = cumsum(WIN)) %>%
+        left_join(., teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        ggplot(., aes(x=GAME,
+                      color = name,
+                      group = .id,
+                      y = wins)) +
+        geom_line(position=position_jitter(w=0.0, h=0.2),
+                  alpha = 0.01,
+                  lwd = 1.04)+
+        # geom_line(stat = 'smooth',
+        #           method = 'loess',
+        #           formula = 'y ~ x',
+        #           span = 0.25,
+        #           alpha = 0.08)+
+        theme_phil()+
+        facet_wrap(paste(TEAM, SEASON) ~.,
+                   ncol =4)+
+        scale_color_teams(name = "TEAM")+
+        guides(color = 'none')+
+        ggtitle("Simulated Win Differential by Team over Season",
+                subtitle = str_wrap("Each line is one result from simulating a team's season. Displaying 1000 simulations.", 120))+
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 10))+
+        xlab("Game")+
+        ylab("Win Total")+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')+
+        coord_cartesian(ylim = c(-12, 12))
+        
+```
+
+For win totals, we probably mostly care about showing the distribution of wins for each team at the end of the season. This is the distribution of wins in every simulation.
+
+```{r distribution of wins by 2001 season}
+
+plot_wins_conference_season(sim_team_outcomes,
+                            season = 2001,
+                            conference = 'Big 12',
+                            week = 15)
+
+```
+
+We can put all this info into one table by counting the number of simulations in which each team fell into number of wins. That will give us our probabilities for each team's win total going into this season.
+
+```{r probability table for 2001 big 12}
+
+table_wins_conference_season(sim_team_outcomes,
+                             2001,
+                             15,
+                             'Big 12')
+
+```
+
+And we can look at this for all teams, not just the Big 12...
+
+```{r 2001 results all teams table}
+
+source(here::here("functions", "table_wins_season.R"))
+
+table_wins_season(sim_team_outcomes = sim_team_outcomes,
+                  season = 2001,
+                  15)
+
+```
+
+## Pre Season Results
+
+How well did this approach do in predicting the 2001 season at the start of the season? I'll examine this first at the game level, looking at how the simulated results did in predicting both the probability and the outcome in every matchup for this season. I'll assess probabilities using the log loss and the outcomes using accuracy.
+
+```{r look at results 2001 games}
+
+assess_metrics = metric_set(yardstick::mn_log_loss,
+                           yardstick::accuracy)
+
+sim_game_assessment = sim_game_outcomes %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no'))
+
+null_game_assessment = sim_game_outcomes %>%
+        mutate(HOME_PRED =1) %>%
+        group_by(GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(HOME_PROB = .6)
+
+bind_rows(
+        sim_game_assessment %>%
+                mutate(method = 'elo'),
+        null_game_assessment %>%
+                mutate(method = 'home wins')) %>%
+        mutate(yes = HOME_PROB) %>%
+        group_by(SEASON, method) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Overall, we were about 70% accurate in predicting all games from the start of the season with a log loss in the .55 range. In both cases, this is an improvement over using a simple heuristic such as the home team always wins.
+
+```{r check calibration}
+
+sim_game_assessment %>%
+        mutate(HOME_PROB_BIN = plyr::round_any(HOME_PROB, .02, floor)) %>%
+        group_by(SEASON, HOME_PROB_BIN, HOME_WIN) %>%
+        count() %>%
+        spread(HOME_WIN, n) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, replace_na, 0) %>%
+        mutate(games = no + yes) %>%
+        mutate(observed_home_prop = yes / games) %>%
+        ggplot(., aes(x=HOME_PROB_BIN,
+                      size = games,
+                      y=observed_home_prop))+
+       # facet_wrap(SEASON ~.)+
+        geom_point()+
+        theme_phil()+
+        geom_abline(slope = 1,
+                    intercept=0,
+                    linetype = 'dashed')+
+        geom_smooth(method = 'loess',
+                    formula = 'y ~ x',
+                    color = 'blue',
+                    guides = 'none',
+                    show.legend = F)+
+        xlab("Predicted Probability of Home Win")+
+        ylab("Observed Probability of Home Win")+
+        annotate("text",
+                 x = 0.2,
+                 y = 0.8,
+                 size = 6,
+                 label = str_wrap("Home Team More Likely to Win Than Predicted",30))+
+        annotate("text",
+                 x = 0.8,
+                 y = 0.2,
+                 size = 6,
+                 label = str_wrap("Home Team Less Likely to Win Than Predicted",30))+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'))+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 10,
+                                                  hjust = 0.5))+
+        ggtitle("Calibration of Pregame Probabilities for 2001 Season")
+
+
+```
+
+
+We can also break this down by each week. As we would expect, in simulating the entire season, our pre season accuracy drops further into the season we go.
+
+```{r look at results week by week for 2001}
+
+# log loss by week
+sim_game_assessment %>%
+                mutate(method = 'elo') %>%
+        mutate(yes = HOME_PROB) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(GAMES= n_distinct(GAME_ID)) %>%
+        group_by(SEASON, WEEK, GAMES) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        spread(.metric, .estimate) %>%
+        select(-.estimator) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+
+<!-- ```{r pre season margin} -->
+
+<!-- sim_game_assessment %>% -->
+<!--         mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>% -->
+<!--         mutate(PRED_MARGIN = round(PRED_MARGIN, 1)) %>% -->
+<!--         mutate(HOME_MARGIN_char = case_when(HOME_MARGIN > 0 ~ paste("W ", HOME_MARGIN, sep=""), -->
+<!--                                     HOME_MARGIN == 0 ~ paste("Tie"), -->
+<!--                                     HOME_MARGIN < 0 ~ paste("L ", HOME_MARGIN, sep=""))) %>% -->
+<!--         mutate(pred_char = case_when(PRED_MARGIN > 0 ~ paste("W ", PRED_MARGIN, sep=""), -->
+<!--                                     PRED_MARGIN == 0 ~ paste("Tie"), -->
+<!--                                     PRED_MARGIN < 0 ~ paste("L ", PRED_MARGIN, sep="")), -->
+<!--                GAME = paste(HOME_TEAM, " ", AWAY_TEAM, "\n", -->
+<!--                             "Actual: ", HOME_TEAM, " ", HOME_MARGIN_char, "\n", -->
+<!--                             "Pred: ", HOME_TEAM, " ", pred_char, sep="")) %>% -->
+<!--         ggplot(., aes(x=PRED_MARGIN, -->
+<!--                       label = GAME, -->
+<!--                       y = HOME_MARGIN))+ -->
+<!--         geom_text(vjust = -0.1, -->
+<!--                   size = 3, -->
+<!--                   check_overlap = T)+ -->
+<!--         geom_jitter(width = 0.05, -->
+<!--                     height = 0.05, -->
+<!--                     alpha = 0.5)+ -->
+<!--         theme_phil()+ -->
+<!--         geom_vline(xintercept = 0, -->
+<!--                    linetype = 'dotted')+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dotted')+ -->
+<!--         geom_abline(slope = 1, -->
+<!--                     intercept = 0)+ -->
+<!--         xlab("Predicted Home Margin")+ -->
+<!--         ylab("Actual Home Margin")+ -->
+<!--         stat_cor( -->
+<!--                   aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),  -->
+<!--                   label.x = 3, -->
+<!--                   p.accuracy = .01, -->
+<!--                   color = 'blue') -->
+
+<!-- ``` -->
+
+Next, we can look aat how the model did in predicting each team's win totals. 
+
+```{r get win totals}
+
+mode_func <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# get results for all teams
+sim_team_wins = sim_team_outcomes %>%
+        filter(!is.na(CONFERENCE)) %>%
+        left_join(., valid_games %>%
+                          mutate(WINNER = case_when(HOME_POINTS > AWAY_POINTS ~ HOME_TEAM, TRUE ~ AWAY_TEAM)) %>%
+                          select(GAME_ID, WINNER),
+                  by = c("GAME_ID")) %>%
+        mutate(WIN = case_when(TEAM == WINNER ~ 1,
+                               TRUE ~ 0)) %>%
+        mutate(PRED_WIN = case_when(MARGIN >0 ~ 1,
+                                    TRUE ~ 0)) %>%
+        group_by(SEASON, CONFERENCE, TEAM, .id) %>%
+        summarize(pred_wins = sum(PRED_WIN),
+                  actual_wins = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(SEASON, CONFERENCE, TEAM, actual_wins) %>%
+        summarize(mean_wins= mean(pred_wins),
+                  mode_wins = mode_func(pred_wins),
+                  .groups = 'drop')
+
+# get result if each team won every game in which they were favored
+
+
+# overall
+sim_team_wins %>% 
+        group_by(SEASON) %>%
+        yardstick::rmse(mean_wins,
+                        actual_wins) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        select(-.estimator) %>%
+        flextable() %>%
+        autofit()
+
+# by conference
+sim_team_wins %>% 
+        group_by(SEASON, CONFERENCE) %>%
+        yardstick::rmse(mean_wins,
+                        actual_wins) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(-.estimator) %>%
+        arrange(.estimate) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+# 
+# # by team
+# sim_team_wins %>% 
+#         group_by(SEASON, TEAM) %>%
+#         yardstick::rmse(mean_pred,
+#                         actual) %>%
+#         mutate_if(is.numeric, round, 2) %>%
+#         arrange(.estimate)
+
+# plot of overall
+sim_team_wins %>%
+        ggplot(., aes(x=mean_wins,
+                      label = TEAM,
+                      y=actual_wins))+
+        geom_jitter(size=3,
+                    width = 0.1,
+                    height = 0.1)+
+        geom_abline(slope =1,
+                    intercept = 0)+
+        geom_text_repel()+
+        theme_phil()+
+        coord_cartesian(xlim = c(0, 13),
+                        ylim = c(0, 13))+
+        theme(strip.text.x = element_text(size = 12))+
+        xlab("Predicted Wins")+
+        ylab("Actual Wins")+
+        stat_cor(
+                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), 
+                  label.x = 3,
+                  p.accuracy = .01,
+                  color = 'blue')+
+        geom_vline(xintercept = 6,
+                   linetype = 'dotted')+
+        geom_hline(yintercept = 6,
+                   linetype = 'dotted')
+
+```
+
+On average, we were off by about 2 wins - a non trivial amount - and the performance was quite a bit different by conference and team. 
+
+## Mid Season Results
+
+So far, we've looked at how well the model did in simulating each team's season. But I'll be planning to run this after every week of games, which will result in updated ratings, which will affect the rest of the season's simulations.
+
+```{r mid season results}
+
+weeks = unique(valid_games$WEEK)
+
+# run elo for specified week of the 2001 season to update our elo ratings with real results
+elo_update = calc_elo_ratings(valid_games %>%
+                                      filter(SEASON == 2001) %>%
+                                      filter(WEEK <=4),
+                                     teams = elo_train$teams,
+                                     team_seasons = elo_train$team_seasons,
+                          home_field_advantage = pars$home_field_advantage,
+                          reversion = pars$reversion,
+                          k = pars$k,
+                          v = pars$v,
+                          verbose = F)
+        
+# then, simulate the rest of the way
+update_sim_seasons = future_replicate(100,
+                  sim_elo_ratings(valid_games %>%
+                                          filter(SEASON == 2001) %>%
+                                          filter(WEEK > 4),
+                                  teams = elo_update$teams,
+                                  team_seasons = elo_update$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+# get outcomes into data frames
+update_team_outcomes = rbindlist(update_sim_seasons['team_outcomes',],
+          idcol = T)
+
+# now get the updated
+update_game_outcomes = rbindlist(update_sim_seasons['game_outcomes',],
+                              idcol = T)
+
+```
+
+This means teams with surprise wins/losses will have their expectations for the rest of the season changed. Take a team like Illinois that was only the heavy favorite in one game at the start of the season, but with a bunch of tossups on their schedule.
+
+```{r illinois example 2001}
+
+# show pre season vs updated
+table_wins_team_season(sim_team_outcomes,
+                       2001,
+                       'Illinois',
+                       15) %>%
+        set_caption("Pre Season")
+
+```
+
+Here's what the picture for Illinois looks like after their first few games. At the start of the season they were expected to lose to Louisville by a touchdown, but Illinois pulled off an upset at California in week one and then won their game against Northern Illinois. Now, going into Louisville, they are now slight favorites, and they are slightly more likely to win the rest of their matchups.
+
+```{r show illinois updated 2001}
+
+# # show updated
+# table_wins_team_season(sim_team_outcomes,
+#                        2001,
+#                        'Texas A&M',
+#                        15) %>%
+#         set_caption("Pre Season")
+
+# show updated
+table_wins_team_season(update_team_outcomes,
+                       2001,
+                       'Illinois',
+                       15) %>%
+        set_caption("After Week 4")
+
+```
+
+```{r sims after each week}
+
+weeks = unique(valid_games %>%
+                       filter(SEASON == 2001) %>%
+                       pull(WEEK))
+
+# first, simulate entire season
+sim_seasons = future_replicate(100,
+                          sim_elo_ratings(valid_games %>%
+                                                  filter(SEASON == 2001),
+                                          teams = elo_train$teams,
+                                          team_seasons = elo_train$team_seasons,
+                                          home_field_advantage = selected_pars$home_field_advantage,
+                                          reversion = selected_pars$reversion,
+                                          k = selected_pars$k,
+                                          v = selected_pars$v,
+                                          verbose=F,
+                                          ties =F,
+                                          points_model = points_model))
+
+# get outcomes into data frames
+update_team_outcomes = rbindlist(sim_seasons['team_outcomes',],
+          idcol = T) %>%
+        mutate(SIM_WEEK = 0)
+
+# now get the updated
+update_game_outcomes = rbindlist(sim_seasons['game_outcomes',],
+                              idcol = T) %>%
+        mutate(SIM_WEEK = 0)
+
+preseason_sims = list("sim_team_outcomes" = update_team_outcomes,
+                      "sim_game_outcomes" = update_game_outcomes,
+                      "week" = 0)
+
+rm(update_team_outcomes,
+   update_game_outcomes)
+        
+# now loop over the rest
+midseason_sims = foreach(i = 1:length(weeks)-1, .errorhandling = 'pass') %do% {
+
+        # run elo for specified week of the 2001 season to update our elo ratings with real results
+        elo_update = calc_elo_ratings(valid_games %>%
+                                              filter(SEASON == 2001) %>%
+                                              filter(WEEK <= weeks[i]),
+                                             teams = elo_train$teams,
+                                             team_seasons = elo_train$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose = F)
+                
+        # then, simulate the rest of the way
+        update_sim_seasons = future_replicate(100,
+                          sim_elo_ratings(valid_games %>%
+                                                  filter(SEASON == 2001) %>%
+                                                  filter(WEEK > weeks[i]),
+                                          teams = elo_update$teams,
+                                          team_seasons = elo_update$team_seasons,
+                                          home_field_advantage = selected_pars$home_field_advantage,
+                                          reversion = selected_pars$reversion,
+                                          k = selected_pars$k,
+                                          v = selected_pars$v,
+                                          verbose=F,
+                                          ties =F,
+                                          points_model = points_model))
+
+        # get outcomes into data frames
+        update_team_outcomes = rbindlist(update_sim_seasons['team_outcomes',],
+                  idcol = T) %>%
+                mutate(SIM_WEEK = weeks[i])
+        
+        # now get the updated
+        update_game_outcomes = rbindlist(update_sim_seasons['game_outcomes',],
+                                      idcol = T) %>%
+                mutate(SIM_WEEK = weeks[i])
+        
+        # return list
+        out = list("sim_team_outcomes" = update_team_outcomes,
+                   "sim_game_outcomes" = update_game_outcomes,
+                   "week" = weeks[i])
+        
+        rm(update_sim_seasons,
+           update_team_outcomes,
+           update_game_outcomes)
+        
+        out
+        
+}
+
+```
+
+
+```{r can put these together}
+
+midseason_game_outcomes = bind_rows(preseason_sims$sim_game_outcomes,
+                                    rbindlist(lapply(midseason_sims,'[[','sim_game_outcomes')))
+
+midseason_team_outcomes = bind_rows(preseason_sims$sim_team_outcomes,
+                                    rbindlist(lapply(midseason_sims,'[[','sim_team_outcomes')))
+
+```
+
+Looking at predictions that are updated within season allows me to check on how well the model is doing by how far out it is predicting. As we would expect, our accuracy is highest in predicting games one week out and trailing off after that.
+
+```{r midseason sims}
+
+midseason_game_assessment = midseason_game_outcomes %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(GAME_ID, SEASON, WEEK, GAME_DATE, SIM_WEEK, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        arrange(GAME_DATE) %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no'))
+
+midseason_game_assessment %>%
+        mutate(HORIZON = WEEK - SIM_WEEK) %>%
+        mutate(yes = HOME_PROB) %>%
+        group_by(SEASON, HORIZON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, HORIZON, games) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        filter(.metric == 'accuracy') %>%
+        mutate_if(is.numeric, round, 2) %>%
+        spread(.metric, .estimate) %>%
+        select(-.estimator) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+        
+```
+
+Updating the simulations each week allows us to check in on how a team's expected win totals are changing after every week. Here are the simulated end of season win totals for each ACC 12 team after weeks 3, 7, and 10. 
+
+```{r checking in on simulations}
+
+source(here::here("functions", "plot_forecast_wins_conference_season.R"))
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'ACC',
+                                     week = 3)
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'ACC',
+                                     week = 7)
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'ACC',
+                                     week = 10)
+
+```
+
+# What About the Croots?
+
+So far, everything has been built to predict upcoming games and seasons using nothing more than a tuned Elo rating that accounts for home field advantage and reversion year over year. The results are kind of cool given the simplicity of this approach, but there's at least one elephant in the room that I want to add to the model: team recruiting ratings. 
+
+## Team Recruiting Scores
+
+We have data on recruiting back to the year 2002 (we have data for 2000, but it has some missingness). This data is at the year level and is the composite score for a given team. 
+
+```{r look at a sample of the data}
+
+set.seed(1)
+recruiting_teams_raw %>%
+        filter(YEAR == 2010) %>%
+        sample_n(5)
+
+```
+
+Here is a each team's recruiting score, broken down by conference, for the data we have. What a lovely graph!
+
+```{r look at recruiting rankings by year}
+
+recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        left_join(., teamcolors %>%
+                                  filter(league == 'ncaa') %>%
+                                  mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        filter(!(CONFERENCE == 'FBS Independents') | TEAM %in% c("Notre Dame", "BYU")) %>%
+        ungroup() %>% 
+        filter(CONFERENCE %in% c("ACC",
+                                 "Big 12",
+                                 "Big Ten",
+                                 "FBS Independents",
+                                 "Pac-10",
+                                 "Pac-12",
+                                 "SEC")) %>%
+        mutate(CONFERENCE_LABEL = case_when(CONFERENCE == 'Pac-10' ~ 'Pac-10/Pac-12',
+                                            CONFERENCE == 'Pac-12' ~ 'Pac-10/Pac-12',
+                                            TRUE ~ CONFERENCE)) %>%
+        group_by(CONFERENCE_LABEL, TEAM) %>%
+        mutate(season_number = row_number()) %>%
+        mutate(TEAM_LABEL = case_when(season_number == max(season_number) ~ TEAM)) %>%
+        ggplot(., aes(x=YEAR,
+                      color = name,
+                      label = TEAM_LABEL,
+                      y = RECRUITING_POINTS))+
+               geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = -1,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        scale_color_teams(name = 'TEAM')+
+        facet_wrap(CONFERENCE_LABEL~.,)+
+        guides(color = "none")+
+        coord_cartesian(xlim = c(NA, 2025),
+                        ylim = c(0,400))+
+        theme_phil()
+
+```
+
+## Recruiting Moving Average
+
+A team's recruiting ranking is scored year by year, but a team's roster is composed of players from the last few years. This means instead of just using recruiting scores, we should probably use some sort of weighted moving average.
+
+```{r get recruiting scores by team}
+
+recruiting_teams_averages = recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        mutate(WMA = WMA(RECRUITING_POINTS, n =4, wts = c(.35, .25, .25, .15))) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR) %>%
+        group_by(TEAM) %>%
+        # lag recruiting by a year
+        mutate(SEASON = dplyr::lead(YEAR, 1)) %>%
+        # this mean's we'll have a team's recruiting for the next season
+        mutate(SEASON = case_when(is.na(SEASON) ~ dplyr::lag(SEASON+1, 1),
+                                  TRUE ~ SEASON))
+
+```
+
+Here I'll show each SEC team's recruiting points by year, as well as two different forms of weighted moving averages, exponentially decaying weights and manually selected weights. 
+
+```{r show recruiting for SEC}
+
+recruiting_teams_averages %>%
+        left_join(., teamcolors %>%
+                                  filter(league == 'ncaa') %>%
+                                  mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        # filter(TEAM %in% c("Tennessee", "Florida State", "Georgia", 
+        #                    "Kansas", "Iowa State", "Rutgers")) %>%
+        filter(TEAM %in% (team_conference_season %>% 
+                                  filter(SEASON > 2010) %>% 
+                                  filter(CONFERENCE == 'SEC') %>%
+                                  distinct(TEAM) %>% pull)) %>%
+        select(YEAR, RANK, CONFERENCE, TEAM, name, primary, RECRUITING_POINTS, EMA, WMA) %>%
+        gather("variable", "value",
+               -YEAR, -RANK, -CONFERENCE, -TEAM, -name, -primary) %>%
+        mutate(variable = factor(variable,
+                                 levels = c("RECRUITING_POINTS", "EMA", "WMA"))) %>%
+        ggplot(., aes(x=YEAR,
+                      color = name,
+                      linetype = variable,
+                      y = value))+
+        geom_line(lwd=1.04)+
+        scale_color_teams(name = 'TEAM')+
+        guides(color = "none")+
+        theme_phil()+
+        facet_wrap(TEAM~.)+
+        coord_cartesian(ylim = c(0, 350))+
+        scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+        ylab("Recruiting Composite")
+
+```
+
+This distribution seems to be shifting over time too.
+
+```{r looking at distributions over time for the smoothed and nnot}
+
+recruiting_teams_averages %>% 
+        ggplot(., aes(x=EMA, y=factor(SEASON)))+
+        stat_density_ridges(quantile_lines = T)
+
+```
+
+
+
+
+## Team Recruiting Scores and Elo Ratings
+
+How can we use recruiting information in an Elo model? My initial thinking is to explore adjusting each team's preseason Elo score at the start of the season based on the talent on their roster (as proxied for by their rolling composite score). A team full of young, talented recruits might not have won many games, but the talent on their roster would make us think that they would be due to break through soon. We would expect teams that have been building talented rosters to punch above their Elo weight in future seasons. Similarly, if a team has graduated a lot of its talent, we would expect their Elo rating to drop soon. We're already handling this somewhat with mean reversion season over season, but that doesn't allow for the possibility that a team with a talented roster will overtake a team with a less talented roster.
+
+I only mention giving a boost to Elo at the start of the season because eventually a team will start to demonstrate its value on the field and their Elo rating will catch up. The question is whether we can adjust ratings at the beginning of the season so as to catch onto these types of teams faster.
+
+Here's how I plan to test this out. First, I'll get each team's Elo rating through 2014 using the methodology described so far.
+
+Next, I'll get each team's recruiting score in the lead up to these seasons. I only have a rolling recruiting score for each team starting in 2007, so I'll be looking at the years 2007-2010 in particular here. Recruiting overlaps with the season, so for a team's recruiting score I'll use a moving average of their previous (four) years, not including the current year. This means each team's recruiting score will be constant throughout the season. (Yes, I am aware of injuries and transfers, but this is a start.)
+
+Each team will have an Elo rating at the **start** of the season, which is based on their previous seasons, and an Elo rating at the **end** of the season. For the years 2007-2010, I'll regress their **season end Elo** on their **season start Elo** and their **recruiting score**. If a team's recruiting score has a (positive) effect on a team's season end Elo, conditional on their starting Elo, we'll have some evidence in favor of adding a recruiting adjustment at the beginning of each season.
+
+```{r compute elo ratings through 2010}
+
+# now loop through a set of games
+train_games = games_data_tidied %>%
+        filter(SEASON >=1970) %>%
+        filter(SEASON <= 2015) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID,
+               SEASON,
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE,
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# now get the elo ratings based on this training set
+elo_train = calc_elo_ratings(train_games,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+
+```
+
+This is the correlation between a team's starting and ending elo in each of these seasons.
+
+```{r join recruiting info with elo ratings}
+
+teams_elo_and_recruiting = elo_train$team_outcomes %>%
+        filter(SEASON > 2006) %>%
+        left_join(., recruiting_teams_averages,
+              by = c("TEAM", "SEASON", "CONFERENCE")) %>%
+        # remove FCS teams, as we don't have season long totals for these teams
+        filter(!is.na(CONFERENCE)) %>%
+        mutate_at(c("WMA", "EMA"),
+                  replace_na, 0) %>%
+        group_by(SEASON, TEAM) %>%
+        # get first and last game for each team by season
+        mutate(FIRST_GAME = GAME_DATE == min(GAME_DATE),
+               LAST_GAME = GAME_DATE == max(GAME_DATE)) %>% 
+        filter(FIRST_GAME == T | LAST_GAME == T) %>%
+        mutate(ELO = case_when(FIRST_GAME ==T ~ PREGAME_ELO,
+                               LAST_GAME==T ~ POSTGAME_ELO)) %>%
+        mutate(GAME = case_when(FIRST_GAME ==T ~ 'Elo_Start',
+                                LAST_GAME == T ~ 'Elo_End')) %>%
+        ungroup() %>%
+        select(SEASON, TEAM, CONFERENCE, GAME, ELO, WMA, EMA) %>%
+        spread(GAME, ELO) %>%
+        select(SEASON, TEAM, CONFERENCE, WMA, EMA, Elo_Start, Elo_End)
+
+teams_elo_and_recruiting %>%
+        mutate(Change = Elo_End - Elo_Start) %>%
+        ggplot(., aes(x=Elo_Start,
+                      color = EMA,
+                      label = TEAM,
+                      y=Elo_End))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  vjust = -1)+
+        facet_wrap(SEASON ~.)+
+        theme_phil()+
+        geom_abline()+
+        scale_color_viridis()
+        
+
+```
+
+Now regress Elo End on Elo Start, with and without recruiting. To make this a bit easier to interpret, I'll center the predictors at zero so that the intercept will indicate the average Elo End. 
+
+The first model looks at predicting a team's season ending Elo using just its starting Elo. The model indicates that a team with an average Elo at the start of the year will end up with a rating of 1577, with each additional point above on starting Elo the mean increasing their ending Elo by .93. This should make sense: where you end up is on average a function of where you start, and knowing your starting Elo explains about 77% of the ending Elo.
+
+```{r regress elo end on elo start}
+
+without_recruiting_lm = teams_elo_and_recruiting %>%
+        mutate(Elo_Start = Elo_Start - mean(Elo_Start),
+               EMA = EMA - mean(EMA)) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(Elo_End ~ Elo_Start,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm,
+                            tidy,
+                            conf.int=T, se="robust")) %>%
+        mutate(glanced = map(lm, glance)) 
+
+without_recruiting_lm %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+without_recruiting_lm %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(r.squared, sigma, no)
+
+```
+Now, looking at the model that includes recruiting, we can see that the coefficient for Elo Start has dropped slightly, down to .8, and the coefficient on Elo is .6. This means, functionally, that each additional point above the average on a team's recruiting score is worth an additional .6 Elo points at the end of the season.
+
+```{r now look at effects }
+
+with_recruiting_lm = teams_elo_and_recruiting %>%
+        mutate(Elo_Start = Elo_Start - mean(Elo_Start),
+               EMA = EMA - mean(EMA)) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(Elo_End ~ Elo_Start + EMA,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm,
+                            tidy,
+                            conf.int=T, se="robust")) %>%
+        mutate(glanced = map(lm, glance))
+
+with_recruiting_lm %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+with_recruiting_lm %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(r.squared, sigma, nobs)
+
+
+```
+
+```{r }
+
+
+teams_elo_and_recruiting %>%
+        mutate(mean_ema = mean(EMA))
+        mutate(Elo_Start = Elo_Start - mean(Elo_Start),
+               EMA = EMA - mean(EMA)) %>%
+        mutate(mean_ema = mean(EMA))
+
+```
+
+
+
+## Effects of Recruiting on Point Differential and Wins
+
+How can we use this in an Elo model? My initial thihnkings is that we evaluate giving each team a bump at the start of the season based on the talent on their roster (as proxied for by their rolling composite score). A team full of young, talented recruits might not have won many games, but the talent on their roster would make us think that they would be due to break through soon. We would expect teams that have been building talented rosters to punch above their Elo weight in future seasons.
+
+I only mention giving a boost to Elo at the start of the season because eventually a team will start to demonstrate its value on the field and their Elo rating will catch up. The question is whether we can adjust ratings at the beginning of the season so as to catch onto these types of teams faster.
+
+
+Here's how I'll test this out. 
+
+1. Compute Elo ratings through 2010
+2. Train point model through 2006
+3. Compute each team's recruiting score (an exponentially weighted moving average of their previous year's classes)
+4. Predict winner and point differential for years 2007-2012
+5. Evaluate whether the residuals are correlated with the difference in the two team's recruiting rating.
+
+```{r get elo ratings}
+        
+# now loop through a set of games
+train_games = games_data_tidied %>%
+        filter(SEASON >=1970) %>%
+        filter(SEASON < 2010) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID,
+               SEASON,
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE,
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# now get the elo ratings based on this training set
+elo_train = calc_elo_ratings(train_games,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+
+```
+
+```{r look at correlation between start of season recruiting and end of season elo}
+
+foo = elo_train$team_outcomes %>%
+    filter(SEASON > 2006) %>%
+    left_join(., recruiting_teams_averages,
+              by = c("TEAM", "SEASON", "CONFERENCE")) %>%
+        mutate_at(c("WMA", "EMA"),
+                  replace_na, 0) %>%
+        group_by(SEASON, TEAM) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        mutate(FIRST_GAME = GAME_DATE == min(GAME_DATE),
+           LAST_GAME = GAME_DATE == max(GAME_DATE)) %>% 
+        filter(FIRST_GAME == T | LAST_GAME == T) %>%
+        mutate(ELO = case_when(FIRST_GAME ==T ~ PREGAME_ELO,
+                               LAST_GAME==T ~ POSTGAME_ELO)) %>%
+        mutate(GAME = case_when(FIRST_GAME ==T ~ 'start',
+                                LAST_GAME == T ~ 'end')) %>%
+        ungroup() %>%
+        select(SEASON, TEAM, CONFERENCE, GAME, ELO, WMA, EMA) %>%
+        spread(GAME, ELO)
+
+bar = foo %>%
+        mutate(start = start - mean(start)) %>%
+        mutate(EMA = EMA -mean(EMA),
+               WMA = WMA - mean(WMA)) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(end ~ start + EMA,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(glanced = map(lm, glance))
+
+bar %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+bar %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+predict(pluck(bar$lm, 1),
+              data.frame(start = 0,
+                         EMA = 100))
+
+```
+
+
+
+```{r for teams}
+
+regress_recruiting_on_elo = elo_train$team_outcomes %>%
+        filter(SEASON > 2006) %>%
+        left_join(., recruiting_teams_averages,
+                  by = c("TEAM", "SEASON", "CONFERENCE")) %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(obs = row_number()) %>%
+        mutate(game = case_when(obs == min(obs) ~ 'first game of season',
+                                obs == max(obs) ~ 'last game of season')) %>%
+        mutate()
+        ungroup() %>%
+        filter(game == 'last game of season') %>%
+        filter(!is.na(game)) %>%
+        nest(-SEASON) %>%
+        mutate(lm = map(data, ~ lm(POSTGAME_ELO ~ EMA,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) 
+
+regress_recruiting_on_elo %>%
+        select(SEASON, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+regress_recruiting_on_elo %>%
+        select(SEASON, glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+
+elo_train$team_outcomes %>%
+        filter(SEASON > 2006) %>%
+        left_join(., recruiting_teams_averages,
+                  by = c("TEAM", "SEASON", "CONFERENCE")) %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(obs = row_number()) %>%
+        mutate(game = case_when(obs == min(obs) ~ 'first game of season',
+                                obs == max(obs) ~ 'last game of season')) %>%
+        filter(game == 'last game of season') %>%
+        filter(!is.na(game)) %>%
+        ggplot(., aes(x=POSTGAME_ELO,
+                      label = paste(TEAM, SEASON),
+                      y=EMA))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  vjust = -1)+
+        facet_wrap(game+SEASON ~.,
+                   ncol = 2)+
+        stat_cor(p.accuracy = 0.01)+
+        theme_phil()+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x',
+                    se=F)
+
+```
+
+
+
+
+Now, I'll fit a regression on the point differential on the training set.
+
+```{r fit points model through 2006}
+
+# points model
+# regress point differential on elo differential
+# fit linear model after first few years in training
+points_model = elo_train$game_outcomes %>%
+        filter(SEASON >=1975) %>%
+        mutate(HOME_PREGAME_ELO = case_when(NEUTRAL_SITE == T ~ HOME_PREGAME_ELO -selected_pars$home_field_advantage,
+                                            TRUE ~ HOME_PREGAME_ELO)) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest() %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        pluck("lm",1)
+
+```
+
+Now, I'll compute Elo ratings through 2012.
+
+```{r update elo through 2012, include =F}
+
+valid_games = games_data_tidied %>%
+        filter(SEASON >=2007 & SEASON <=2012) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS) 
+
+# get elo valid set
+elo_valid = calc_elo_ratings(valid_games,
+                             teams = elo_train$teams,
+                             team_seasons = elo_train$team_seasons,
+                             home_field_advantage = selected_pars$home_field_advantage,
+                             reversion = selected_pars$reversion,
+                             k = selected_pars$k,
+                             v = selected_pars$v,
+                             verbose = T)
+
+```
+
+
+```{r join up}
+
+elo_valid$
+
+```
+
+Then, I'll predict the point differential for these games based on their Elo ratings.
+
+```{r predict 07 to 2012}
+
+valid_prepped = elo_valid$game_outcomes %>%
+                              mutate(HOME_PREGAME_ELO = case_when(NEUTRAL_SITE == T ~ 
+                                                                          HOME_PREGAME_ELO -selected_pars$home_field_advantage,
+                                                                  TRUE ~ HOME_PREGAME_ELO)) %>%
+                              mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
+                              mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        left_join(.,
+                  recruiting_teams_averages %>%
+                          select(SEASON, TEAM, RECRUITING_POINTS, EMA, WMA) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_POINTS = RECRUITING_POINTS,
+                                 HOME_RECRUITING_EMA = EMA,
+                                 HOME_RECRUITING_WMA = WMA),
+                  by = c("SEASON", "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting_teams_averages %>%
+                          select(SEASON, TEAM, RECRUITING_POINTS, EMA, WMA) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_POINTS = RECRUITING_POINTS,
+                                 AWAY_RECRUITING_EMA = EMA,
+                                 AWAY_RECRUITING_WMA = WMA),
+                  by = c("SEASON", "AWAY_TEAM")) %>%
+        mutate_at(c("HOME_RECRUITING_POINTS",
+                    "HOME_RECRUITING_EMA",
+                    "HOME_RECRUITING_WMA",
+                    "AWAY_RECRUITING_POINTS",
+                    "AWAY_RECRUITING_EMA",
+                    "AWAY_RECRUITING_WMA"),
+                  replace_na, 0) %>%
+        mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING_EMA - AWAY_RECRUITING_EMA)
+
+```
+
+
+
+
+
+
+```{r look at effect of recruiting ratings on game outcomes}
+
+valid_preds = predict(points_model,
+                      newdata = valid_prepped,
+                      interval = 'prediction') %>%
+        bind_cols(., valid_prepped)
+
+valid_preds %>%
+        mutate(resid = HOME_SCORE_DIFF-fit) %>%
+        mutate(row = row_number()) %>%
+        ggplot(., aes(y=resid,
+                      x=HOME_RECRUITING_DIFF))+
+        geom_point()+
+        stat_cor(p.accuracy = 0.01)+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x')+
+        geom_hline(yintercept=0,
+                   linetype = 'dotted')+
+        theme_bw()+
+        facet_wrap(WEEK ~.)
+
+```
+
+Okay so the difference in recruiting scores is correlated with the residuals from our point differential model, which uses pre game Elo scores.
+
+```{r compare these and the point difference}
+
+valid_preds %>%
+        left_join(., games_data_tidied %>%
+                          select(GAME_ID, CONFERENCE_GAME),
+                  by = c("GAME_ID")) %>%
+        ggplot(., aes(x=HOME_RECRUITING_DIFF,
+                      label = paste(HOME_TEAM, "-", AWAY_TEAM, ",", SEASON, sep=""),
+                    #  color = CONFERENCE_GAME,
+                      y = HOME_ELO_DIFF))+
+        geom_text(check_overlap = T,
+                  vjust = -1,
+                  size =3)+
+        geom_point(alpha = 0.5)+
+        theme_phil()+
+        stat_cor(p.accuracy=0.1)+
+        geom_smooth(formula = 'y ~ x',
+                    method = 'lm')+
+        geom_vline(xintercept =0,
+                   linetype = 'dotted')+
+        geom_hline(yintercept=0,
+                   linetype = 'dotted')
+
+```
+
+
+```{r fit model on those years}
+
+compare_models = 
+        bind_rows(valid_prepped %>%
+                          nest() %>%
+                          mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                                                     data = .x))) %>%
+                          mutate(method = 'Elo'),
+                  valid_prepped %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                                             TRUE ~ 'no'))) %>%
+                          nest() %>%
+                          mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF + HOME_RECRUITING_DIFF,
+                                                     data = .x))) %>%
+                          mutate(method = 'Elo + Recruiting'),
+                   valid_prepped %>%
+                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                                             TRUE ~ 'no'))) %>%
+                          nest() %>%
+                          mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_RECRUITING_DIFF,
+                                                     data = .x))) %>%
+                          mutate(method = 'Recruiting'))
+                  
+```
+
+```{r compare effect}
+
+compare_models %>%
+        mutate(tidied = map(lm, tidy, conf.int=T, se='robust')) %>%
+        select(method, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(method, term, estimate, conf.low, conf.high) %>%
+        flextable() %>%
+        autofit()
+
+# %>%
+#         filter(term == 'HOME_RECRUITING_DIFF') %>%
+#         ggplot(., aes(x=WEEK,
+#                       color = method,
+#                       y=estimate,
+#                       ymin = conf.low,
+#                       ymax = conf.high))+
+#         geom_pointrange()
+
+compare_models %>%
+        mutate(glanced = map(lm, glance)) %>%
+        select(method, glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(r.squared)) %>%
+        select(method, r.squared, sigma, nobs) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+```{r adjusting for recruiting}
+
+dodge = 0.5
+
+valid_prepped %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                                     TRUE ~ 'no'))) %>%
+        nest(-WEEK) %>%
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF + HOME_RECRUITING_DIFF,
+                                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T, se='robust')) %>%
+        select(WEEK, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(WEEK, term, estimate, conf.low, conf.high)  
+
+
+```
+
+# What about the Polls?
+
+```{r look at miami}
+
+
+rankings_tidied %>%
+        filter(SEASON == 2001 & WEEK == 1) %>%
+        filter(poll == 'AP Top 25') %>%
+        arrange(rank)
+
+elo_train$team_outcomes %>%
+        filter(SEASON == 2001) %>%
+        group_by(TEAM) %>%
+        filter(GAME_DATE == min(GAME_DATE)) %>%
+        arrange(desc(PREGAME_ELO)) %>%
+        select(SEASON, TEAM, PREGAME_ELO) %>%
+        mutate_if(is.numeric, round, 0)
+
+```
+
+
+

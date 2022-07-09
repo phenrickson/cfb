@@ -1,0 +1,412 @@
+---
+title: "Simulating CFB Seasons"
+author: "Phil Henrickson"
+date: "7/7/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 8)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(jsonlite)
+library(forcats)
+library(teamcolors)
+conflict_prefer("lag", "dplyr")
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+```
+
+```{r get colors for ncaa teams}
+
+# look at colors for ncca
+ncaa_colors = teamcolors %>%
+        filter(league == 'ncaa') 
+
+# define palette for ncaa
+#league_pal("ncaa", 1)
+
+```
+
+
+```{r flextable settings}
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r load functions}
+
+# integer plotting function
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+source(here::here("functions/theme_phil.R"))
+rm(a)
+
+```
+
+```{r get games}
+
+# get games
+games_data_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.GAMES')) %>%
+        as_tibble() %>%
+        mutate(ID = as.numeric(ID)) %>%
+        rename(GAME_ID = ID) %>%
+        mutate(GAME_DATE = as.Date(START_DATE))
+
+# recruiting
+recruiting_teams_data_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS')) %>%
+        as_tibble()
+
+# recruiting
+ranking_teams_data_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RANKINGS')) %>%
+        as_tibble()
+        
+```
+# Simulating Regular Season Games
+
+I'll now do this for every season through 2020. This means I'll compute Elo ratings in the run up to each season, then simulate the season based on the ratings going into the season.
+
+```{r look at performance through 2020, include=F, eval=F}
+
+rm(sim_seasons,
+   train_games,
+   valid_games,
+   elo_train,
+   elo_valid)
+
+# run 
+seasons = seq(2001, 2022, by = 1)
+
+# loop over season
+simulated_seasons = foreach(i = 1:length(seasons)) %do% {
+        
+        # now loop through a set of games
+        train_games = games_data_raw %>%
+                filter(SEASON >=1970) %>%
+                filter(SEASON < seasons[i]) %>%
+                arrange(GAME_DATE) %>%
+                select(GAME_ID, 
+                       SEASON, 
+                       WEEK,
+                       SEASON_TYPE,
+                       GAME_DATE,
+                       NEUTRAL_SITE, 
+                       HOME_TEAM,
+                       AWAY_TEAM,
+                       HOME_CONFERENCE,
+                       AWAY_CONFERENCE,
+                       HOME_POINTS,
+                       AWAY_POINTS)
+        
+        # valid
+        valid_games = games_data_raw %>%
+                filter(SEASON == seasons[i]) %>%
+                filter(SEASON <= max(seasons)) %>%
+                arrange(GAME_DATE) %>%
+                select(GAME_ID, 
+                       SEASON, 
+                       WEEK,
+                       SEASON_TYPE,
+                       GAME_DATE,
+                       NEUTRAL_SITE, 
+                       HOME_TEAM,
+                       AWAY_TEAM,
+                       HOME_CONFERENCE,
+                       AWAY_CONFERENCE,
+                       HOME_POINTS,
+                       AWAY_POINTS)
+        
+        # now get the elo ratings based on this training set
+        elo_train = calc_elo_ratings(train_games,
+                          home_field_advantage = selected_pars$home_field_advantage,
+                          reversion = selected_pars$reversion,
+                          k = selected_pars$k,
+                          v = selected_pars$v,
+                          verbose = F)
+        
+        # regress point differential on elo differential
+        # fit linear model after first few years in training
+        points_model = elo_train$game_outcomes %>%
+                filter(SEASON >=1975) %>%
+                mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
+                mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+                nest() %>%
+                # now fit linear models, i'll do so using stan
+                mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                                     data = .x))) %>%
+                mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+                mutate(glanced = map(lm, glance)) %>%
+                pluck("lm",1)
+        
+        # then, simulate the next season
+        set.seed(1999)
+        sim_seasons = future_replicate(1000,
+                          sim_elo_ratings(valid_games,
+                                          teams = elo_train$teams,
+                                          team_seasons = elo_train$team_seasons,
+                                          home_field_advantage = selected_pars$home_field_advantage,
+                                          reversion = selected_pars$reversion,
+                                          k = selected_pars$k,
+                                          v = selected_pars$v,
+                                          verbose=F,
+                                          ties =F,
+                                          points_model = points_model))
+        
+        # grab what we need
+        out = list("sim_team_outcomes" = rbindlist(sim_seasons['team_outcomes',],
+                                      idcol = T),
+                   "sim_game_outcomes" = rbindlist(sim_seasons['game_outcomes',],
+                                      idcol = T))
+        
+        rm(sim_seasons)
+        
+        # track progress
+        cat("\r", i, "of", length(seasons), "seasons completed");  flush.console()
+        
+        # return output
+        out
+
+}
+
+```
+
+
+```{r save this}
+
+save(simulated_seasons,
+     file = here::here("data/simulated_seasons.Rdata"))
+
+```
+
+```{r load season sims}
+
+
+load(file = here::here("data/simulated_seasons.Rdata"))
+
+# get the games
+sim_game_outcomes = rbindlist(lapply(simulated_seasons,'[[','sim_game_outcomes'))
+
+# get by team
+sim_team_outcomes = rbindlist(lapply(simulated_seasons,'[[','sim_team_outcomes'))
+
+rm(simulated_seasons)
+
+```
+
+I'll get season by season accuracy/log-loss.
+
+```{r simulating all seasons}
+
+overall_assess = sim_game_outcomes %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        mutate(yes = HOME_PROB) %>%
+        group_by(SEASON) %>%
+        mutate(games = n()) %>%
+        group_by(SEASON, games) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second')
+
+#
+overall_assess %>%
+        ggplot(., aes(x=SEASON,
+                      y=.estimate))+
+        geom_line()+
+        geom_point()+
+        facet_wrap(.metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_bw()+
+        ggtitle("Assessing Elo Simulations by Season")
+
+```
+
+Interesting - I can understand not doing so well on the 2020 season, but 2016 was evidently also a tough one to predict too. Generally speaking, our preseason accuracy hovers around 70% and our log loss is around .55.
+
+I'll also look at this by week for each season.
+
+```{r performance by week of season}
+
+sim_game_outcomes %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        mutate(yes = HOME_PROB) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(games = n()) %>%
+        group_by(SEASON, WEEK, games) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        ggplot(., aes(x=WEEK,
+                      color = SEASON,
+                      y = .estimate))+
+         geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.2)+
+        facet_wrap(.metric ~.,
+                   ncol =1)+
+        scale_color_viridis_d()+
+        theme_bw()
+
+```
+
+### Examine Seasons
+
+```{r source functions again}
+
+source(here::here("functions", "plot_elo_conference_season.R"))
+source(here::here("functions", "plot_elo_team_season.R"))
+source(here::here("functions", "plot_wins_conference_season.R"))
+source(here::here("functions", "table_wins_conference_season.R"))
+source(here::here("functions", "table_wins_team_season.R"))
+source(here::here("functions", "table_wins_season.R"))
+
+```
+
+
+```{r wins season}
+
+table_wins_season(sim_team_outcomes,
+                  season = 2016,
+                  14)
+
+```
+
+
+
+```{r look at specific teams}
+
+plot_elo_conference_season(sim_team_outcomes,
+                           season = 2021,
+                           'Sun Belt',
+                           16)
+
+plot_wins_conference_season(sim_team_outcomes,
+                           season = 2021,
+                           'Big Ten',
+                           14)
+
+```
+
+```{r looking at graphs}
+
+plot_elo_team_season(sim_team_outcomes,
+                           2021,
+                           'LSU',
+                           15)
+
+table_wins_team_season(sim_team_outcomes,
+                       2021,
+                       'Ohio State',
+                       15)
+
+```
+
+```{r plot win totals selected}
+
+plot_wins_conference_season(sim_team_outcomes,
+                           season = 2021,
+                           conference = 'ACC',
+                           week = 15)
+
+table_wins_conference_season(sim_team_outcomes,
+                           season = 2021,
+                           conference = 'Big Ten',
+                           week = 14)
+
+plot_elo_team_season(sim_team_outcomes,
+                     season = 2013,
+                     team = 'Florida State',
+                     week = 15)
+
+plot_elo_conference_season(sim_team_outcomes,
+                     season = 2019,
+                     conference = 'Big 12',
+                     week = 15
+                     )
+
+```
+
+
+# Simulating Conference Championships

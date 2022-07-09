@@ -1,0 +1,393 @@
+---
+title: "Methodology for CFB Elo Ratings"
+author: "Phil Henrickson"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+    css: "styles.css"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(jsonlite)
+library(forcats)
+library(teamcolors)
+conflict_prefer("lag", "dplyr")
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+```
+
+```{r get colors for ncaa teams}
+
+# look at colors for ncca
+ncaa_colors = teamcolors %>%
+        filter(league == 'ncaa') 
+
+# define palette for ncaa
+#league_pal("ncaa", 1)
+
+```
+
+
+```{r flextable settings}
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r load functions}
+
+# integer plotting function
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+source(here::here("functions/theme_phil.R"))
+rm(a)
+
+```
+
+# What is this? {-}
+
+This notebook explores my methodology for computing Elo ratings for college football teams using data from the late 1800s to present.
+
+# Explaining Elo Ratings
+
+What exactly is an Elo rating? It takes its name from the guy who first came up with the idea, Arpad Elo, who developed it for the purpose of ranking chess players: https://en.wikipedia.org/wiki/Elo_rating_system. 
+
+I note this because people commonly refer to these as ELO scores - no, it's Elo, it's from his name.
+
+The basic idea is to, for any given matchup between opponents, assign a rating to each opponent that can be used to predict the outcome of the match. The result of the match will then influence their ensuing ratings, with the winner gaining points from the loser. An opponent's rating is always a function of prior results, taking into account their performance in previous matches as well as the ratings of their opponents. 
+
+## The Expected Score
+
+For the full description of how this works, check out the Wikipedia page, but I'll paraphrase it here to the best of my ability. Say we've got an upcoming match between two opponents, $A$ and $B$. In an Elo rating system, the expected result, or score, for Opponent $A$ in a match against Opponent $B$ is: $$E_A = \frac{1}{1+10^{(R_B-R_A)/V}}$$
+
+What does this equation mean?
+
+* $E_A$ is Opponent's A expected score from the match - in the case of matchup between two opponents, this basically just reduces to win probability.
+
+* $R_A$ is Opponent A's pre match rating
+
+* $R_B$ is Opponent B's pre match rating
+
+* 10 is the base value used in the rating system; typically 10 is used in these types of ratings
+
+* V is a scaling factor that sets how much a difference in rating between the two opponents will affect the probability of either side winning. More on this in a second.
+
+How did we get this equation? It's just a logistic curve of the form $f(x) = \frac{1}{1+e^{-x}}$, which is the standard logistic function with a growth rate and curve maximum of 1. Don't worry about this too much, it basically just constrains any input of x to return a number between 0 and 1.
+
+Similarly, the expected score for Opponent B is: $$E_B = \frac{1}{1+10^{(R_A-R_B)/V}}$$
+
+## Computing Expected Scores
+
+What's the point of this equation? We can input ratings for $A$ and $B$ and get back an expected score for an opponent based on the difference between the two opponent's rating.
+
+```{r write a function for elo, echo=F}
+
+# load function
+source(here::here("functions/get_expected_score.R"))
+
+# show code for function
+get_expected_score
+
+```
+
+If the two opponents have equal ratings, the difference between their rating is zero, and the the expected score reduces to 0.5. Why? When the difference is zero, anything raised to the 0 is 1, and the scaling factor no longer matters:  $$E_A = \frac{1}{1+10^{0/V}} = \frac{1}{1+1} = \frac{1}{2}$$
+
+So, anytime we have two perfectly equal opponents, the expected score reduces to a coin flip.
+
+## Differences in Elo Ratings
+
+Okay, but now suppose that $R_A$ is 100 and $R_B$ is 50 and $V$ is 200. Plugging these numbers into the equation above, we get an expected score for A of `r round(get_expected_score(100, 50, V = 200), 4)`. In this case, $A$ is more likely to win, as they have a higher rating. In this case, the scaling factor $V$ determines how much the difference in rating matters for the expected score:
+
+$$E_A = \frac{1}{1+10^{(50-100)/200}} = \frac{1}{1+10^{-50/200}} = \frac{1}{1+10^{-1/4}} \approx \frac{1}{1+.5623}  \approx  0.64$$
+If the scaling factor $V$ was set to 50, the difference in rating between these two teams would be considered much bigger.
+
+$$E_A = \frac{1}{1+10^{(50-100)/50}} = \frac{1}{1+10^{-50/50}} = \frac{1}{1+10^{-1}} \approx \frac{1}{1+.0.1}  \approx  0.909$$
+Tangibly, this means the scaling factor indicates the difference at which one opponent's expected score would be ten times greater than their opponent's expected score. I'll plot the expected score for $A$ as a function of the difference between $R_B$ and $R_A$ using different values of $V$ for the scaling factor.
+
+```{r test the func}
+
+a_vals = seq(0, 300, 1)
+b_vals = rep(150, length(a_vals))
+v_vals = c(10, 25, 50, 100)
+
+foo = foreach(i=1:length(a_vals), .combine=bind_rows) %:% 
+        foreach(j = 1:length(v_vals), .combine=bind_rows) %do% {
+        
+        get_expected_score(a_vals[i],
+                           b_vals[i],
+                           v_vals[j]) %>%
+                        as_tibble() %>%
+                        mutate(diff = a_vals[i]-b_vals[i],
+                               v = v_vals[j])
+        }
+
+# plot
+foo %>%
+        mutate(v = as.factor(v)) %>%
+        ggplot(., aes(x=diff,
+              color = v,
+              group = v,
+             y=value))+
+        geom_line(lwd=1.1)+
+        theme_bw()+
+        xlab("Rating B - Rating A")+
+        ylab("Expected Score A")+
+        scale_color_viridis_d()
+
+rm(foo)
+
+```
+All this is to say that the selection of the scaling factor and the initial Elo values determine the scaling of the ratings, and we can make decisions about these. 
+
+## Updating Elo Ratings
+
+But none of this so far gets to the real heart of why Elo ratings prove to be useful, which is that they are always updating based on new results.  After a match between opponents, the outcome of the match determines each opponent's updated rating.
+
+As we said earlier, before the match, $R_A$ is 100 and $R_B$ is 50 and $V$ is 200. After the match, we recalculate each opponent's score taking into account what happened in the match. How do we do this? The equation looks like this:
+
+$$R'_A = R_A + K*(S_A - E_A)$$
+We update $R'_A$ based on the previous rating plus the difference between what they actually scored $S_A$ minus what they were expected to score $E_A$, multiplied by the $K$-factor, which determines the maximum possible adjustment between games.
+
+Let's say that that $A$ lost the match to $B$. Their initial score was 100. If the k-factor is set to 10, the most their score could drop is 10 points. They will drop by slightly less than that, based on their expected score:
+
+$$R'_A = 100 + 10*(0 - 0.64) \approx 93.6$$
+$B$, on the other hand, would get a boost to their rating.
+
+$$R'_B = 50 + 10*(1 - 0.36) \approx 56.4$$
+
+In this way, the winner picks up points from the loser, and $K$ determines how many points can be transferred in one match
+
+# Margin of Victory
+
+The original Elo rating updated didn't take into account the margin of victory by the winner, effectively treating close losses and blowouts as the same result. Fortunately, we can make a slight change to the formula for updating ratings in order to account for the margin of victory by the winner. I'm adapting the approach I'll try out here after the methodology described at https://fivethirtyeight.com/methodology/how-our-nfl-predictions-work/
+
+How do we account for the margin of victory in updating the rating? We add a multiplier $M$ based on the margin of victory for the winner in addition to the K factor: 
+
+$$R'_A = R_A + M*K*(S_A - E_A)$$
+
+538 uses a margin of victory multiplier in their ratings that looks like this:
+
+$$ M = MarginMulti = ln(WinnerPointDiff + 1) * Adjustment$$
+Ignore the adjustment piece for a second. The idea is to multiply the result of the game by taking the natural log of the winner's point differential + 1 (as ln(0) is undefined). When the point differential is zero, the margin multiplier reduces to 0 and there is no multiplier. When the differential is positive the winner gets more points from their opponent based on how much they won by, with diminishing credit the further out we go in the margin of victory.
+
+```{r plot of margin of victory}
+
+tibble(x = seq(0, 50),
+       y = log(x+1)) %>%
+        ggplot(., aes(x=x,
+                      y=y))+
+        geom_line()+
+        theme_phil()+
+        xlab("margin of victory (x)")+
+        ylab("margin of victory multiplier log(x+1)")
+
+```
+
+What about that adjustment? 538 discusses adjusting for autocorrelation, which is correlation within a time series between its current and past values. In the case of Elo ratings, if we only include a margin multiplier, we will quickly find that teams that are winning a lot are also winning by high margins. This means we'll end up with a positive feedback loop for winning teams which, lacking any sort of adjustment, can lead to inflated ratings for good teams.
+
+538 suggest adjusting for this based around the difference in pre game Elo between the two teams. 
+
+$$ Adjustment = \frac{2.2}{WinnerEloDiff*0.001+2.2}$$
+Let's continue to say that $A$'s pre game Elo rating is 100 and $B$'s is 50. We'll keep $V$ at 200 and $K$ at 10, as before. But let's now say that $A$ lost the match by 7 points in the game. This makes the margin of victory multiplier:
+
+$$M = log(7+1)*\frac{2.2}{-50*0.001+2.2} \approx 2.13$$
+
+Which we then plug in for M in their updated rating formula, which becomes:
+
+$$R'_A = 100 + 2.13*10*(0 - 0.64) \approx 87.01$$
+If $A$ had only lost by one point, the margin of victory multiplier would decrease:
+
+$$M = log(1+1)*\frac{2.2}{-50*0.001+2.2} \approx 0.709 $$
+
+and $A$'s updated rating would become:
+
+$$R'_A = 100 + 0.709*10*(0 - 0.64) \approx 95.46$$
+Functionally, this means that the margin of victory multiplier will kick in more depending on whether you're the pre game favorite or not. This means if you win by a lot as the favorite, you won't necessarily pick up more points, but if you lose by a lot as the favorite you can take a serious hit to your points.
+
+Here's what $A$'s updated rating would look like as a function of the margin of victory for the winner in the event of a win or a loss.
+
+```{r update rating function, echo=F}
+
+update_team_rating <- function(team_rating,
+                               opponent_rating,
+                               expected_score,
+                               observed_score,
+                               winner_mov,
+                               k_factor = 10) {
+        
+        if (observed_score == 1) {
+                mov_multi = log(winner_mov+1) * (2.2 / (((team_rating - opponent_rating)*0.001) + 2.2))
+        } else if (observed_score ==0) {
+                mov_multi = log(winner_mov+1) * (2.2 / (((opponent_rating - team_rating)*0.001) + 2.2))
+        } else {
+                 mov_multi = 2.2*log(2)
+        }
+        
+        # multiplier for margin of victory
+
+         # now compute updated rating taking into account initial rating and mov
+         updated_rating = 
+                 team_rating + 
+                 (mov_multi *
+                          k_factor * 
+                          (observed_score - expected_score))
+         
+         return(updated_rating)
+         
+}
+
+mov = seq(1, 50)
+outcome = c(0,1)
+a = 100
+b = 50
+v = 200
+
+win_mov = foreach(i = 1:length(mov),
+                  .combine = bind_rows) %:%
+        foreach(j = 1:length(outcome),
+                .combine = bind_rows) %do% {
+                          
+                           a_update = update_team_rating(
+                                   team_rating = a,
+                                   opponent_rating = b,
+                                   expected_score = get_expected_score(a, b, v),
+                                   observed_score  = outcome[j],
+                                   winner_mov = mov[i],
+                                   k_factor = 10) %>%
+                                   tibble(updated_rating = .,
+                                          team = 'A',
+                                          outcome = outcome[j],
+                                          mov = mov[i])
+                           
+                           b_update = update_team_rating(
+                                   team_rating = b,
+                                   opponent_rating = a,
+                                   expected_score = get_expected_score(b, a, v),
+                                   observed_score  = outcome[j],
+                                   winner_mov = mov[i],
+                                   k_factor = 10) %>%
+                                   tibble(updated_rating = .,
+                                          team = 'B',
+                                          outcome = outcome[j],
+                                          mov = mov[i])
+                           
+                           bind_rows(a_update, b_update)
+
+}
+
+# look at A's updated rating as a function of the margin of victory
+win_mov %>%
+        mutate(outcome = case_when(outcome == 0 & team=='A' ~ 'B win',
+                                   outcome == 1 & team == 'B' ~ 'B win',
+                                   outcome == 0 & team == 'B' ~ 'A win',
+                                   outcome == 1 & team == 'A' ~ 'A win')) %>%
+        mutate(mov = case_when(outcome == 'B win' ~ -mov,
+                               outcome == 'A win' ~ mov)) %>%
+        ggplot(., aes(x=mov,
+                      color = team,
+                      y=updated_rating))+
+        geom_line()+
+        theme_phil()+
+        geom_hline(yintercept = 100,
+                   color = 'red',
+                   linetype = 'dashed')+
+        xlab("A Score - B Score")+
+        ylab("Updated Elo Rating")+
+        scale_color_manual(values = c("red", "blue"))+
+                geom_hline(yintercept = 50,
+                   color = 'blue',
+                   linetype = 'dashed')+
+        annotate("text",
+                 y=105,
+                 x=-37,
+                 color = "red",
+                 label = "A Pregame Rating")+
+                annotate("text",
+                 y=55,
+                 x=-37,
+                 color = "blue",
+                 label = "B Pregame Rating")+
+        geom_vline(xintercept=0,
+                   linetype = 'dotted')
+
+```
+
+If $A$, the heavy pre game favorite, wins by 50, the most they can really move up is 10 points (in this case, the K factor). If $A$ loses by 50 as the favorite, they can drop nearly 25. 
+
+What's with the constants of 2.2 and 0.001? As far as I can tell, this is because they initialized their ratings for teams at around 1500 (others have less) and they expect the maximum difference in Elo to be no greater than 2200 (2.2 / 0.001). The equation itself no longer works if the WinnerEloDiff is -2200, as the denominator goes to zero. The decision for these constants should then depend on the scale factor and the initial ratings selected.
+
+```{r remove}
+
+rm(a_update,
+   b_update,
+   win_mov,
+   a,
+   b,
+   a_vals,
+   b_vals,
+   mov,
+   outcome)
+
+rm(list=ls())
+
+```
+
