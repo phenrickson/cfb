@@ -22,7 +22,7 @@ function(sim_team_outcomes,
                                   filter(league == 'ncaa') %>%
                                   mutate(TEAM = location),
                           by = c("TEAM")) %>%
-                left_join(., games_data_raw %>%
+                left_join(., games_data_tidied %>%
                                   select(GAME_ID, AWAY_TEAM, HOME_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),

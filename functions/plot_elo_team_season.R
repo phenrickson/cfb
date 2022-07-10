@@ -12,7 +12,7 @@ function(sim_team_outcomes,
                 filter(WEEK < week) %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_raw %>%
+                          games_data_tidied %>%
                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -52,7 +52,7 @@ function(sim_team_outcomes,
                           team_temp %>% 
                                   filter(GAME_DATE == max(GAME_DATE)) %>%
                                   mutate(GAME = max(GAME) +1, 
-                                         OPPONENT_LABEL = paste("Season End", "Elo", sep="\n"),
+                                         OPPONENT_LABEL = paste("Season End", "Elo", "\n", sep="\n"),
                                     #     OPPONENT_LABEL = paste("Predicted", "\n", "Record:", "\n", team_record, "\n", "\n"),
                                          PREGAME_ELO = POSTGAME_ELO)) %>%
                 left_join(., team_wins, 

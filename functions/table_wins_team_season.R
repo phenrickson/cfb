@@ -43,7 +43,7 @@ function(sim_team_outcomes,
                 filter(WEEK < week) %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_raw %>%
+                          games_data_tidied %>%
                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),

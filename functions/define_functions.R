@@ -755,7 +755,7 @@ plot_forecast_wins_conference_season = function(actual_team_outcomes,
                 filter(SEASON == season) %>%
                 arrange(GAME_DATE) %>%
                 filter(!is.na(CONFERENCE)) %>%
-                mutate(win = case_when(POINTS > OPP_POINTS ~ 1,
+                mutate(win = case_when(POINTS > OPPONENT_POINTS ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(SEASON, TEAM, WEEK) %>%
                 summarise(win = sum(win),
@@ -936,10 +936,12 @@ dump("get_new_elos",
 
 # function to loop over games and calculate elo ratings given selected parameters
 calc_elo_ratings = function(games,
+                            recruiting,
                             teams = list(),
                             team_seasons = list(),
                             home_field_advantage,
                             reversion,
+                            recruiting_adjustment =0,
                             k,
                             v,
                             verbose=T) {
@@ -968,8 +970,8 @@ calc_elo_ratings = function(games,
                         if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
                 
                 # check whether its a neutral site game to apply home field advantage adjustment
-                if (game$NEUTRAL_SITE==T) {home_field_advantage = 0} else 
-                        if (game$NEUTRAL_SITE==F) {home_field_advantage = home_field_advantage}
+                if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
+                        if (game$NEUTRAL_SITE==F) {add_home_field_advantage = home_field_advantage}
                 
                 # check whether the team has already played in a season
                 # check whether the season of the game is the same season 
@@ -993,22 +995,26 @@ calc_elo_ratings = function(games,
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
-                ## get the score margin based on the ome team
+                
+                ### recruiting
+                # get each team's
+                
+                ## get the score margin based on the home team
                 home_margin = game$HOME_POINTS - game$AWAY_POINTS
                 
                 # get updated elo for both teams
                 new_elos = get_new_elos(home_rating,
                                         away_rating,
                                         home_margin,
-                                        home_field_advantage,
+                                        add_home_field_advantage,
                                         k,
                                         v)
                 
@@ -1156,8 +1162,8 @@ sim_elo_ratings = function(games,
                         if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
                 
                 # check whether its a neutral site game to apply home field advantage adjustmnet
-                if (game$NEUTRAL_SITE==T) {home_field_advantage = 0} else 
-                        if (game$NEUTRAL_SITE==F) {home_field_advantage = home_field_advantage}
+                if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
+                        if (game$NEUTRAL_SITE==F) {add_home_field_advantage = home_field_advantage}
                 
                 # check whether the team has already played in a season
                 # check whether the season of the game is the same season 
@@ -1181,16 +1187,16 @@ sim_elo_ratings = function(games,
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
                 ## simulate the margin via points model
-                home_margin = sim_game_margin(home_rating, 
+                home_margin = sim_game_margin(home_rating + add_home_field_advantage, 
                                               away_rating,
                                               points_model)
                 

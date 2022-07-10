@@ -31,7 +31,7 @@ function(actual_team_outcomes,
                 filter(SEASON == season) %>%
                 arrange(GAME_DATE) %>%
                 filter(!is.na(CONFERENCE)) %>%
-                mutate(win = case_when(POINTS > OPP_POINTS ~ 1,
+                mutate(win = case_when(POINTS > OPPONENT_POINTS ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(SEASON, TEAM, WEEK) %>%
                 summarise(win = sum(win),

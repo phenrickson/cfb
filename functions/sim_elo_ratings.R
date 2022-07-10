@@ -46,8 +46,8 @@ function(games,
                         if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
                 
                 # check whether its a neutral site game to apply home field advantage adjustmnet
-                if (game$NEUTRAL_SITE==T) {home_field_advantage = 0} else 
-                        if (game$NEUTRAL_SITE==F) {home_field_advantage = home_field_advantage}
+                if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
+                        if (game$NEUTRAL_SITE==F) {add_home_field_advantage = home_field_advantage}
                 
                 # check whether the team has already played in a season
                 # check whether the season of the game is the same season 
@@ -71,16 +71,16 @@ function(games,
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
                 ## simulate the margin via points model
-                home_margin = sim_game_margin(home_rating, 
+                home_margin = sim_game_margin(home_rating + add_home_field_advantage, 
                                               away_rating,
                                               points_model)
                 
