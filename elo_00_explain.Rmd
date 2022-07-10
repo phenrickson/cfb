@@ -10,7 +10,6 @@ output:
     toc_float: TRUE #let your ToC follow you as you scroll
     keep_md: no
     fig.caption: yes
-    css: "styles.css"
 ---
 
 ```{r setup, include=FALSE}
@@ -105,7 +104,7 @@ rm(a)
 
 # What is this? {-}
 
-This notebook explores my methodology for computing Elo ratings for college football teams using data from the late 1800s to present.
+This notebook explores my methodology for developing Elo ratings for college football teams using data from the late 1800s to present.
 
 # Explaining Elo Ratings
 
