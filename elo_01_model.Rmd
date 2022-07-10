@@ -10,7 +10,6 @@ output:
     toc_float: TRUE #let your ToC follow you as you scroll
     keep_md: no
     fig.caption: yes
-    css: "styles.css"
 ---
 
 ```{r setup, include=FALSE}
@@ -171,7 +170,7 @@ games_data_tidied = games_data_raw %>%
         mutate(HOME_CONFERENCE = case_when(HOME_CONFERENCE %in% fcs_conferences ~ NA_character_,
                                            TRUE ~ HOME_CONFERENCE)) %>%
         mutate(AWAY_CONFERENCE = case_when(HOME_CONFERENCE %in% fcs_conferences ~ NA_character_,
-                                           TRUE ~ HOME_CONFERENCE))
+                                           TRUE ~ AWAY_CONFERENCE))
 ```
 
 ```{r get other data sets}
@@ -1280,7 +1279,7 @@ At this point, we've covered a few different parameters that we can toggle when 
 k_pars = seq(5, 50, 15)
 v_pars = 400
 reversion_pars = seq(0, 0.3, 0.1)
-home_pars = seq(0, 75, 15)
+home_pars = seq(0, 90, 15)
 
 # make grid
 grid_pars = expand.grid(k = k_pars,
@@ -1395,7 +1394,7 @@ elo_tuning_results %>%
         filter(.metric == 'f_meas') %>%
         arrange(desc(.estimate)) %>%
         mutate_if(is.numeric, round, 3) %>%
-        head(25) %>%
+        head(10) %>%
         flextable() %>%
         autofit()
 
@@ -1567,14 +1566,16 @@ elo_valid_results %>%
         flextable() %>%
         autofit()
 
-
 ```
 
-Again, the results are pretty consistent, so I'll go with the values stated previously.
+Again, the results are pretty consistent, so I'll go with the best candidates on the log loss.
 
 ```{r get elo ratings for trainng and valid, include=F}
 
-selected_pars = best_pars[2,]
+selected_pars = best_pars[1,]
+
+rm(elo_train, 
+   elo_valid)
 
 # compute elo on train
 elo_train = calc_elo_ratings(train_games,
@@ -1600,7 +1601,7 @@ elo_valid = calc_elo_ratings(valid_games,
 
 All of the work so far has been focused on predicting the winner of games in terms of both the probability and the label. 
 
-But, a nice feature of the Elo rating framework is that it also extends to predicting the difference in points between the two teams. Here is the relationship between the point differential (Home Points - Away Points) and difference in pre game Elo ratings (Home Pre Elo - Away Pre Elo) from the seasons 1980 to 2000.
+But, a nice feature of the Elo rating framework is that it also extends to predicting the difference in points between the two teams. Here is the relationship between the home team's point differential (Home Points - Away Points) and difference in pre game Elo ratings (Home Pre Elo - Away Pre Elo) from the seasons 1980 to 2000.
 
 ```{r we can also look at the predicted spread vs the actual, fig.height=8}
 
@@ -1624,7 +1625,7 @@ elo_train$game_outcomes %>%
 
 ```
 
-I'm omitting the first few years, as as the initial few seasons are being used to learn the Elo scores, but once we have a few seasons worth of data we start to see a pretty consistent relatioship between the difference in Elo ratings and the game's point differential.
+I'm omitting the first few years, as as the initial few seasons are being used to learn the Elo scores, but once we have a few seasons worth of data we start to see a pretty consistent relationship between the difference in Elo ratings and the game's point differential.
 
 ## Regression
 
@@ -1674,7 +1675,7 @@ points_model = elo_train$game_outcomes %>%
 
 ```
 
-For the model trained on most of the training set of games, the estimated effect of HOME_ELO_DIFF was about .05. The intercept is a little over 0.65, which indicates the expected point differential in which the two teams have equivalent Elo ratings. This would be higher than if we were not adjusting for the home field advantage in the Elo ratings directly. This would suggest that our adjust isn't nearly enough to capture the entirety of the home field advantage, but we'll stick with it.
+For the model trained on most of the training set of games, the estimated effect of HOME_ELO_DIFF was about .05. The intercept is a around 1, which indicates the expected point differential in favor of the home team which the two teams have equivalent Elo ratings. Note: this would be higher than if we were not adjusting for the home field advantage in the Elo ratings directly. This would suggest that our adjust isn't nearly enough to capture the entirety of the home field advantage, but we'll stick with it.
 
 The coefficient of .05 for the Elo diff means that a 20 point lead in Elo translates to about a point on the spread. This is linear, so a 200 point lead translates to about a 10 point expected margin of victory.
 
@@ -1743,7 +1744,7 @@ lm_points %>%
 
 ```
 
-That number seems laughably high, but it's skewed somewhat by the model being *really off* for certain games. The in sample mean absolute error was closer to 12 points, with an Rsquared of around .38.
+That number seems laughably high, but it's skewed somewhat by the model being *really off* for certain games. The in sample mean absolute error was closer to 13 points, with an Rsquared of around .38.
 
 ```{r look at the distribution of predicted vs actual}
 
@@ -1799,7 +1800,7 @@ lm_points %>%
 
 What's the point of this? In addition to using Elo ratings to predict the outcomes of games, we can also use them to simulate the expected point differential. I'll use one game as an example illustrate.
 
-Let's go to a week 1 game in 2001: Wisconsin vs Virginia. Based on computed Elo ratings, Wisconsin was the favorite going into this game, with around a 130 point advantage in pregame Elo. As the home team, this means Wisconsin is about a 10.5 point favorite according to our model (home team advantage). That's the point estimate, but we can simulate from the model a few thousand times and plot the distribution of the simulations to see the uncertainty around the estimate.
+Let's go to a week 1 game in 2001: Wisconsin vs Virginia. After adjusting for home team advantage, Wisconsin was the clear favorite going into this game, with around a 200 point advantage in pregame Elo. As the home team, this means Wisconsin is about a 10.5 point favorite according to our model (home team advantage). That's the point estimate, but we can simulate from the model a few thousand times and plot the distribution of the simulations to see the uncertainty around the estimate.
 
 ```{r predict the point differential for one game in , fig.height=4}
 
@@ -1844,7 +1845,9 @@ sample_sims %>%
 
 The 50% prediction interval for the game ranged from about -1 to 21, while the 80% interval ranged from about -11 to 31. 
 
-What was the actual score? Wisconsin 26, Virginia 17, for a point differential of 9. So in this case, the model did kinda nail it, but the point is the uncertainty is generally quite high with our estimates. If we look at all games from week 1, we can see that the model got some right and some wrong - the actual margin is in red, the prediction interval is in black.
+What was the actual score? Wisconsin 26, Virginia 17, for a point differential of 9.
+
+So in this case, the model did kinda nail it, but the point is the uncertainty is generally quite high with our estimates. If we look at all games from week 1, we can see that the model got some right and some wrong - the actual margin is in red, the prediction interval is in black.
 
 ```{r use model to simulate 2001}
 
@@ -1961,45 +1964,6 @@ elo_valid$game_outcomes %>%
 
 ```
 
-<!-- ```{r simulate and compare point differential} -->
-
-<!-- set.seed(2) -->
-<!-- foo %>% -->
-<!--         filter(SEASON == 2001) %>% -->
-<!--         mutate(sim = map(lm, simulate)) %>% -->
-<!--         select(SEASON, data, sim) %>% -->
-<!--         unnest() %>% -->
-<!--         mutate(sim_1 = round(sim_1, 0)) %>% -->
-<!--         mutate(HOME_SCORE_DIFF_char = case_when(HOME_SCORE_DIFF > 0 ~ paste("+", HOME_SCORE_DIFF, sep=""), -->
-<!--                                     HOME_SCORE_DIFF == 0 ~ paste("Tie"), -->
-<!--                                     HOME_SCORE_DIFF < 0 ~ paste(HOME_SCORE_DIFF, sep=""))) %>% -->
-<!--         mutate(sim_char = case_when(sim_1 > 0 ~ paste("+", sim_1, sep=""), -->
-<!--                                     sim_1 == 0 ~ paste("Tie"), -->
-<!--                                     sim_1 < 0 ~ paste(sim_1, sep="")), -->
-<!--                GAME = paste(HOME_TEAM, " ", AWAY_TEAM, "\n", -->
-<!--                             "Actual.:", HOME_TEAM,  HOME_SCORE_DIFF_char, "\n", -->
-<!--                             "Sim:", HOME_TEAM, sim_char, sep="")) %>% -->
-<!--         mutate(CORRECT = case_when(sim_1 >0 & HOME_SCORE_DIFF >0 ~ 'yes', -->
-<!--                                    sim_1 <0 & HOME_SCORE_DIFF <0 ~ 'yes', -->
-<!--                                    TRUE ~ 'no')) %>% -->
-<!--         ggplot(., aes(x=HOME_SCORE_DIFF, -->
-<!--                       color = CORRECT, -->
-<!--                       label = GAME, -->
-<!--                       y=sim_1))+geom_point()+ -->
-<!--         geom_text(check_overlap=T, -->
-<!--                   vjust=-0.5, size=2)+ -->
-<!--         theme_phil()+ -->
-<!--         scale_color_manual(values = c("red", "blue"))+ -->
-<!--         facet_wrap(SEASON + WEEK~., -->
-<!--                    ncol = 4)+ -->
-<!--         geom_vline(xintercept =0, -->
-<!--                    linetype = 'dotted')+ -->
-<!--         geom_hline(yintercept = 0, -->
-<!--                    linetype = 'dotted') -->
-
-<!-- ``` -->
-
-
 ```{r rm elements computed so far}
 
 rm(elo_returned,
@@ -2086,7 +2050,7 @@ I'll plot the results of these simulations for every team in the Big 12. This pl
 
 plot_elo_conference_season(sim_team_outcomes,
                            2001,
-                           'Big Ten',
+                           'Big 12',
                            15)
 
 ```
@@ -2308,7 +2272,6 @@ sim_game_assessment %>%
 
 ```
 
-
 We can also break this down by each week. As we would expect, in simulating the entire season, our pre season accuracy drops further into the season we go.
 
 ```{r look at results week by week for 2001}
@@ -2492,7 +2455,7 @@ elo_update = calc_elo_ratings(valid_games %>%
 update_sim_seasons = future_replicate(100,
                   sim_elo_ratings(valid_games %>%
                                           filter(SEASON == 2001) %>%
-                                          filter(WEEK > 4),
+                                          filter(WEEK > 5),
                                   teams = elo_update$teams,
                                   team_seasons = elo_update$team_seasons,
                                   home_field_advantage = selected_pars$home_field_advantage,
@@ -2526,7 +2489,7 @@ table_wins_team_season(sim_team_outcomes,
 
 ```
 
-Here's what the picture for Illinois looks like after their first few games. At the start of the season they were expected to lose to Louisville by a touchdown, but Illinois pulled off an upset at California in week one and then won their game against Northern Illinois. Now, going into Louisville, they are now slight favorites, and they are slightly more likely to win the rest of their matchups.
+Here's what the picture for Illinois looks like after their first few games. At the start of the season they were expected to lose to Louisville by a touchdown, but Illinois pulled off an upset at California in week one and then won their games against Northern Illinois and Louisville, so their expected chances in the rest of their games was higher.
 
 ```{r show illinois updated 2001}
 
@@ -2542,7 +2505,7 @@ table_wins_team_season(update_team_outcomes,
                        2001,
                        'Illinois',
                        15) %>%
-        set_caption("After Week 4")
+        set_caption("After Week 5")
 
 ```
 
@@ -2715,9 +2678,33 @@ plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outc
 
 ```
 
+Similarly, here's how the Big Ten changed as Wisconsin started to have a poor season.
+
+```{r big ten wisconsin midseason}
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'Big Ten',
+                                     week = 3)
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'Big Ten',
+                                     week = 7)
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'Big Ten',
+                                     week = 10)
+
+```
+
 # What About the Croots?
 
-So far, everything has been built to predict upcoming games and seasons using nothing more than a tuned Elo rating that accounts for home field advantage and reversion year over year. The results are kind of cool given the simplicity of this approach, but there's at least one elephant in the room that I want to add to the model: team recruiting ratings. 
+So far, everything has been built to predict upcoming games and seasons using nothing more than a tuned Elo rating that accounts for home field advantage and reversion year over year. The results are kind of cool given the simplicity of this approach, but there's at least one elephant in the room that I want to add to the model: recruiting.
 
 ## Team Recruiting Scores
 
@@ -2728,7 +2715,9 @@ We have data on recruiting back to the year 2002 (we have data for 2000, but it 
 set.seed(1)
 recruiting_teams_raw %>%
         filter(YEAR == 2010) %>%
-        sample_n(5)
+        sample_n(5) %>%
+        flextable() %>%
+        autofit()
 
 ```
 
@@ -2790,11 +2779,15 @@ recruiting_teams_raw %>%
 
 ```
 
+I do have more disaggregated data on recruits down to the player and position level, but the historical quality is less clear and I haven't been able to dive into it as much so I'll punt on using that for now. 
+
 ## Recruiting Moving Average
 
-A team's recruiting ranking is scored year by year, but a team's roster is composed of players from the last few years. This means instead of just using recruiting scores, we should probably use some sort of weighted moving average.
+A team's recruiting ranking is scored year by year, but a team's roster is composed of players from the last few years. This means instead of just using recruiting scores, we should probably use some sort of weighted moving average of a team's previous classes. In this plot I'm looking at a team's composite score in each year, along with two different types of weighted moving average. The first uses exponentially decaying weights over the last four years, prioritizing recency. The second uses manually selected weights for the last four years, with 35% weight given to 4 years ago, 25% given to the 2 and 3 years ago, and 15% to the most recent class. 
 
 ```{r get recruiting scores by team}
+
+library(TTR)
 
 recruiting_teams_averages = recruiting_teams_raw %>%
         filter(YEAR > 2001) %>%
@@ -2808,6 +2801,11 @@ recruiting_teams_averages = recruiting_teams_raw %>%
         select(-n) %>%
         mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
         mutate(WMA = WMA(RECRUITING_POINTS, n =4, wts = c(.35, .25, .25, .15))) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ EMA)) %>%
+        mutate(WMA = case_when(is.na(WMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ WMA)) %>%
         # mutate_at(c("EMA", "WMA"),
         #           replace_na, 0) %>%
         arrange(TEAM, YEAR) %>%
@@ -2820,7 +2818,7 @@ recruiting_teams_averages = recruiting_teams_raw %>%
 
 ```
 
-Here I'll show each SEC team's recruiting points by year, as well as two different forms of weighted moving averages, exponentially decaying weights and manually selected weights. 
+Here are the SEC teams over this time frame.
 
 ```{r show recruiting for SEC}
 
@@ -2855,17 +2853,18 @@ recruiting_teams_averages %>%
 
 ```
 
-This distribution seems to be shifting over time too.
+Some times you can clearly see have been on the rise or falling, though the overall distribution of the recruiting rating seems to have shifted a bit over this time period. This might be a data quality/reporting issue, or it might be that recruiting landscape is shifting over time.
 
-```{r looking at distributions over time for the smoothed and nnot}
+```{r looking at distributions over time for the smoothed and nnot, messages=F}
 
-recruiting_teams_averages %>% 
+p = recruiting_teams_averages %>% 
         ggplot(., aes(x=EMA, y=factor(SEASON)))+
-        stat_density_ridges(quantile_lines = T)
+        stat_density_ridges(quantile_lines = T)+
+        theme_phil()
+
+print(suppressMessages({p}))
 
 ```
-
-
 
 
 ## Team Recruiting Scores and Elo Ratings
@@ -2876,9 +2875,9 @@ I only mention giving a boost to Elo at the start of the season because eventual
 
 Here's how I plan to test this out. First, I'll get each team's Elo rating through 2014 using the methodology described so far.
 
-Next, I'll get each team's recruiting score in the lead up to these seasons. I only have a rolling recruiting score for each team starting in 2007, so I'll be looking at the years 2007-2010 in particular here. Recruiting overlaps with the season, so for a team's recruiting score I'll use a moving average of their previous (four) years, not including the current year. This means each team's recruiting score will be constant throughout the season. (Yes, I am aware of injuries and transfers, but this is a start.)
+Next, I'll get each team's recruiting score in the lead up to these seasons. I only have a rolling recruiting score for each team starting in 2007, so I'll be looking at the years 2007-2014 in particular here. Recruiting overlaps with the season, so for a team's recruiting score I'll use a moving average of their previous (four) years, not including the current year. This means each team's recruiting score will be constant throughout the season. (Yes, I am aware of injuries and transfers, but this is a start.)
 
-Each team will have an Elo rating at the **start** of the season, which is based on their previous seasons, and an Elo rating at the **end** of the season. For the years 2007-2010, I'll regress their **season end Elo** on their **season start Elo** and their **recruiting score**. If a team's recruiting score has a (positive) effect on a team's season end Elo, conditional on their starting Elo, we'll have some evidence in favor of adding a recruiting adjustment at the beginning of each season.
+Each team will have an Elo rating at the **start** of the season, which is based on their previous seasons, and an Elo rating at the **end** of the season. For the years 2007-2014, I'll regress their **season end Elo** on their **season start Elo** and their **recruiting score**. If a team's recruiting score has a (positive) effect on a team's season end Elo, conditional on their starting Elo, we'll have some evidence in favor of adding a recruiting adjustment at the beginning of each season.
 
 ```{r compute elo ratings through 2010}
 
@@ -2886,6 +2885,23 @@ Each team will have an Elo rating at the **start** of the season, which is based
 train_games = games_data_tidied %>%
         filter(SEASON >=1970) %>%
         filter(SEASON <= 2015) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID,
+               SEASON,
+               WEEK,
+               SEASON_TYPE,
+               GAME_DATE,
+               NEUTRAL_SITE,
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# now loop through a set of games
+valid_games = games_data_tidied %>%
+        filter(SEASON > 2015 & SEASON < 2022) %>%
         arrange(GAME_DATE) %>%
         select(GAME_ID,
                SEASON,
@@ -2910,16 +2926,18 @@ elo_train = calc_elo_ratings(train_games,
 
 ```
 
-This is the correlation between a team's starting and ending elo in each of these seasons.
+This is the correlation between a team's starting and ending Elo in each of these seasons. Note: I'm not including FCS teams in this analysis, as I don't have readily available recruiting information for them and I've already set their initial ratings lower than FBS teams to account for the talent gap. If we were to penalize them again for having low recruiting scores, they would just get pulled down further at the start of every year.
 
 ```{r join recruiting info with elo ratings}
 
 teams_elo_and_recruiting = elo_train$team_outcomes %>%
         filter(SEASON > 2006) %>%
-        left_join(., recruiting_teams_averages,
-              by = c("TEAM", "SEASON", "CONFERENCE")) %>%
+        left_join(., recruiting_teams_averages %>%
+                          select(-CONFERENCE),
+              by = c("TEAM", "SEASON")) %>%
         # remove FCS teams, as we don't have season long totals for these teams
         filter(!is.na(CONFERENCE)) %>%
+        # if teams do not have enough data yet, just fill in with thier current value
         mutate_at(c("WMA", "EMA"),
                   replace_na, 0) %>%
         group_by(SEASON, TEAM) %>%
@@ -2939,7 +2957,7 @@ teams_elo_and_recruiting = elo_train$team_outcomes %>%
 teams_elo_and_recruiting %>%
         mutate(Change = Elo_End - Elo_Start) %>%
         ggplot(., aes(x=Elo_Start,
-                      color = EMA,
+             #         color = EMA,
                       label = TEAM,
                       y=Elo_End))+
         geom_point()+
@@ -2953,9 +2971,9 @@ teams_elo_and_recruiting %>%
 
 ```
 
-Now regress Elo End on Elo Start, with and without recruiting. To make this a bit easier to interpret, I'll center the predictors at zero so that the intercept will indicate the average Elo End. 
+Now, I'll regress Elo End on Elo Start, with and without recruiting for FBS teams. To make this a bit easier to interpret, I'll center the predictors at zero so that the intercept will indicate the average Elo rating for teams at the end of the season.
 
-The first model looks at predicting a team's season ending Elo using just its starting Elo. The model indicates that a team with an average Elo at the start of the year will end up with a rating of 1577, with each additional point above on starting Elo the mean increasing their ending Elo by .93. This should make sense: where you end up is on average a function of where you start, and knowing your starting Elo explains about 77% of the ending Elo.
+The first model looks at predicting a team's season ending Elo using just its starting Elo. The model indicates that a team with an average Elo at the start of the year will end up with a rating of around 1520, with each additional point above on starting Elo the mean increasing their ending Elo by .92. This should make sense: where you end up is on average a function of where you start, and knowing your starting Elo explains a little under 70% of the ending Elo.
 
 ```{r regress elo end on elo start}
 
@@ -2979,10 +2997,11 @@ without_recruiting_lm %>%
         select(glanced) %>%
         unnest() %>%
         mutate_if(is.numeric, round, 3) %>%
-        select(r.squared, sigma, no)
+        select(r.squared, sigma, nobs)
 
 ```
-Now, looking at the model that includes recruiting, we can see that the coefficient for Elo Start has dropped slightly, down to .8, and the coefficient on Elo is .6. This means, functionally, that each additional point above the average on a team's recruiting score is worth an additional .6 Elo points at the end of the season.
+
+Now, looking at the model that includes recruiting, we can see that the coefficient for Elo Start has dropped slightly, down to .76, and the coefficient on Elo is .8. This means, functionally, that each additional point above the average on a team's recruiting score is worth an additional .8 Elo points at the end of the season, holding the starting Elo rating constant.
 
 ```{r now look at effects }
 
@@ -3008,426 +3027,190 @@ with_recruiting_lm %>%
         mutate_if(is.numeric, round, 3) %>%
         select(r.squared, sigma, nobs)
 
-
 ```
 
-```{r }
+For our purposes, this means that we can look at adjusting teams slightly at the beginning of each season based on their recruiting talent going into the season. For instance, if we had adjusted teams at the start of the 2007 season based on their recruiting score going into the season, here is how the Elo ratings compare.
 
+```{r above and below average teams in }
 
 teams_elo_and_recruiting %>%
-        mutate(mean_ema = mean(EMA))
-        mutate(Elo_Start = Elo_Start - mean(Elo_Start),
-               EMA = EMA - mean(EMA)) %>%
-        mutate(mean_ema = mean(EMA))
-
-```
-
-
-
-## Effects of Recruiting on Point Differential and Wins
-
-How can we use this in an Elo model? My initial thihnkings is that we evaluate giving each team a bump at the start of the season based on the talent on their roster (as proxied for by their rolling composite score). A team full of young, talented recruits might not have won many games, but the talent on their roster would make us think that they would be due to break through soon. We would expect teams that have been building talented rosters to punch above their Elo weight in future seasons.
-
-I only mention giving a boost to Elo at the start of the season because eventually a team will start to demonstrate its value on the field and their Elo rating will catch up. The question is whether we can adjust ratings at the beginning of the season so as to catch onto these types of teams faster.
-
-
-Here's how I'll test this out. 
-
-1. Compute Elo ratings through 2010
-2. Train point model through 2006
-3. Compute each team's recruiting score (an exponentially weighted moving average of their previous year's classes)
-4. Predict winner and point differential for years 2007-2012
-5. Evaluate whether the residuals are correlated with the difference in the two team's recruiting rating.
-
-```{r get elo ratings}
-        
-# now loop through a set of games
-train_games = games_data_tidied %>%
-        filter(SEASON >=1970) %>%
-        filter(SEASON < 2010) %>%
-        arrange(GAME_DATE) %>%
-        select(GAME_ID,
-               SEASON,
-               WEEK,
-               SEASON_TYPE,
-               GAME_DATE,
-               NEUTRAL_SITE,
-               HOME_TEAM,
-               AWAY_TEAM,
-               HOME_CONFERENCE,
-               AWAY_CONFERENCE,
-               HOME_POINTS,
-               AWAY_POINTS)
-
-# now get the elo ratings based on this training set
-elo_train = calc_elo_ratings(train_games,
-                  home_field_advantage = selected_pars$home_field_advantage,
-                  reversion = selected_pars$reversion,
-                  k = selected_pars$k,
-                  v = selected_pars$v,
-                  verbose = T)
-
-```
-
-```{r look at correlation between start of season recruiting and end of season elo}
-
-foo = elo_train$team_outcomes %>%
-    filter(SEASON > 2006) %>%
-    left_join(., recruiting_teams_averages,
-              by = c("TEAM", "SEASON", "CONFERENCE")) %>%
-        mutate_at(c("WMA", "EMA"),
-                  replace_na, 0) %>%
-        group_by(SEASON, TEAM) %>%
-        filter(!is.na(CONFERENCE)) %>%
-        mutate(FIRST_GAME = GAME_DATE == min(GAME_DATE),
-           LAST_GAME = GAME_DATE == max(GAME_DATE)) %>% 
-        filter(FIRST_GAME == T | LAST_GAME == T) %>%
-        mutate(ELO = case_when(FIRST_GAME ==T ~ PREGAME_ELO,
-                               LAST_GAME==T ~ POSTGAME_ELO)) %>%
-        mutate(GAME = case_when(FIRST_GAME ==T ~ 'start',
-                                LAST_GAME == T ~ 'end')) %>%
+        filter(SEASON == 2007) %>%
+        rename(Elo = Elo_Start) %>%
+        select(SEASON, TEAM, CONFERENCE, EMA, Elo) %>%
+        arrange(desc(Elo)) %>%
+        group_by(SEASON) %>%
+        mutate(EMA = EMA - mean(EMA)) %>%
+        mutate(Elo_Recruiting= Elo + (EMA*.7)) %>%
+        rename(Recruiting = EMA) %>%
         ungroup() %>%
-        select(SEASON, TEAM, CONFERENCE, GAME, ELO, WMA, EMA) %>%
-        spread(GAME, ELO)
-
-bar = foo %>%
-        mutate(start = start - mean(start)) %>%
-        mutate(EMA = EMA -mean(EMA),
-               WMA = WMA - mean(WMA)) %>%
-        nest() %>%
-        mutate(lm = map(data, ~ lm(end ~ start + EMA,
-                                   data = .x))) %>%
-        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
-        mutate(glanced = map(lm, glance))
-
-bar %>%
-        select(tidied) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3)
-
-bar %>%
-        select(glanced) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3)
-
-predict(pluck(bar$lm, 1),
-              data.frame(start = 0,
-                         EMA = 100))
-
-```
-
-
-
-```{r for teams}
-
-regress_recruiting_on_elo = elo_train$team_outcomes %>%
-        filter(SEASON > 2006) %>%
-        left_join(., recruiting_teams_averages,
-                  by = c("TEAM", "SEASON", "CONFERENCE")) %>%
-        group_by(SEASON, TEAM) %>%
-        mutate(obs = row_number()) %>%
-        mutate(game = case_when(obs == min(obs) ~ 'first game of season',
-                                obs == max(obs) ~ 'last game of season')) %>%
-        mutate()
-        ungroup() %>%
-        filter(game == 'last game of season') %>%
-        filter(!is.na(game)) %>%
-        nest(-SEASON) %>%
-        mutate(lm = map(data, ~ lm(POSTGAME_ELO ~ EMA,
-                                   data = .x))) %>%
-        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
-        mutate(glanced = map(lm, glance)) 
-
-regress_recruiting_on_elo %>%
-        select(SEASON, tidied) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3)
-
-regress_recruiting_on_elo %>%
-        select(SEASON, glanced) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3)
-
-
-elo_train$team_outcomes %>%
-        filter(SEASON > 2006) %>%
-        left_join(., recruiting_teams_averages,
-                  by = c("TEAM", "SEASON", "CONFERENCE")) %>%
-        group_by(SEASON, TEAM) %>%
-        mutate(obs = row_number()) %>%
-        mutate(game = case_when(obs == min(obs) ~ 'first game of season',
-                                obs == max(obs) ~ 'last game of season')) %>%
-        filter(game == 'last game of season') %>%
-        filter(!is.na(game)) %>%
-        ggplot(., aes(x=POSTGAME_ELO,
-                      label = paste(TEAM, SEASON),
-                      y=EMA))+
+        mutate(Diff = Elo_Recruiting-Elo) %>%
+        gather("type", "value",
+               -SEASON, -TEAM, -CONFERENCE, -Recruiting, -Diff) %>%
+        mutate(TEAM_LABEL = case_when(type == 'Elo_Recruiting' ~ TEAM)) %>%
+        ggplot(., aes(x=Recruiting,
+                      label = TEAM_LABEL,
+                      shape = type,
+                      color = Diff,
+                      by = type,
+                      y = value))+
         geom_point()+
+        geom_line(aes(group = TEAM))+
         geom_text(check_overlap = T,
+                  size = 3,
                   vjust = -1)+
-        facet_wrap(game+SEASON ~.,
-                   ncol = 2)+
-        stat_cor(p.accuracy = 0.01)+
         theme_phil()+
-        geom_smooth(method = 'lm',
-                    formula = 'y ~ x',
-                    se=F)
+        facet_wrap(SEASON~.)+
+        geom_hline(yintercept = 1580,
+                   linetype = 'dashed')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        scale_color_gradient2(low = "red",
+                              mid = "grey80",
+                              high = "deepskyblue1",
+                              limit = c(-50, 50),
+                              oob = scales::squish)+
+        guides(color = "none")+
+        scale_shape_manual(values = c(1, 16))+
+        xlab("Team Recruiting Score")+
+        ylab("Team Elo Rating")
 
 ```
 
+The ratings don't change all that dramatically, as weaker teams get pulled down slightly and stronger teams get pulled up slightly. Where this might help us is with teams that performed poorly in the previous season but had the talent to succeed in the upcoming season.
+
+```{r table for 2007 season}
+
+adjust_func = 
+        function(x) {
+                
+                breaks = c(-200, -150, -100, -50, -25, -5, 0, 5, 25, 50, 100, 150, 200)
+                colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
+                col_palette <- colorRamp(length(breaks))
+                mycut <- cut(x, 
+                             breaks = breaks,
+                             include.lowest = TRUE, 
+                             right=T,
+                             label = FALSE)
+                col_palette[mycut]
+                
+        }
+
+teams_elo_and_recruiting %>%
+        filter(SEASON == 2007) %>%
+        rename(Elo = Elo_Start) %>%
+        select(SEASON, TEAM, CONFERENCE, EMA, Elo) %>%
+        arrange(desc(Elo)) %>%
+        mutate(Elo_Rank = row_number()) %>%
+        group_by(SEASON) %>%
+        mutate(EMA = EMA - mean(EMA)) %>%
+        ungroup() %>%
+        mutate(Elo_Recruiting= Elo + (EMA*.7)) %>%
+        rename(Recruiting = EMA) %>%
+        mutate_if(is.numeric, round, 0) %>%
+        arrange(desc(Recruiting)) %>%
+        mutate(Recruiting_Rank = row_number()) %>%
+        arrange(desc(Elo_Recruiting)) %>%
+        mutate(Elo_Recruiting_Rank = row_number()) %>%
+        mutate(Diff = Elo_Recruiting  - Elo,
+               Rank_Diff = Elo_Recruiting_Rank - Elo_Rank) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        select(-CONFERENCE) %>%
+        select(SEASON, TEAM, Recruiting, Elo, Elo_Recruiting, Diff, Elo_Rank, Elo_Recruiting_Rank) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j=c("Diff"),
+           bg = adjust_func)
 
 
 
-Now, I'll fit a regression on the point differential on the training set.
-
-```{r fit points model through 2006}
-
-# points model
-# regress point differential on elo differential
-# fit linear model after first few years in training
-points_model = elo_train$game_outcomes %>%
-        filter(SEASON >=1975) %>%
-        mutate(HOME_PREGAME_ELO = case_when(NEUTRAL_SITE == T ~ HOME_PREGAME_ELO -selected_pars$home_field_advantage,
-                                            TRUE ~ HOME_PREGAME_ELO)) %>%
-        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
-        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
-        nest() %>%
-        # now fit linear models, i'll do so using stan
-        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
-                             data = .x))) %>%
-        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
-        mutate(glanced = map(lm, glance)) %>%
-        pluck("lm",1)
 
 ```
 
-Now, I'll compute Elo ratings through 2012.
+Alternatively, we might end up worse off here because it might overly penalize teams like Boise State that were consistently strong despite their recruiting being below average, and overly help teams that later underperformed for their recruiting level (Texas).
 
-```{r update elo through 2012, include =F}
+```{r adjustment at the start of each of these seasons}
 
-valid_games = games_data_tidied %>%
-        filter(SEASON >=2007 & SEASON <=2012) %>%
-        arrange(GAME_DATE) %>%
-        select(GAME_ID, 
-               SEASON, 
-               WEEK,
-               SEASON_TYPE,
-               GAME_DATE,
-               NEUTRAL_SITE, 
-               HOME_TEAM,
-               AWAY_TEAM,
-               HOME_CONFERENCE,
-               AWAY_CONFERENCE,
-               HOME_POINTS,
-               AWAY_POINTS) 
-
-# get elo valid set
-elo_valid = calc_elo_ratings(valid_games,
-                             teams = elo_train$teams,
-                             team_seasons = elo_train$team_seasons,
-                             home_field_advantage = selected_pars$home_field_advantage,
-                             reversion = selected_pars$reversion,
-                             k = selected_pars$k,
-                             v = selected_pars$v,
-                             verbose = T)
-
-```
-
-
-```{r join up}
-
-elo_valid$
-
-```
-
-Then, I'll predict the point differential for these games based on their Elo ratings.
-
-```{r predict 07 to 2012}
-
-valid_prepped = elo_valid$game_outcomes %>%
-                              mutate(HOME_PREGAME_ELO = case_when(NEUTRAL_SITE == T ~ 
-                                                                          HOME_PREGAME_ELO -selected_pars$home_field_advantage,
-                                                                  TRUE ~ HOME_PREGAME_ELO)) %>%
-                              mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
-                              mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
-        left_join(.,
-                  recruiting_teams_averages %>%
-                          select(SEASON, TEAM, RECRUITING_POINTS, EMA, WMA) %>%
-                          rename(HOME_TEAM = TEAM,
-                                 HOME_RECRUITING_POINTS = RECRUITING_POINTS,
-                                 HOME_RECRUITING_EMA = EMA,
-                                 HOME_RECRUITING_WMA = WMA),
-                  by = c("SEASON", "HOME_TEAM")) %>%
-        left_join(.,
-                  recruiting_teams_averages %>%
-                          select(SEASON, TEAM, RECRUITING_POINTS, EMA, WMA) %>%
-                          rename(AWAY_TEAM = TEAM,
-                                 AWAY_RECRUITING_POINTS = RECRUITING_POINTS,
-                                 AWAY_RECRUITING_EMA = EMA,
-                                 AWAY_RECRUITING_WMA = WMA),
-                  by = c("SEASON", "AWAY_TEAM")) %>%
-        mutate_at(c("HOME_RECRUITING_POINTS",
-                    "HOME_RECRUITING_EMA",
-                    "HOME_RECRUITING_WMA",
-                    "AWAY_RECRUITING_POINTS",
-                    "AWAY_RECRUITING_EMA",
-                    "AWAY_RECRUITING_WMA"),
-                  replace_na, 0) %>%
-        mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING_EMA - AWAY_RECRUITING_EMA)
-
-```
-
-
-
-
-
-
-```{r look at effect of recruiting ratings on game outcomes}
-
-valid_preds = predict(points_model,
-                      newdata = valid_prepped,
-                      interval = 'prediction') %>%
-        bind_cols(., valid_prepped)
-
-valid_preds %>%
-        mutate(resid = HOME_SCORE_DIFF-fit) %>%
-        mutate(row = row_number()) %>%
-        ggplot(., aes(y=resid,
-                      x=HOME_RECRUITING_DIFF))+
+teams_elo_and_recruiting %>%
+        rename(Elo = Elo_Start) %>%
+        select(SEASON, TEAM, CONFERENCE, EMA, Elo) %>%
+        arrange(desc(Elo)) %>%
+        group_by(SEASON) %>%
+        mutate(EMA = EMA - mean(EMA)) %>%
+        mutate(Elo_Recruiting= Elo + (EMA*.7)) %>%
+        rename(Recruiting = EMA) %>%
+        ungroup() %>%
+        mutate(Diff = Elo_Recruiting-Elo) %>%
+        gather("type", "value",
+               -SEASON, -TEAM, -CONFERENCE, -Recruiting, -Diff) %>%
+        mutate(TEAM_LABEL = case_when(type == 'Elo_Recruiting' ~ TEAM)) %>%
+        ggplot(., aes(x=Recruiting,
+                      label = TEAM_LABEL,
+                      shape = type,
+                      color = Diff,
+                      by = type,
+                      y = value))+
         geom_point()+
-        stat_cor(p.accuracy = 0.01)+
-        geom_smooth(method = 'lm',
-                    formula = 'y ~ x')+
-        geom_hline(yintercept=0,
-                   linetype = 'dotted')+
-        theme_bw()+
-        facet_wrap(WEEK ~.)
-
-```
-
-Okay so the difference in recruiting scores is correlated with the residuals from our point differential model, which uses pre game Elo scores.
-
-```{r compare these and the point difference}
-
-valid_preds %>%
-        left_join(., games_data_tidied %>%
-                          select(GAME_ID, CONFERENCE_GAME),
-                  by = c("GAME_ID")) %>%
-        ggplot(., aes(x=HOME_RECRUITING_DIFF,
-                      label = paste(HOME_TEAM, "-", AWAY_TEAM, ",", SEASON, sep=""),
-                    #  color = CONFERENCE_GAME,
-                      y = HOME_ELO_DIFF))+
+        geom_line(aes(group = TEAM))+
         geom_text(check_overlap = T,
-                  vjust = -1,
-                  size =3)+
-        geom_point(alpha = 0.5)+
+                  size = 3,
+                  vjust = -1)+
         theme_phil()+
-        stat_cor(p.accuracy=0.1)+
-        geom_smooth(formula = 'y ~ x',
-                    method = 'lm')+
-        geom_vline(xintercept =0,
-                   linetype = 'dotted')+
-        geom_hline(yintercept=0,
-                   linetype = 'dotted')
+        facet_wrap(SEASON~.)+
+        geom_hline(yintercept = 1580,
+                   linetype = 'dashed')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        scale_color_gradient2(low = "red",
+                              mid = "grey80",
+                              high = "deepskyblue1",
+                              limit = c(-50, 50),
+                              oob = scales::squish)+
+        guides(color = "none")+
+        scale_shape_manual(values = c(1, 16))+
+        xlab("Team Recruiting Score")+
+        ylab("Team Elo Rating")
 
 ```
 
+Which wins out? Well this is ultimately an empirical question. We'll add the preseason recruiting adjustment as another parameter and see how we do with or without it.
 
-```{r fit model on those years}
+```{r create our recruiting dataset}
 
-compare_models = 
-        bind_rows(valid_prepped %>%
-                          nest() %>%
-                          mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
-                                                     data = .x))) %>%
-                          mutate(method = 'Elo'),
-                  valid_prepped %>%
-                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
-                                                             TRUE ~ 'no'))) %>%
-                          nest() %>%
-                          mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF + HOME_RECRUITING_DIFF,
-                                                     data = .x))) %>%
-                          mutate(method = 'Elo + Recruiting'),
-                   valid_prepped %>%
-                          mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
-                                                             TRUE ~ 'no'))) %>%
-                          nest() %>%
-                          mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_RECRUITING_DIFF,
-                                                     data = .x))) %>%
-                          mutate(method = 'Recruiting'))
-                  
-```
-
-```{r compare effect}
-
-compare_models %>%
-        mutate(tidied = map(lm, tidy, conf.int=T, se='robust')) %>%
-        select(method, tidied) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3) %>%
-        select(method, term, estimate, conf.low, conf.high) %>%
-        flextable() %>%
-        autofit()
-
-# %>%
-#         filter(term == 'HOME_RECRUITING_DIFF') %>%
-#         ggplot(., aes(x=WEEK,
-#                       color = method,
-#                       y=estimate,
-#                       ymin = conf.low,
-#                       ymax = conf.high))+
-#         geom_pointrange()
-
-compare_models %>%
-        mutate(glanced = map(lm, glance)) %>%
-        select(method, glanced) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3) %>%
-        arrange(desc(r.squared)) %>%
-        select(method, r.squared, sigma, nobs) %>%
-        flextable() %>%
-        autofit()
-
-```
-
-```{r adjusting for recruiting}
-
-dodge = 0.5
-
-valid_prepped %>%
-        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
-                                                     TRUE ~ 'no'))) %>%
-        nest(-WEEK) %>%
-        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF + HOME_RECRUITING_DIFF,
-                                             data = .x))) %>%
-        mutate(tidied = map(lm, tidy, conf.int=T, se='robust')) %>%
-        select(WEEK, tidied) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 3) %>%
-        select(WEEK, term, estimate, conf.low, conf.high)  
-
-
-```
-
-# What about the Polls?
-
-```{r look at miami}
-
-
-rankings_tidied %>%
-        filter(SEASON == 2001 & WEEK == 1) %>%
-        filter(poll == 'AP Top 25') %>%
-        arrange(rank)
-
-elo_train$team_outcomes %>%
-        filter(SEASON == 2001) %>%
+recruiting = recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        # remove fcs teams
+        filter(!is.na(CONFERENCE)) %>%
+        # remove teams for which we have less than 4 years data
         group_by(TEAM) %>%
-        filter(GAME_DATE == min(GAME_DATE)) %>%
-        arrange(desc(PREGAME_ELO)) %>%
-        select(SEASON, TEAM, PREGAME_ELO) %>%
-        mutate_if(is.numeric, round, 0)
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        select(-n) %>%
+        # compute ema over a 4 year window
+        mutate(RECRUITING_EMA= EMA(RECRUITING_POINTS, n =4)) %>%
+        # if a team is missing over this time period but it is obdserved, then fill it in with their actual value
+        mutate(RECRUITING_EMA = case_when(is.na(RECRUITING_EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ RECRUITING_EMA)) %>%
+        arrange(TEAM, YEAR) %>%
+        # now make our score lag by a year; i'll accomplish this by making SEASON = YEAR + 1
+        group_by(TEAM) %>%
+        # lag recruiting by a year
+        mutate(SEASON = dplyr::lead(YEAR, 1)) %>%
+        # now fill in the missing seasons, as this will be the year +1
+        mutate(SEASON = case_when(is.na(SEASON) ~ dplyr::lag(SEASON+1, 1),
+                                  TRUE ~ SEASON)) %>%
+        # this was such a dumb way to do this just to avoid having to type "SEASON" = "YEAR"
+        ungroup() %>%
+        # now normalize by season, so recruiting score is how far above or below average a team is going into that year
+        group_by(SEASON) %>%
+        mutate(RECRUITING_SCORE = RECRUITING_EMA - mean(RECRUITING_EMA)) %>%
+        ungroup()
 
+recruiting %>%
+        filter(SEASON == 2022) %>%
+        arrange(desc(RECRUITING_SCORE))
+        
 ```
-
 
 
