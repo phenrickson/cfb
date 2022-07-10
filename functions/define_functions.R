@@ -273,12 +273,12 @@ plot_elo_team_season = function(sim_team_outcomes,
                          size = 4,
                          color = unique(plot_team_data$primary)
                          )+
-                geom_hline(yintercept = c(1575),
+                geom_hline(yintercept = c(1520),
                                           linetype = 'dashed',
                                           color = 'grey60')+
                 annotate("text",
                          x=0.25,
-                         y=1585,
+                         y=1545,
                          color = 'grey60',
                          label = 'FBS Average')
         
