@@ -102,8 +102,8 @@ function(actual_team_outcomes,
                 theme_phil()+
                 scale_fill_teams(name = "TEAM")+
                 scale_color_teams(name = "TEAM")+
-                scale_x_continuous(limits = c(-1, 14),
-                                   breaks = seq(0, 12, 3))+
+                scale_x_continuous(limits = c(-1, 15),
+                                   breaks = seq(0, 15, 3))+
                 scale_y_continuous(limits = c(0, 12),
                                    breaks = seq(2, 12, 2))+
                 guides(fill = "none",
@@ -120,8 +120,8 @@ function(actual_team_outcomes,
                                                 size = 16),
                       plot.subtitle =  element_text(hjust = 0.5),
                       strip.text.x = element_text(size = 10,
-                                                  hjust = 0.5))+
-                geom_vline(xintercept = 12,
-                           linetype = 'dashed',
-                           color = 'grey30')
+                                                  hjust = 0.5))
+                # geom_vline(xintercept = 12,
+                #            linetype = 'dashed',
+                #            color = 'grey30')
 }
