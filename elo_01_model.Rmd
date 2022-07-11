@@ -163,7 +163,7 @@ games_data_tidied = games_data_raw %>%
         mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
                                                            (HOME_CONFERENCE != 'FBS Independents') & 
                                                            NEUTRAL_SITE == T & 
-                                                           GAME_MONTH >= 11 ~ T, TRUE ~ F)) %>%
+                                                           WEEK > 11 ~ T, TRUE ~ F)) %>%
         mutate(FBS_GAME = (HOME_CONFERENCE%in% fbs_conferences | AWAY_CONFERENCE %in% fbs_conferences) | SEASON <= 1954) %>%
         # filter(!(HOME_CONFERENCE %in% fcs_conferences)) %>%
         # filter(!(AWAY_CONFERENCE %in% fcs_conferences)) %>%
@@ -2009,6 +2009,20 @@ plan(multisession, workers = 7)
 
 ```{r simulate 2001 season}
 
+# regress point differential on elo differential
+# fit linear model after first few years in training
+points_model = elo_train$game_outcomes %>%
+        filter(SEASON >=1975) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest() %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        pluck("lm",1)
+
 set.seed(1999)
 sim_seasons = future_replicate(1000,
                   sim_elo_ratings(valid_games %>%
@@ -2154,7 +2168,18 @@ table_wins_conference_season(sim_team_outcomes,
 
 ```
 
-And we can look at this for all teams, not just the Big 12...
+Man, Nebraska really was given that much of a chance of running the table?
+
+```{r look at nebraska 2001}
+
+table_wins_team_season(sim_team_outcomes,
+                       season = 2001,
+                       'Nebraska',
+                       15)
+
+```
+
+Anyway, we can look at expected wins for all teams, not just the Big 12...
 
 ```{r 2001 results all teams table}
 
@@ -2489,7 +2514,7 @@ table_wins_team_season(sim_team_outcomes,
 
 ```
 
-Here's what the picture for Illinois looks like after their first few games. At the start of the season they were expected to lose to Louisville by a touchdown, but Illinois pulled off an upset at California in week one and then won their games against Northern Illinois and Louisville, so their expected chances in the rest of their games was higher.
+Here's what the picture for Illinois looks like after their first few games. At the start of the season they were expected to lose to Louisville by a touchdown, but Illinois pulled off an upset at California in week one and then won their games against Northern Illinois and Louisville, so their chances have been improved in all of their ensuing games. At the start of the season they were only favored in one game, now after week five they're favorites to win four of their last 8 games.
 
 ```{r show illinois updated 2001}
 
@@ -2508,6 +2533,60 @@ table_wins_team_season(update_team_outcomes,
         set_caption("After Week 5")
 
 ```
+
+Nebraska was the heavy favorite at the beginning of the season playing at Colorado on the last week of the season, how did the odds of that change over the course of the season as Colorado became highly rated?
+
+```{r nebraska colorado 2001}
+
+# run elo for specified week of the 2001 season to update our elo ratings with real results
+elo_update = calc_elo_ratings(valid_games %>%
+                                      filter(SEASON == 2001) %>%
+                                      filter(WEEK <=13),
+                                     teams = elo_train$teams,
+                                     team_seasons = elo_train$team_seasons,
+                          home_field_advantage = pars$home_field_advantage,
+                          reversion = pars$reversion,
+                          k = pars$k,
+                          v = pars$v,
+                          verbose = F)
+        
+# then, simulate the rest of the way
+update_sim_seasons = future_replicate(100,
+                  sim_elo_ratings(valid_games %>%
+                                          filter(SEASON == 2001) %>%
+                                          filter(WEEK > 13),
+                                  teams = elo_update$teams,
+                                  team_seasons = elo_update$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+# get outcomes into data frames
+update_team_outcomes = rbindlist(update_sim_seasons['team_outcomes',],
+          idcol = T)
+
+# now get the updated
+update_game_outcomes = rbindlist(update_sim_seasons['game_outcomes',],
+                              idcol = T)
+
+# 
+table_wins_team_season(update_team_outcomes,
+                       2001,
+                       'Nebraska',
+                       15) %>%
+        set_caption("After Week 13")
+
+```
+
+Still favored to win, but much closer to being a toss up - and the model was still wrong, as Nebraska was killed in that game.
+
+## Mid Season Changes
+
+We can do this for every week within a season to see how a team's rating and expected end of season win totals change throughout the year.
 
 ```{r sims after each week}
 
@@ -2612,7 +2691,7 @@ midseason_team_outcomes = bind_rows(preseason_sims$sim_team_outcomes,
 
 ```
 
-Looking at predictions that are updated within season allows me to check on how well the model is doing by how far out it is predicting. As we would expect, our accuracy is highest in predicting games one week out and trailing off after that.
+Also, looking at predictions that are updated within the season allows me to check on how well the model is doing by how far out it is predicting. As we would expect, our accuracy is highest in predicting games one week out and trailing off after that.
 
 ```{r midseason sims}
 
@@ -2652,7 +2731,7 @@ midseason_game_assessment %>%
         
 ```
 
-Updating the simulations each week allows us to check in on how a team's expected win totals are changing after every week. Here are the simulated end of season win totals for each ACC 12 team after weeks 3, 7, and 10. 
+Updating the simulations each week allows us to check in on how a team's expected win totals are changing after every week. Here are the simulated end of season win totals for each ACC team after weeks 3, 7, and 10. 
 
 ```{r checking in on simulations}
 
@@ -2699,6 +2778,30 @@ plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outc
                                      season = 2001,
                                      conference = 'Big Ten',
                                      week = 10)
+
+```
+
+And if we look at the Big 12, we can see the rise of Colorado.
+
+```{r look at big 12 in season midseason simus}
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'Big 12',
+                                     week = 3)
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'Big 12',
+                                     week = 7)
+
+plot_forecast_wins_conference_season(actual_team_outcomes = elo_update$team_outcomes,
+                                     midseason_sim_team_outcomes = midseason_team_outcomes,
+                                     season = 2001,
+                                     conference = 'Big 12',
+                                     week = 12)
 
 ```
 
@@ -2881,6 +2984,11 @@ Each team will have an Elo rating at the **start** of the season, which is based
 
 ```{r compute elo ratings through 2010}
 
+rm(train_games,
+   valid_games,
+   elo_train,
+   elo_valid)
+
 # now loop through a set of games
 train_games = games_data_tidied %>%
         filter(SEASON >=1970) %>%
@@ -2901,7 +3009,7 @@ train_games = games_data_tidied %>%
 
 # now loop through a set of games
 valid_games = games_data_tidied %>%
-        filter(SEASON > 2015 & SEASON < 2022) %>%
+        filter(SEASON > 2015 & SEASON < 2020) %>%
         arrange(GAME_DATE) %>%
         select(GAME_ID,
                SEASON,
@@ -3121,9 +3229,6 @@ teams_elo_and_recruiting %>%
         bg(., j=c("Diff"),
            bg = adjust_func)
 
-
-
-
 ```
 
 Alternatively, we might end up worse off here because it might overly penalize teams like Boise State that were consistently strong despite their recruiting being below average, and overly help teams that later underperformed for their recruiting level (Texas).
@@ -3172,6 +3277,8 @@ teams_elo_and_recruiting %>%
 
 ```
 
+## Evaluate Elo vs Elo + Recruiting
+
 Which wins out? Well this is ultimately an empirical question. We'll add the preseason recruiting adjustment as another parameter and see how we do with or without it.
 
 ```{r create our recruiting dataset}
@@ -3207,10 +3314,290 @@ recruiting = recruiting_teams_raw %>%
         mutate(RECRUITING_SCORE = RECRUITING_EMA - mean(RECRUITING_EMA)) %>%
         ungroup()
 
-recruiting %>%
-        filter(SEASON == 2022) %>%
-        arrange(desc(RECRUITING_SCORE))
+# recruiting %>%
+#         filter(SEASON == 2022) %>%
+#         arrange(desc(RECRUITING_SCORE))
         
+```
+
+I'll now tune the recruiting parameter over the seasons 2007 to 2015.
+
+```{r now calc ratings with recruiting parameter}
+
+source(here::here("functions", "calc_elo_ratings_with_recruiting.R"))
+
+recruiting_pars = c(0, 0.25, 0.5, 0.75)
+
+# now get the elo ratings based on this training set
+elo_valid = calc_elo_ratings(valid_games,
+                             teams = elo_train$teams,
+                             team_seasons = elo_train$team_seasons,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+
+# # now get the elo ratings based on this training set
+# elo_train_with_recruiting = calc_elo_ratings_with_recruiting(games = train_games,
+#                                              recruiting = recruiting,
+#                   home_field_advantage = selected_pars$home_field_advantage,
+#                   reversion = selected_pars$reversion,
+#                   recruiting_adjustment = 0.5,
+#                   k = selected_pars$k,
+#                   v = selected_pars$v,
+#                   verbose = T)
+
+# now get the validation set
+elo_valid_with_recruiting = calc_elo_ratings_with_recruiting(games = valid_games,
+                                            teams = elo_train$teams,
+                                            team_seasons = elo_train$team_seasons,
+                                             recruiting = recruiting,
+                                                  home_field_advantage = selected_pars$home_field_advantage,
+                                                  reversion = selected_pars$reversion,
+                                                  recruiting_adjustment = 0.5,
+                                                  k = selected_pars$k,
+                                                  v = selected_pars$v,
+                                                  verbose = T)
+
+```
+
+```{r now compare how they did}
+
+compare_with_recruiting = bind_rows(
+        elo_valid$game_outcomes %>%
+                mutate(method = 'Elo') %>%
+                mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                               TRUE ~ 'no'))) %>%
+                mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                                TRUE ~ 'no')) %>%
+                mutate(yes = HOME_PROB) %>%
+                group_by(method, SEASON) %>%
+                assess_metrics(truth = HOME_WIN,
+                               yes,
+                               estimate = HOME_PRED,
+                               event_level = 'second') %>%
+                mutate_if(is.numeric, round, 3),
+        elo_valid_with_recruiting$game_outcomes %>%
+                mutate(method = 'Elo + Recruiting') %>%
+                mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                               TRUE ~ 'no'))) %>%
+                mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                                TRUE ~ 'no')) %>%
+                mutate(yes = HOME_PROB) %>%
+                group_by(method, SEASON) %>%
+                assess_metrics(truth = HOME_WIN,
+                               yes,
+                               estimate = HOME_PRED,
+                               event_level = 'second') %>%
+                mutate_if(is.numeric, round, 3))
+
+compare_with_recruiting %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        filter(.metric == 'accuracy') %>%
+        select(-.estimator) %>%
+        spread(method, .estimate) %>%
+        flextable()
+
+compare_with_recruiting %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        filter(.metric != 'accuracy') %>%
+        select(-.estimator) %>%
+        spread(method, .estimate) %>%
+        flextable()
+        
+```
+
+The real assessment here is in simulating a season.
+
+```{r simulate the 2010 season with and without} 
+
+source(here::here("functions", "sim_elo_ratings_with_recruiting.R"))
+
+rm(sim_seasons,
+   sim_team_outcomes,
+   sim_game_outcomes)
+
+set.seed(1999)
+sim_seasons = future_replicate(1000,
+                  sim_elo_ratings(valid_games %>%
+                                          filter(SEASON == 2016),
+                                  teams = elo_train$teams,
+                                  team_seasons = elo_train$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+set.seed(1999)
+sim_seasons_with_recruiting = future_replicate(1000,
+                  sim_elo_ratings_with_recruiting(valid_games %>%
+                                          filter(SEASON == 2016),
+                                          recruiting = recruiting,
+                                  teams = elo_train$teams,
+                                  team_seasons = elo_train$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  recruiting_adjustment = .5,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+```
+
+```{r examine 2016}
+
+# get outcomes into data frames
+sim_team_outcomes = rbindlist(sim_seasons['team_outcomes',],
+          idcol = T)
+
+sim_game_outcomes = rbindlist(sim_seasons['game_outcomes',],
+                              idcol = T)
+
+# get outcomes into data frames
+sim_team_outcomes_with_recruiting = rbindlist(sim_seasons_with_recruiting['team_outcomes',],
+          idcol = T)
+
+sim_game_outcomes_with_recruiting = rbindlist(sim_seasons_with_recruiting['game_outcomes',],
+                              idcol = T)
+
+```
+
+```{r sime game outcomes}
+
+plot_elo_team_season(sim_team_outcomes = sim_team_outcomes,
+                     season = 2016,
+                     team = 'Texas A&M',
+                     week = 14)
+
+plot_elo_team_season(sim_team_outcomes = sim_team_outcomes_with_recruiting,
+                     season = 2016,
+                     team = 'Kansas',
+                     week = 14)
+
+```
+
+Compare win totals.
+
+```{r compare}
+bind_rows(
+        sim_game_outcomes %>%
+        mutate(method = 'Elo') %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(method, GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        mutate(yes = HOME_PROB),
+                sim_game_outcomes_with_recruiting %>%
+        mutate(method = 'Elo + Recruiting') %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(method, GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        mutate(yes = HOME_PROB)) %>%
+        group_by(SEASON, method) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+ 
+```
+
+
+```{r exd}
+
+# get results for all teams
+bind_rows(
+sim_team_outcomes %>%
+        mutate(method = 'Elo') %>%
+        filter(!is.na(CONFERENCE)) %>%
+        left_join(., valid_games %>%
+                          mutate(WINNER = case_when(HOME_POINTS > AWAY_POINTS ~ HOME_TEAM, TRUE ~ AWAY_TEAM)) %>%
+                          select(GAME_ID, WINNER),
+                  by = c("GAME_ID")) %>%
+        mutate(WIN = case_when(TEAM == WINNER ~ 1,
+                               TRUE ~ 0)) %>%
+        mutate(PRED_WIN = case_when(MARGIN >0 ~ 1,
+                                    TRUE ~ 0)) %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, .id) %>%
+        summarize(pred_wins = sum(PRED_WIN),
+                  actual_wins = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, actual_wins) %>%
+        summarize(mean_wins= mean(pred_wins),
+                  mode_wins = mode_func(pred_wins),
+                  .groups = 'drop'),
+sim_team_outcomes_with_recruiting %>%
+        mutate(method = 'Elo + Recruiting') %>%
+        filter(!is.na(CONFERENCE)) %>%
+        left_join(., valid_games %>%
+                          mutate(WINNER = case_when(HOME_POINTS > AWAY_POINTS ~ HOME_TEAM, TRUE ~ AWAY_TEAM)) %>%
+                          select(GAME_ID, WINNER),
+                  by = c("GAME_ID")) %>%
+        mutate(WIN = case_when(TEAM == WINNER ~ 1,
+                               TRUE ~ 0)) %>%
+        mutate(PRED_WIN = case_when(MARGIN >0 ~ 1,
+                                    TRUE ~ 0)) %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, .id) %>%
+        summarize(pred_wins = sum(PRED_WIN),
+                  actual_wins = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, actual_wins) %>%
+        summarize(mean_wins= mean(pred_wins),
+                  mode_wins = mode_func(pred_wins),
+                  .groups = 'drop')) %>%
+        group_by(method, SEASON) %>%
+        yardstick::rmse(truth = actual_wins,
+                        estimate = mean_wins)
+
+```
+
+```{r compare sim outcomes}
+
+table_wins_season(sim_team_outcomes = sim_team_outcomes,
+                  season = 2016, 
+                  week = 14)
+
+table_wins_season(sim_team_outcomes = sim_team_outcomes_with_recruiting,
+                  season = 2016, 
+                  week = 14)
+
+table_wins_conference_season(sim_team_outcomes = sim_team_outcomes_with_recruiting,
+                             conference = 'Big Ten',
+                             season = 2016, 
+                             week = 14)
+
 ```
 
 
