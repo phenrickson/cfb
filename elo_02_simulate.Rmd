@@ -437,13 +437,10 @@ simulated_seasons = foreach(i = 1:length(seasons)) %do% {
 
 }
 
+# set the names
 names(simulated_seasons) = seasons
 
-```
-
-
-```{r save each season, eval=F}
-
+# save
 for(i in 1:length(seasons)) {
         
         season = names(simulated_seasons)[i]
