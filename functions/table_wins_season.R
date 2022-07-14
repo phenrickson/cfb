@@ -44,7 +44,7 @@ function(sim_team_outcomes,
                 filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>% 
                 filter(CONFERENCE_CHAMPIONSHIP != T) %>%
-                filter(!is.na(CONFERENCE)) %>% 
+                filter(DIVISION == 'fbs') %>%
                 group_by(SEASON, TEAM, CONFERENCE) %>% 
                 mutate(max_week = max(WEEK)) %>%
                 filter(WEEK == max_week) %>% 
@@ -56,7 +56,7 @@ function(sim_team_outcomes,
         max_games = sim_team_outcomes %>%
                 filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>%
-                filter(!is.na(CONFERENCE)) %>% 
+                filter(DIVISION == 'fbs') %>%
                 #    filter(CONFERENCE_GAME == T) %>%
                 filter(CONFERENCE_CHAMPIONSHIP != T) %>%
                 group_by(TEAM) %>%
@@ -67,6 +67,7 @@ function(sim_team_outcomes,
         # now get total expected wins
         season_totals = sim_team_outcomes %>%
                 filter(SEASON_TYPE == 'regular') %>%
+                filter(DIVISION == 'fbs') %>%
                 filter(SEASON == season) %>%
                 #      filter(CONFERENCE_GAME == T) %>%
                 filter(CONFERENCE_CHAMPIONSHIP != T) %>%
@@ -132,7 +133,7 @@ function(sim_team_outcomes,
                 bg(., j = paste(win_counts),
                    bg = col_func) %>%
                 add_header_row(.,
-                               values = c("","","", "", paste("Regular Season Win Probabilities for", season, "Season")),
+                               values = c("","","Simulated", "", paste("Simulated Win Probabilities for", season, "Regular Season")),
                                colwidths = c(1, 1, 1, 1, max(win_counts))) %>%
                 flextable::align(j = c("End Elo", paste(seq(0, max(win_counts), 1))),
                                  part = "all",

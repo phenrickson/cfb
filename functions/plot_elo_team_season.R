@@ -125,10 +125,12 @@ function(sim_team_outcomes,
                 theme(panel.grid.minor = element_blank(),
                       panel.grid.major = element_blank())+
                 annotate("text",
-                         x=plot_team_data %>% filter(.id == 1) %>% pull(GAME),
+                         x=plot_team_data %>% filter(.id == 1) %>% 
+                                 pull(GAME),
                          y=2300,
-                         label = plot_team_data %>% filter(.id == 1) %>% pull(PLOT_LABEL),
-                         size = 6,
+                         label = plot_team_data %>% filter(.id == 1) %>%
+                                 pull(PLOT_LABEL),
+                         size = 2.5,
                          color = unique(plot_team_data$primary)
                          )+
                 geom_hline(yintercept = c(fbs_average),

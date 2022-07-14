@@ -1,8 +1,8 @@
 plot_elo_conference_season <-
 function(sim_team_outcomes,
-                                      season,
+                                      games,
                                       conference,
-                                      week) {
+                                      season) {
         
         mode_func <- function(x) {
                 ux <- unique(x)
@@ -10,9 +10,14 @@ function(sim_team_outcomes,
         }
         
         team_outcomes_temp = sim_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))  %>%
                 filter(SEASON == season) %>%
                 filter(CONFERENCE %in% conference) %>%
-                filter(WEEK < week) %>%
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
@@ -22,7 +27,7 @@ function(sim_team_outcomes,
                                   filter(league == 'ncaa') %>%
                                   mutate(TEAM = location),
                           by = c("TEAM")) %>%
-                left_join(., games_data_tidied %>%
+                left_join(., games %>%
                                   select(GAME_ID, AWAY_TEAM, HOME_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -31,10 +36,15 @@ function(sim_team_outcomes,
         
         # mean wins by team
         team_win_totals = sim_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))  %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),

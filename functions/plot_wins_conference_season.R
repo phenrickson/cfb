@@ -1,20 +1,23 @@
 plot_wins_conference_season <-
 function(sim_team_outcomes,
-                                       season,
+                                       games,
                                        conference,
-                                       week) {
+                                       season) {
         
         mode_func <- function(x) {
                 ux <- unique(x)
                 ux[which.max(tabulate(match(x, ux)))]
         }
         
-        
         season_totals = sim_team_outcomes %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
@@ -25,10 +28,14 @@ function(sim_team_outcomes,
                 mutate(perc = round(n / sum(n),2))
         
         team_win_totals = sim_team_outcomes %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
