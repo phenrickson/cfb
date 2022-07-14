@@ -1,22 +1,52 @@
 plot_elo_team_season <-
 function(sim_team_outcomes,
-                                season, 
-                                team,
-                                week) {
+                                games,
+                                team, 
+                                season,
+                                alpha = 0.5,
+                                fbs_average = 1520) {
         
-        # elo rating
+        # fbs elo average
+        fbs_average = 1520
+        
+        # team initial elo
+        team_start_elo = sim_team_outcomes %>%
+                filter(SEASON == season) %>%
+                filter(TEAM == team) %>%
+                filter(WEEK == min(WEEK)) %>%
+                head(1) %>%
+                mutate(PREGAME_ELO = round(PREGAME_ELO, 0)) %>%
+                pull(PREGAME_ELO)
+                
+        
+        # team elo rating
         team_temp = 
                 sim_team_outcomes %>%
                 filter(SEASON == season) %>%
                 filter(TEAM == team) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_tidied %>%
-                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                          games %>%
+                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM, CONFERENCE_CHAMPIONSHIP),
                           by = c("GAME_ID")) %>%
-                mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
-                                                  OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT))) %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, HOME_TEAM, HOME_TEAM_ABBR),
+                          by = c("GAME_ID", "HOME_TEAM")) %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, AWAY_TEAM, AWAY_TEAM_ABBR),
+                          by = c("GAME_ID", "AWAY_TEAM")) %>%
+                mutate(TEAM_ABBR = case_when(TEAM == HOME_TEAM ~ HOME_TEAM_ABBR,
+                                             TEAM == AWAY_TEAM ~ AWAY_TEAM_ABBR)) %>%
+                mutate(OPPONENT_ABBR = case_when(OPPONENT == HOME_TEAM ~ HOME_TEAM_ABBR,
+                                                 OPPONENT == AWAY_TEAM ~ AWAY_TEAM_ABBR)) %>%
+                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+                mutate(OPPONENT_ABBR = case_when(nchar(OPPONENT) >= 14 ~ OPPONENT_ABBR,
+                                            TRUE ~ OPPONENT)) %>%
+                mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@","\n", OPPONENT_ABBR, sep=""),
+                                                  OPPONENT == AWAY_TEAM ~ paste("vs","\n", OPPONENT_ABBR, sep=""))) %>%
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 mutate(GAME = row_number()) %>%
@@ -27,7 +57,7 @@ function(sim_team_outcomes,
         
         # team wins based on simulations
         team_wins =   team_temp %>% 
-                mutate(win = MARGIN > 0) %>% 
+                mutate(win = SIM_MARGIN > 0) %>% 
                 group_by(SEASON, GAME, TEAM) %>% 
                 summarize(wins = sum(win), games = n(),
                           .groups = 'drop') %>%
@@ -45,7 +75,6 @@ function(sim_team_outcomes,
                 mutate(record = paste(win, loss, sep="-")) %>%
                 pull(record)
                 
-        
         # create data for plot
         plot_team_data = team_temp %>%
                 bind_rows(.,
@@ -73,20 +102,20 @@ function(sim_team_outcomes,
                               group = .id,
                               y = PREGAME_ELO)) +
                 geom_vline(xintercept = seq(1, max(team_temp$GAME+1)),
-                           alpha = 0.8,
+                        #   alpha = alpha,
                            linetype = 'dashed',
-                           color = 'grey90')+
+                           color = 'grey80')+
                 # geom_text(aes(label = OPPONENT_LABEL,
                 #               x = GAME,
                 #               y = 2250),
                 #           size = 4)+
-                geom_line(alpha = 0.25)+
+                geom_line(alpha = alpha)+
                 theme_phil()+
                 scale_color_teams(name = "TEAM")+
                 guides(color = 'none')+
                 ggtitle(paste("Simulated Elo Ratings for" , team, season),
                         subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
-                coord_cartesian(ylim = c(1100, 2300))+
+                coord_cartesian(ylim = c(1100, 2400))+
                 theme(plot.title = element_text(hjust = 0.5,
                                                 size = 16),
                       plot.subtitle =  element_text(hjust = 0.5))+
@@ -97,17 +126,17 @@ function(sim_team_outcomes,
                       panel.grid.major = element_blank())+
                 annotate("text",
                          x=plot_team_data %>% filter(.id == 1) %>% pull(GAME),
-                         y=2250,
+                         y=2300,
                          label = plot_team_data %>% filter(.id == 1) %>% pull(PLOT_LABEL),
-                         size = 4,
+                         size = 6,
                          color = unique(plot_team_data$primary)
                          )+
-                geom_hline(yintercept = c(1575),
+                geom_hline(yintercept = c(fbs_average),
                                           linetype = 'dashed',
                                           color = 'grey60')+
                 annotate("text",
                          x=0.25,
-                         y=1585,
+                         y=fbs_average + 25,
                          color = 'grey60',
                          label = 'FBS Average')
         

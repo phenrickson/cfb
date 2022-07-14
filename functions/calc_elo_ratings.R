@@ -1,11 +1,9 @@
 calc_elo_ratings <-
 function(games,
-                            recruiting,
                             teams = list(),
                             team_seasons = list(),
                             home_field_advantage,
                             reversion,
-                            recruiting_adjustment =0,
                             k,
                             v,
                             verbose=T) {
@@ -26,12 +24,12 @@ function(games,
                 # get home elo rating
                 if (game$HOME_TEAM %in% names(teams))
                 {home_rating = teams[[game$HOME_TEAM]]} else 
-                        if (!is.na(game$HOME_CONFERENCE)) {home_rating = 1500} else {home_rating = 1200}
+                        if (game$HOME_DIVISION == 'fbs') {home_rating = 1500} else {home_rating = 1200}
                 
                 # get away elo rating
                 if (game$AWAY_TEAM %in% names(teams))
                 {away_rating = teams[[game$AWAY_TEAM]]} else 
-                        if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
+                        if (game$AWAY_DIVISION == 'fbs') {away_rating = 1500} else {away_rating = 1200}
                 
                 # check whether its a neutral site game to apply home field advantage adjustment
                 if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
@@ -47,11 +45,11 @@ function(games,
                 if (length(team_seasons[[game$HOME_TEAM]]) ==0) {team_seasons[[game$HOME_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$HOME_TEAM]]) {home_rating = home_rating} else 
                                 if (
-                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION == 'fbs'
                                 )
                                 {home_rating = ((reversion*1500)+ (1-reversion)*home_rating)} else
                                         if (
-                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION != 'fbs'
                                         )
                                         {home_rating = ((reversion*1200)+(1-reversion)*home_rating)}
                 
@@ -59,11 +57,11 @@ function(games,
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION == 'fbs'
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION != 'fbs'
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
@@ -73,6 +71,15 @@ function(games,
                 
                 ## get the score margin based on the home team
                 home_margin = game$HOME_POINTS - game$AWAY_POINTS
+                
+                # define outcome
+                if (home_margin > 0) {home_outcome = 'win'} else
+                        if (home_margin < 0) {home_outcome = 'loss'} else
+                                if (home_margin == 0) {home_outcome = 'tie'}
+                
+                if (home_margin > 0) {away_outcome = 'loss'} else
+                        if (home_margin < 0) {away_outcome = 'win'} else
+                                if (home_margin == 0) {away_outcome = 'tie'}
                 
                 # get updated elo for both teams
                 new_elos = get_new_elos(home_rating,
@@ -95,6 +102,12 @@ function(games,
                 game$HOME_POSTGAME_ELO = new_elos[1]
                 game$AWAY_POSTGAME_ELO = new_elos[2]
                 
+                # get the score and game outcome
+                game$HOME_MARGIN = home_margin
+                game$HOME_OUTCOME = home_outcome
+                game$AWAY_MARGIN = -home_margin
+                game$AWAY_OUTCOME = away_outcome
+                
                 # update the list storing the current elo rating for each team
                 teams[[game$HOME_TEAM]] = new_elos[1]
                 teams[[game$AWAY_TEAM]] = new_elos[2]
@@ -116,9 +129,16 @@ function(games,
         team_outcomes = game_outcomes %>% 
                 select(GAME_ID, 
                        SEASON,
+                       SEASON_TYPE,
                        WEEK,
                        GAME_DATE,
-                       starts_with("HOME_"), 
+                       HOME_TEAM,
+                       HOME_CONFERENCE,
+                       HOME_DIVISION,
+                       HOME_MARGIN,
+                       HOME_OUTCOME,
+                       HOME_PREGAME_ELO,
+                       HOME_POSTGAME_ELO,
                        AWAY_TEAM,
                        AWAY_POINTS) %>%
                 rename(OPPONENT = AWAY_TEAM,
@@ -128,19 +148,26 @@ function(games,
                           game_outcomes %>% 
                                   select(GAME_ID, 
                                          SEASON,
+                                         SEASON_TYPE,
                                          WEEK,
                                          GAME_DATE,
-                                         starts_with("AWAY_"),
+                                         AWAY_TEAM,
+                                         AWAY_CONFERENCE,
+                                         AWAY_DIVISION,
+                                         AWAY_MARGIN,
+                                         AWAY_OUTCOME,
+                                         AWAY_PREGAME_ELO,
+                                         AWAY_POSTGAME_ELO,
                                          HOME_TEAM,
                                          HOME_POINTS) %>%
                                   rename(OPPONENT = HOME_TEAM,
                                          OPPONENT_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
+                arrange(GAME_DATE) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,
                        k = k,
                        v = v)
-        
         return(list(
                 "game_outcomes" = game_outcomes,
                 "team_outcomes" = team_outcomes,

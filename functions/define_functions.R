@@ -76,9 +76,9 @@ plot_elo_historical_team = function(elo_ratings,
 ### functions for plotting simulations from elo ratings
 # spaghetti plot elo rating simulations by conference by season
 plot_elo_conference_season = function(sim_team_outcomes,
-                                      season,
+                                      games,
                                       conference,
-                                      week) {
+                                      season) {
         
         mode_func <- function(x) {
                 ux <- unique(x)
@@ -86,9 +86,13 @@ plot_elo_conference_season = function(sim_team_outcomes,
         }
         
         team_outcomes_temp = sim_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))  %>%
                 filter(SEASON == season) %>%
                 filter(CONFERENCE %in% conference) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
@@ -98,7 +102,7 @@ plot_elo_conference_season = function(sim_team_outcomes,
                                   filter(league == 'ncaa') %>%
                                   mutate(TEAM = location),
                           by = c("TEAM")) %>%
-                left_join(., games_data_tidied %>%
+                left_join(., games %>%
                                   select(GAME_ID, AWAY_TEAM, HOME_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -107,10 +111,15 @@ plot_elo_conference_season = function(sim_team_outcomes,
         
         # mean wins by team
         team_win_totals = sim_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))  %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
@@ -171,23 +180,53 @@ dump("plot_elo_conference_season",
 ### plot individual team spaghetti plot with matchups and win probabilities
 # plot team elo season with matchups and win probability
 plot_elo_team_season = function(sim_team_outcomes,
-                                season, 
-                                team,
-                                week) {
+                                games,
+                                team, 
+                                season,
+                                alpha = 0.5,
+                                fbs_average = 1520) {
         
-        # elo rating
+        # fbs elo average
+        fbs_average = 1520
+        
+        # team initial elo
+        team_start_elo = sim_team_outcomes %>%
+                filter(SEASON == season) %>%
+                filter(TEAM == team) %>%
+                filter(WEEK == min(WEEK)) %>%
+                head(1) %>%
+                mutate(PREGAME_ELO = round(PREGAME_ELO, 0)) %>%
+                pull(PREGAME_ELO)
+                
+        
+        # team elo rating
         team_temp = 
                 sim_team_outcomes %>%
                 filter(SEASON == season) %>%
                 filter(TEAM == team) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_tidied %>%
-                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM),
+                          games %>%
+                                  select(GAME_ID, HOME_TEAM, AWAY_TEAM, CONFERENCE_CHAMPIONSHIP),
                           by = c("GAME_ID")) %>%
-                mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
-                                                  OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT))) %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, HOME_TEAM, HOME_TEAM_ABBR),
+                          by = c("GAME_ID", "HOME_TEAM")) %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, AWAY_TEAM, AWAY_TEAM_ABBR),
+                          by = c("GAME_ID", "AWAY_TEAM")) %>%
+                mutate(TEAM_ABBR = case_when(TEAM == HOME_TEAM ~ HOME_TEAM_ABBR,
+                                             TEAM == AWAY_TEAM ~ AWAY_TEAM_ABBR)) %>%
+                mutate(OPPONENT_ABBR = case_when(OPPONENT == HOME_TEAM ~ HOME_TEAM_ABBR,
+                                                 OPPONENT == AWAY_TEAM ~ AWAY_TEAM_ABBR)) %>%
+                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+                mutate(OPPONENT_ABBR = case_when(nchar(OPPONENT) >= 14 ~ OPPONENT_ABBR,
+                                            TRUE ~ OPPONENT)) %>%
+                mutate(OPPONENT_LABEL = case_when(OPPONENT == HOME_TEAM ~ paste("@","\n", OPPONENT_ABBR, sep=""),
+                                                  OPPONENT == AWAY_TEAM ~ paste("vs","\n", OPPONENT_ABBR, sep=""))) %>%
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 mutate(GAME = row_number()) %>%
@@ -198,7 +237,7 @@ plot_elo_team_season = function(sim_team_outcomes,
         
         # team wins based on simulations
         team_wins =   team_temp %>% 
-                mutate(win = MARGIN > 0) %>% 
+                mutate(win = SIM_MARGIN > 0) %>% 
                 group_by(SEASON, GAME, TEAM) %>% 
                 summarize(wins = sum(win), games = n(),
                           .groups = 'drop') %>%
@@ -216,7 +255,6 @@ plot_elo_team_season = function(sim_team_outcomes,
                 mutate(record = paste(win, loss, sep="-")) %>%
                 pull(record)
                 
-        
         # create data for plot
         plot_team_data = team_temp %>%
                 bind_rows(.,
@@ -244,20 +282,20 @@ plot_elo_team_season = function(sim_team_outcomes,
                               group = .id,
                               y = PREGAME_ELO)) +
                 geom_vline(xintercept = seq(1, max(team_temp$GAME+1)),
-                           alpha = 0.8,
+                        #   alpha = alpha,
                            linetype = 'dashed',
-                           color = 'grey90')+
+                           color = 'grey80')+
                 # geom_text(aes(label = OPPONENT_LABEL,
                 #               x = GAME,
                 #               y = 2250),
                 #           size = 4)+
-                geom_line(alpha = 0.25)+
+                geom_line(alpha = alpha)+
                 theme_phil()+
                 scale_color_teams(name = "TEAM")+
                 guides(color = 'none')+
                 ggtitle(paste("Simulated Elo Ratings for" , team, season),
                         subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
-                coord_cartesian(ylim = c(1100, 2300))+
+                coord_cartesian(ylim = c(1100, 2400))+
                 theme(plot.title = element_text(hjust = 0.5,
                                                 size = 16),
                       plot.subtitle =  element_text(hjust = 0.5))+
@@ -268,17 +306,17 @@ plot_elo_team_season = function(sim_team_outcomes,
                       panel.grid.major = element_blank())+
                 annotate("text",
                          x=plot_team_data %>% filter(.id == 1) %>% pull(GAME),
-                         y=2250,
+                         y=2300,
                          label = plot_team_data %>% filter(.id == 1) %>% pull(PLOT_LABEL),
-                         size = 4,
+                         size = 6,
                          color = unique(plot_team_data$primary)
                          )+
-                geom_hline(yintercept = c(1520),
+                geom_hline(yintercept = c(fbs_average),
                                           linetype = 'dashed',
                                           color = 'grey60')+
                 annotate("text",
                          x=0.25,
-                         y=1545,
+                         y=fbs_average + 25,
                          color = 'grey60',
                          label = 'FBS Average')
         
@@ -287,24 +325,26 @@ plot_elo_team_season = function(sim_team_outcomes,
 dump("plot_elo_team_season",
      file = here::here("functions/plot_elo_team_season.R"))
 
-
 ### plot win totals for a conference in a season
 plot_wins_conference_season = function(sim_team_outcomes,
-                                       season,
+                                       games,
                                        conference,
-                                       week) {
+                                       season) {
         
         mode_func <- function(x) {
                 ux <- unique(x)
                 ux[which.max(tabulate(match(x, ux)))]
         }
         
-        
         season_totals = sim_team_outcomes %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
@@ -315,10 +355,14 @@ plot_wins_conference_season = function(sim_team_outcomes,
                 mutate(perc = round(n / sum(n),2))
         
         team_win_totals = sim_team_outcomes %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
@@ -380,14 +424,14 @@ dump("plot_wins_conference_season",
 
 ## make table for expected win totals by team and season
 table_wins_conference_season = function (sim_team_outcomes,
-                                         season,
-                                         week,
-                                         conference) {
+                                         games,
+                                         conference,
+                                         season) {
         
         col_func = 
                 function(x) {
                         
-                        breaks = c(0, 5, 10, 15, 20, 40)
+                        breaks = c(0, 5, 10, 15, 20, 40, 60)/100
                         colorRamp=colorRampPalette(c("white", "grey50"))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
@@ -399,33 +443,65 @@ table_wins_conference_season = function (sim_team_outcomes,
                         
                 }
         
+        # join with games data
+        sim_team_outcomes = sim_team_outcomes %>%
+                left_join(., games %>%
+                          select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                  by = c("GAME_ID"))
+        
+        # total games per team
+        max_games = sim_team_outcomes %>%
+                filter(SEASON == season) %>%
+                filter(CONFERENCE %in% conference) %>%
+                filter(SEASON_TYPE == 'regular') %>%
+                #    filter(CONFERENCE_GAME == T) %>%
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+                group_by(TEAM) %>%
+                summarize(games = n_distinct(GAME_ID)) %>%
+                summarize(max_games = max(games)) %>%
+                pull(max_games)
+        
         season_totals = sim_team_outcomes %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
                 filter(CONFERENCE %in% conference) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                filter(SEASON_TYPE == 'regular') %>%
+                #      filter(CONFERENCE_GAME == T) %>%
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
+                          GAMES = n_distinct(GAME_ID),
                           .groups = 'drop') %>%
-                group_by(SEASON, TEAM, WINS) %>%
+                group_by(SEASON, TEAM, WINS, GAMES) %>%
                 count() %>%
                 group_by(SEASON, TEAM) %>%
                 mutate(perc = round(n / sum(n),2))
         
+        # make sequence from zero to max games
+        win_counts = seq(0, max_games, 1)
+        teams = unique(season_totals$TEAM)
+        
         max_wins = max(season_totals$WINS)
         min_wins = min(season_totals$WINS)
         
-        table = season_totals %>%
+        # make empty grid
+        table_long = expand.grid(SEASON = season,
+                                 TEAM = teams,
+                                 WINS = win_counts) %>%
+                left_join(.,
+                          season_totals %>%
+                                  select(SEASON, TEAM, WINS, perc) %>%
+                                  mutate(perc = perc),
+                          by = c("SEASON", "TEAM", "WINS")) %>%
+                mutate(perc = replace_na(perc, 0))
+        
+        table = table_long %>%
                 select(SEASON, TEAM, WINS, perc) %>%
-                mutate(perc = perc *100) %>%
                 pivot_wider(.,
                             id_cols = c("SEASON", "TEAM"),
                             values_from = c("perc"),
                             names_from = c("WINS")) %>%
-                ungroup() %>%
-                mutate_if(is.numeric,
-                          replace_na, 0) %>%
                 left_join(., season_totals %>%
                                   select(SEASON, TEAM, WINS, n, perc) %>%
                                   #       mutate(perc = perc *100) %>%
@@ -436,48 +512,48 @@ table_wins_conference_season = function (sim_team_outcomes,
                           by = c("SEASON", "TEAM")) %>%
                 arrange(desc(points)) %>%
                 mutate(SEASON  = factor(SEASON)) %>%
-                select(-points)
+                select(-points) %>%
+                select(SEASON, TEAM, one_of(paste(win_counts)))
         
-        if (max_wins < 12) {table$`12` = rep(0, nrow(table))} else {table$`12` = table$`12`}
-        if (max_wins < 11) {table$`11` = rep(0, nrow(table))} else {table$`11` = table$`11`}
-        if (min_wins > 0) {table$`0` = rep(0, nrow(table))} else {table$`0` = table$`0`}
-        if (min_wins > 1) {table$`1` = rep(0, nrow(table))} else {table$`1` = table$`1`}
-        if (min_wins > 2) {table$`2` = rep(0, nrow(table))} else {table$`2` = table$`2`}
-        if (min_wins > 3) {table$`3` = rep(0, nrow(table))} else {table$`3` = table$`3`}
-        if (min_wins > 4) {table$`4` = rep(0, nrow(table))} else {table$`4` = table$`4`}
-
+        # if (max_wins < 12) {table$`12` = rep(0, nrow(table))} else {table$`12` = table$`12`}
+        # if (max_wins < 11) {table$`11` = rep(0, nrow(table))} else {table$`11` = table$`11`}
+        # if (min_wins > 0) {table$`0` = rep(0, nrow(table))} else {table$`0` = table$`0`}
+        # if (min_wins > 1) {table$`1` = rep(0, nrow(table))} else {table$`1` = table$`1`}
+        # if (min_wins > 2) {table$`2` = rep(0, nrow(table))} else {table$`2` = table$`2`}
+        # if (min_wins > 3) {table$`3` = rep(0, nrow(table))} else {table$`3` = table$`3`}
+        # if (min_wins > 4) {table$`4` = rep(0, nrow(table))} else {table$`4` = table$`4`}
+        
         
         table %>%
-                select(SEASON, TEAM, `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `11`, `12`) %>%
                 rename(Season = SEASON,
                        Team = TEAM) %>%
                 flextable() %>%
                 autofit() %>%
-                bg(., j = c(paste(seq(0, 12, 1))),
+                bg(., j = paste(win_counts),
                    bg = col_func) %>%
                 add_header_row(.,
-                               values = c("","", paste("Simulated Win Totals for", conference)),
-                               colwidths = c(1, 2, 12)) %>%
-                flextable::align(j = c(paste(seq(0, 12, 1))),
+                               values = c("","", paste("Probability of Win Totals for", conference)),
+                               colwidths = c(1, 2, max(win_counts))) %>%
+                flextable::align(j = c(paste(seq(0, max(win_counts), 1))),
                                  part = "all",
                                  align = "center") %>%
-                set_formatter( 
-                        `0`= function(x) sprintf( "%.0f%%", x ),
-                        `1`= function(x) sprintf( "%.0f%%", x ),
-                        `2`= function(x) sprintf( "%.0f%%", x ),
-                        `3`= function(x) sprintf( "%.0f%%", x ),
-                        `4`= function(x) sprintf( "%.0f%%", x ),
-                        `5`= function(x) sprintf( "%.0f%%", x ),
-                        `6`= function(x) sprintf( "%.0f%%", x ),
-                        `7`= function(x) sprintf( "%.0f%%", x ),
-                        `8`= function(x) sprintf( "%.0f%%", x ),
-                        `9`= function(x) sprintf( "%.0f%%", x ),
-                        `10`= function(x) sprintf( "%.0f%%", x ),
-                        `11`= function(x) sprintf( "%.0f%%", x ),
-                        `12`= function(x) sprintf( "%.0f%%", x )
-                ) %>%
-                color(part = "all",
-                      color = "grey20")
+                # set_formatter( 
+                #         `0`= function(x) sprintf( "%.0f%%", x ),
+                #         `1`= function(x) sprintf( "%.0f%%", x ),
+                #         `2`= function(x) sprintf( "%.0f%%", x ),
+                #         `3`= function(x) sprintf( "%.0f%%", x ),
+                #         `4`= function(x) sprintf( "%.0f%%", x ),
+                #         `5`= function(x) sprintf( "%.0f%%", x ),
+                #         `6`= function(x) sprintf( "%.0f%%", x ),
+                #         `7`= function(x) sprintf( "%.0f%%", x ),
+                #         `8`= function(x) sprintf( "%.0f%%", x ),
+                #         `9`= function(x) sprintf( "%.0f%%", x ),
+        #         `10`= function(x) sprintf( "%.0f%%", x ),
+        #         `11`= function(x) sprintf( "%.0f%%", x ),
+        #         `12`= function(x) sprintf( "%.0f%%", x )
+        #   ) %>%
+        color(part = "all",
+              color = "grey20")
         
 }
 
@@ -487,9 +563,9 @@ dump("table_wins_conference_season",
 
 ## make table for a team's season
 table_wins_team_season = function(sim_team_outcomes,
-                                  season,
+                                  games,
                                   team,
-                                  week) {
+                                  season) {
         
         # get teams primary color
         team_color = teamcolors %>%
@@ -511,7 +587,6 @@ table_wins_team_season = function(sim_team_outcomes,
                                      right=T,
                                      label = FALSE)
                         col_palette[mycut]
-                        
                 }
         # # win col func
         # win_col_func = 
@@ -523,14 +598,21 @@ table_wins_team_season = function(sim_team_outcomes,
         #                 if (x == 'W') {col_palette[9]} else {'white'}
         #         }
         
+        # join with games data
+        sim_team_outcomes = sim_team_outcomes %>%
+                filter(SEASON_TYPE == 'regular') %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))
+        
         # create a col func
         sim_team_outcomes %>%
                 filter(SEASON == season) %>%
                 filter(TEAM == team) %>%
-                filter(WEEK < week) %>%
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_tidied %>%
+                          games %>%
                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -538,11 +620,11 @@ table_wins_team_season = function(sim_team_outcomes,
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 mutate(GAME = row_number()) %>%
-                mutate(win = MARGIN > 0) %>% 
+                mutate(win = SIM_MARGIN > 0) %>% 
                 group_by(SEASON, GAME_DATE, WEEK, OPPONENT, TEAM) %>% 
                 summarize(wins = sum(win), 
                           games = n(),
-                          margin = round(median(MARGIN), 0),
+                          margin = round(median(SIM_MARGIN), 0),
                           .groups = 'drop') %>%
                 mutate(perc = round(wins / games, 3)) %>%
                 mutate(expected_win = case_when(perc > .5 ~ 'W',
@@ -559,17 +641,17 @@ table_wins_team_season = function(sim_team_outcomes,
                        Date = GAME_DATE,
                        Team = TEAM,
                        Opponent = OPPONENT,
-                       `Pr(Win)` = PROB,
-                       Margin = margin) %>%
+                       `Prob. Win` = PROB,
+                       `Pred. Margin` = margin) %>%
                 #       `Prediction` = PRED) %>%
                 flextable() %>%
-                flextable::align(., j=c("Pr(Win)", "Margin"),
+                flextable::align(., j=c("Prob. Win", "Pred. Margin"),
                       align = "center",
                       part = "all") %>%
-                bg(., j=c("Pr(Win)"),
+                bg(., j=c("Prob. Win"),
                    bg = team_col_func) %>%
                 color(part = "all",
-                      color = "grey20")
+                      color = "grey20") 
         #%>%
                 # bg(., j= "Prediction",
                 #    bg = win_col_func)
@@ -582,14 +664,13 @@ dump("table_wins_team_season",
 
 ## make table for a team's season
 table_wins_season = function(sim_team_outcomes,
-                                  season,
-                                  week) {
-        
+                             games,
+                             season) {
         
         elo_func = 
                 function(x) {
                         
-                        breaks = c(0, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400)
+                        breaks = c(0,1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400)
                         colorRamp=colorRampPalette(c("white", "grey50"))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
@@ -600,12 +681,11 @@ table_wins_season = function(sim_team_outcomes,
                         col_palette[mycut]
                         
                 }
-        
         
         col_func = 
                 function(x) {
                         
-                        breaks = c(0, 5, 10, 15, 20, 40, 60)
+                        breaks = c(0, 5, 10, 15, 20, 40, 60)/100
                         colorRamp=colorRampPalette(c("white", "grey50"))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
@@ -617,11 +697,18 @@ table_wins_season = function(sim_team_outcomes,
                         
                 }
         
-        # end season elo
+        # join with games data
+        sim_team_outcomes = sim_team_outcomes %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))
+        
+        # simulated end season elo
         season_elo = sim_team_outcomes %>% 
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>% 
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
                 filter(!is.na(CONFERENCE)) %>% 
-                filter(WEEK < week) %>%
                 group_by(SEASON, TEAM, CONFERENCE) %>% 
                 mutate(max_week = max(WEEK)) %>%
                 filter(WEEK == max_week) %>% 
@@ -629,32 +716,59 @@ table_wins_season = function(sim_team_outcomes,
                           sd = sd(POSTGAME_ELO), .groups = 'drop') %>%
                 arrange(desc(ELO))
         
-        season_totals = sim_team_outcomes %>%
+        # total games per team
+        max_games = sim_team_outcomes %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>%
-                filter(WEEK < week) %>%
-                mutate(WIN = case_when(MARGIN > 0 ~ 1,
+                filter(!is.na(CONFERENCE)) %>% 
+                #    filter(CONFERENCE_GAME == T) %>%
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+                group_by(TEAM) %>%
+                summarize(games = n_distinct(GAME_ID)) %>%
+                summarize(max_games = max(games)) %>%
+                pull(max_games)
+        
+        # now get total expected wins
+        season_totals = sim_team_outcomes %>%
+                filter(SEASON_TYPE == 'regular') %>%
+                filter(SEASON == season) %>%
+                #      filter(CONFERENCE_GAME == T) %>%
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+                mutate(WIN = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
-                group_by(.id, SEASON, CONFERENCE, TEAM) %>%
+                group_by(.id, SEASON, TEAM) %>%
                 summarize(WINS = sum(WIN),
+                          GAMES = n_distinct(GAME_ID),
                           .groups = 'drop') %>%
-                group_by(SEASON, CONFERENCE, TEAM, WINS) %>%
+                group_by(SEASON, TEAM, WINS, GAMES) %>%
                 count() %>%
                 group_by(SEASON, TEAM) %>%
                 mutate(perc = round(n / sum(n),2))
         
+        # make sequence from zero to max games
+        win_counts = seq(0, max_games, 1)
+        teams = unique(season_totals$TEAM)
+        
         max_wins = max(season_totals$WINS)
         min_wins = min(season_totals$WINS)
         
-        table = season_totals %>%
+        # make empty grid
+        table_long = expand.grid(SEASON = season,
+                                 TEAM = teams,
+                                 WINS = win_counts) %>%
+                left_join(.,
+                          season_totals %>%
+                                  select(SEASON, TEAM, WINS, perc) %>%
+                                  mutate(perc = perc),
+                          by = c("SEASON", "TEAM", "WINS")) %>%
+                mutate(perc = replace_na(perc, 0))
+        
+        table = table_long %>%
                 select(SEASON, TEAM, WINS, perc) %>%
-                mutate(perc = perc *100) %>%
                 pivot_wider(.,
                             id_cols = c("SEASON", "TEAM"),
                             values_from = c("perc"),
                             names_from = c("WINS")) %>%
-                ungroup() %>%
-                mutate_if(is.numeric,
-                          replace_na, 0) %>%
                 left_join(., season_totals %>%
                                   select(SEASON, TEAM, WINS, n, perc) %>%
                                   #       mutate(perc = perc *100) %>%
@@ -665,58 +779,33 @@ table_wins_season = function(sim_team_outcomes,
                           by = c("SEASON", "TEAM")) %>%
                 left_join(., season_elo,
                           by = c("SEASON", "TEAM")) %>%
-           #     arrange(desc(points)) %>%
+                #     arrange(desc(points)) %>%
                 arrange(desc(ELO)) %>%
                 mutate(SEASON  = factor(SEASON)) %>%
-                select(-points)
-        
-        if (max_wins < 12) {table$`12` = rep(0, nrow(table))} else {table$`12` = table$`12`}
-        if (max_wins < 11) {table$`11` = rep(0, nrow(table))} else {table$`11` = table$`11`}
-        if (min_wins > 0) {table$`0` = rep(0, nrow(table))} else {table$`0` = table$`0`}
-        if (min_wins > 1) {table$`1` = rep(0, nrow(table))} else {table$`1` = table$`1`}
-        if (min_wins > 2) {table$`2` = rep(0, nrow(table))} else {table$`2` = table$`2`}
-        if (min_wins > 3) {table$`3` = rep(0, nrow(table))} else {table$`3` = table$`3`}
-        if (min_wins > 4) {table$`4` = rep(0, nrow(table))} else {table$`4` = table$`4`}
-        
+                select(-points) %>%
+                select(SEASON, TEAM, ELO, one_of(paste(win_counts)))
         
         table %>%
-                filter(!is.na(CONFERENCE)) %>%
                 rename(Elo = ELO) %>%
                 mutate(`End Elo`= round(Elo, 0)) %>%
-                select(SEASON, TEAM, `End Elo`, `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `11`, `12`) %>%
+                select(SEASON, TEAM, `End Elo`, one_of(paste(win_counts))) %>%
                 rename(Season = SEASON,
                        Team = TEAM) %>%
                 flextable() %>%
                 autofit() %>%
-                bg(., j = c(paste(seq(0, 12, 1))),
+                bg(., j = paste(win_counts),
                    bg = col_func) %>%
                 add_header_row(.,
-                               values = c("","", "Simulated", paste("Simulated Win Totals for", season, "Season")),
-                               colwidths = c(1, 1, 1, 13)) %>%
-                flextable::align(j = c("End Elo", paste(seq(0, 12, 1))),
+                               values = c("","","", "", paste("Regular Season Win Probabilities for", season, "Season")),
+                               colwidths = c(1, 1, 1, 1, max(win_counts))) %>%
+                flextable::align(j = c("End Elo", paste(seq(0, max(win_counts), 1))),
                                  part = "all",
                                  align = "center") %>%
-                set_formatter( 
-                        `0`= function(x) sprintf( "%.0f%%", x ),
-                        `1`= function(x) sprintf( "%.0f%%", x ),
-                        `2`= function(x) sprintf( "%.0f%%", x ),
-                        `3`= function(x) sprintf( "%.0f%%", x ),
-                        `4`= function(x) sprintf( "%.0f%%", x ),
-                        `5`= function(x) sprintf( "%.0f%%", x ),
-                        `6`= function(x) sprintf( "%.0f%%", x ),
-                        `7`= function(x) sprintf( "%.0f%%", x ),
-                        `8`= function(x) sprintf( "%.0f%%", x ),
-                        `9`= function(x) sprintf( "%.0f%%", x ),
-                        `10`= function(x) sprintf( "%.0f%%", x ),
-                        `11`= function(x) sprintf( "%.0f%%", x ),
-                        `12`= function(x) sprintf( "%.0f%%", x )
-                ) %>%
                 color(part = "all",
                       color = "grey20") %>%
                 bg(.,
                    j = 'End Elo',
                    bg = elo_func)
-        
 }
 
 dump("table_wins_season",
@@ -725,9 +814,10 @@ dump("table_wins_season",
 
 plot_forecast_wins_conference_season = function(actual_team_outcomes,
                                                   midseason_sim_team_outcomes,
-                                                  week,
+                                                  games,
                                                   conference,
-                                                season) {
+                                                season,
+                                                week) {
 
         mode_func <- function(x) {
                 ux <- unique(x)
@@ -752,6 +842,12 @@ plot_forecast_wins_conference_season = function(actual_team_outcomes,
         
         
         week_wins = actual_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>%
                 arrange(GAME_DATE) %>%
                 filter(!is.na(CONFERENCE)) %>%
@@ -763,9 +859,15 @@ plot_forecast_wins_conference_season = function(actual_team_outcomes,
                 rename(SIM_WEEK = WEEK)
         
         midseason_win_forecast =  midseason_sim_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>%
                 filter(!is.na(CONFERENCE)) %>%
-                mutate(sim_win = case_when(MARGIN > 0 ~ 1,
+                mutate(sim_win = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SIM_WEEK, SEASON, CONFERENCE, TEAM) %>%
                 summarize(sim_remaining_wins = sum(sim_win),
@@ -936,12 +1038,10 @@ dump("get_new_elos",
 
 # function to loop over games and calculate elo ratings given selected parameters
 calc_elo_ratings = function(games,
-                            recruiting,
                             teams = list(),
                             team_seasons = list(),
                             home_field_advantage,
                             reversion,
-                            recruiting_adjustment =0,
                             k,
                             v,
                             verbose=T) {
@@ -962,12 +1062,12 @@ calc_elo_ratings = function(games,
                 # get home elo rating
                 if (game$HOME_TEAM %in% names(teams))
                 {home_rating = teams[[game$HOME_TEAM]]} else 
-                        if (!is.na(game$HOME_CONFERENCE)) {home_rating = 1500} else {home_rating = 1200}
+                        if (game$HOME_DIVISION == 'fbs') {home_rating = 1500} else {home_rating = 1200}
                 
                 # get away elo rating
                 if (game$AWAY_TEAM %in% names(teams))
                 {away_rating = teams[[game$AWAY_TEAM]]} else 
-                        if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
+                        if (game$AWAY_DIVISION == 'fbs') {away_rating = 1500} else {away_rating = 1200}
                 
                 # check whether its a neutral site game to apply home field advantage adjustment
                 if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
@@ -983,11 +1083,11 @@ calc_elo_ratings = function(games,
                 if (length(team_seasons[[game$HOME_TEAM]]) ==0) {team_seasons[[game$HOME_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$HOME_TEAM]]) {home_rating = home_rating} else 
                                 if (
-                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION == 'fbs'
                                 )
                                 {home_rating = ((reversion*1500)+ (1-reversion)*home_rating)} else
                                         if (
-                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION != 'fbs'
                                         )
                                         {home_rating = ((reversion*1200)+(1-reversion)*home_rating)}
                 
@@ -995,11 +1095,11 @@ calc_elo_ratings = function(games,
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION == 'fbs'
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION != 'fbs'
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
@@ -1009,6 +1109,15 @@ calc_elo_ratings = function(games,
                 
                 ## get the score margin based on the home team
                 home_margin = game$HOME_POINTS - game$AWAY_POINTS
+                
+                # define outcome
+                if (home_margin > 0) {home_outcome = 'win'} else
+                        if (home_margin < 0) {home_outcome = 'loss'} else
+                                if (home_margin == 0) {home_outcome = 'tie'}
+                
+                if (home_margin > 0) {away_outcome = 'loss'} else
+                        if (home_margin < 0) {away_outcome = 'win'} else
+                                if (home_margin == 0) {away_outcome = 'tie'}
                 
                 # get updated elo for both teams
                 new_elos = get_new_elos(home_rating,
@@ -1031,6 +1140,12 @@ calc_elo_ratings = function(games,
                 game$HOME_POSTGAME_ELO = new_elos[1]
                 game$AWAY_POSTGAME_ELO = new_elos[2]
                 
+                # get the score and game outcome
+                game$HOME_MARGIN = home_margin
+                game$HOME_OUTCOME = home_outcome
+                game$AWAY_MARGIN = -home_margin
+                game$AWAY_OUTCOME = away_outcome
+                
                 # update the list storing the current elo rating for each team
                 teams[[game$HOME_TEAM]] = new_elos[1]
                 teams[[game$AWAY_TEAM]] = new_elos[2]
@@ -1052,9 +1167,16 @@ calc_elo_ratings = function(games,
         team_outcomes = game_outcomes %>% 
                 select(GAME_ID, 
                        SEASON,
+                       SEASON_TYPE,
                        WEEK,
                        GAME_DATE,
-                       starts_with("HOME_"), 
+                       HOME_TEAM,
+                       HOME_CONFERENCE,
+                       HOME_DIVISION,
+                       HOME_MARGIN,
+                       HOME_OUTCOME,
+                       HOME_PREGAME_ELO,
+                       HOME_POSTGAME_ELO,
                        AWAY_TEAM,
                        AWAY_POINTS) %>%
                 rename(OPPONENT = AWAY_TEAM,
@@ -1064,19 +1186,26 @@ calc_elo_ratings = function(games,
                           game_outcomes %>% 
                                   select(GAME_ID, 
                                          SEASON,
+                                         SEASON_TYPE,
                                          WEEK,
                                          GAME_DATE,
-                                         starts_with("AWAY_"),
+                                         AWAY_TEAM,
+                                         AWAY_CONFERENCE,
+                                         AWAY_DIVISION,
+                                         AWAY_MARGIN,
+                                         AWAY_OUTCOME,
+                                         AWAY_PREGAME_ELO,
+                                         AWAY_POSTGAME_ELO,
                                          HOME_TEAM,
                                          HOME_POINTS) %>%
                                   rename(OPPONENT = HOME_TEAM,
                                          OPPONENT_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
+                arrange(GAME_DATE) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,
                        k = k,
                        v = v)
-        
         return(list(
                 "game_outcomes" = game_outcomes,
                 "team_outcomes" = team_outcomes,
@@ -1088,7 +1217,6 @@ calc_elo_ratings = function(games,
 
 dump("calc_elo_ratings",
      file = here::here("functions", "calc_elo_ratings.R"))
-
 
 # calc elo ratings with recruiting
 calc_elo_ratings_with_recruiting = function(games,
@@ -1308,31 +1436,19 @@ dump("sim_game_margin",
 
 # function for hot simulations with elo ratings
 sim_elo_ratings = function(games,
-                            teams,
-                            team_seasons,
-                            home_field_advantage,
-                            reversion,
-                            k,
-                            v,
-                           points_model,
-                           ties = F,
-                           nsims = 1000,
-                           verbose=T) {
+                           teams = list(),
+                           team_seasons = list(),
+                           home_field_advantage,
+                           reversion,
+                           k,
+                           v,
+                           ties =F,
+                           points_model = points_model,
+                           verbose=F) {
         
-        # create empty tibble to store game outcomes
-        # sim_game_outcomes = tibble()
-        # sim_team_outcomes = tibble()
-        
+        # define an empty tibble to store the game outcomes
         game_outcomes = tibble()
         
-        # # loop over nsims
-        # for (s in 1:nsims) {
-        #         
-        #         # define an empty tibble to store the game outcomes
-        #         game_outcomes = tibble()
-        #         teams = teams
-        #         team_seasons = team_seasons
-                
         # loop over games
         for(i in 1:nrow(games)) {
                 
@@ -1346,14 +1462,14 @@ sim_elo_ratings = function(games,
                 # get home elo rating
                 if (game$HOME_TEAM %in% names(teams))
                 {home_rating = teams[[game$HOME_TEAM]]} else 
-                        if (!is.na(game$HOME_CONFERENCE)) {home_rating = 1500} else {home_rating = 1200}
+                        if (game$HOME_DIVISION == 'fbs') {home_rating = 1500} else {home_rating = 1200}
                 
                 # get away elo rating
                 if (game$AWAY_TEAM %in% names(teams))
                 {away_rating = teams[[game$AWAY_TEAM]]} else 
-                        if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
+                        if (game$AWAY_DIVISION == 'fbs') {away_rating = 1500} else {away_rating = 1200}
                 
-                # check whether its a neutral site game to apply home field advantage adjustmnet
+                # check whether its a neutral site game to apply home field advantage adjustment
                 if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
                         if (game$NEUTRAL_SITE==F) {add_home_field_advantage = home_field_advantage}
                 
@@ -1367,11 +1483,11 @@ sim_elo_ratings = function(games,
                 if (length(team_seasons[[game$HOME_TEAM]]) ==0) {team_seasons[[game$HOME_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$HOME_TEAM]]) {home_rating = home_rating} else 
                                 if (
-                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION == 'fbs'
                                 )
                                 {home_rating = ((reversion*1500)+ (1-reversion)*home_rating)} else
                                         if (
-                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION != 'fbs'
                                         )
                                         {home_rating = ((reversion*1200)+(1-reversion)*home_rating)}
                 
@@ -1379,15 +1495,15 @@ sim_elo_ratings = function(games,
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION == 'fbs'
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION != 'fbs'
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
-                ## simulate the margin via points model
+                ## simulate the margin via specified points model
                 home_margin = sim_game_margin(home_rating + add_home_field_advantage, 
                                               away_rating,
                                               points_model)
@@ -1396,15 +1512,27 @@ sim_elo_ratings = function(games,
                 # if ties =F, then a margin of 0 will give home team a 1 point win
                 if (ties == F & home_margin == 0) {home_margin = 1} else {home_margin = home_margin}
                 
+                ## get the score margin based on the home team
+                #  home_margin = game$HOME_POINTS - game$AWAY_POINTS
+                
+                # define outcome
+                if (home_margin > 0) {home_outcome = 'win'} else
+                        if (home_margin < 0) {home_outcome = 'loss'} else
+                                if (home_margin == 0) {home_outcome = 'tie'}
+                if (home_margin > 0) {away_outcome = 'loss'} else
+                        if (home_margin < 0) {away_outcome = 'win'} else
+                                if (home_margin == 0) {away_outcome = 'tie'}
+                
                 # get updated elo for both teams
                 new_elos = get_new_elos(home_rating,
                                         away_rating,
                                         home_margin,
-                                        home_field_advantage,
+                                        add_home_field_advantage,
                                         k,
                                         v)
                 
                 # add pre game elo ratings to the selected game
+                # do not include the adjustment for home advantage in the pre game
                 game$HOME_PREGAME_ELO = home_rating
                 game$AWAY_PREGAME_ELO = away_rating
                 
@@ -1412,12 +1540,15 @@ sim_elo_ratings = function(games,
                 game$HOME_PROB = new_elos[3]
                 game$AWAY_PROB = new_elos[4]
                 
-                # add the margin
-                game$HOME_MARGIN = home_margin
-                
                 # add post game elo ratings to the selected game
                 game$HOME_POSTGAME_ELO = new_elos[1]
                 game$AWAY_POSTGAME_ELO = new_elos[2]
+                
+                # get the score and game outcome
+                game$HOME_SIM_MARGIN = home_margin
+                game$HOME_SIM_OUTCOME = home_outcome
+                game$AWAY_SIM_MARGIN = -home_margin
+                game$AWAY_SIM_OUTCOME = away_outcome
                 
                 # update the list storing the current elo rating for each team
                 teams[[game$HOME_TEAM]] = new_elos[1]
@@ -1431,29 +1562,50 @@ sim_elo_ratings = function(games,
                 game_outcomes = bind_rows(game_outcomes,
                                           game)
                 
+                # log output
                 if (verbose == T) {cat("\r", i, "of", nrow(games), "games completed");  flush.console()}
                 
         }
         
         # create a table at the team level that is easy to examine the results
         team_outcomes = game_outcomes %>% 
-                mutate(HOME_OPPONENT = AWAY_TEAM) %>%
                 select(GAME_ID, 
                        SEASON,
+                       SEASON_TYPE,
                        WEEK,
                        GAME_DATE,
-                       starts_with("HOME_")) %>%
+                       HOME_TEAM,
+                       HOME_CONFERENCE,
+                       HOME_DIVISION,
+                       HOME_SIM_MARGIN,
+                       HOME_SIM_OUTCOME,
+                       HOME_PREGAME_ELO,
+                       HOME_POSTGAME_ELO,
+                       AWAY_TEAM,
+                       AWAY_POINTS) %>%
+                rename(OPPONENT = AWAY_TEAM,
+                       OPPONENT_POINTS = AWAY_POINTS) %>%
                 set_names(., gsub("HOME_", "", names(.))) %>%
                 bind_rows(.,
                           game_outcomes %>% 
-                                  mutate(AWAY_OPPONENT = HOME_TEAM) %>%
-                                  mutate(AWAY_MARGIN = -HOME_MARGIN) %>%
                                   select(GAME_ID, 
                                          SEASON,
+                                         SEASON_TYPE,
                                          WEEK,
                                          GAME_DATE,
-                                         starts_with("AWAY_")) %>%
+                                         AWAY_TEAM,
+                                         AWAY_CONFERENCE,
+                                         AWAY_DIVISION,
+                                         AWAY_SIM_MARGIN,
+                                         AWAY_SIM_OUTCOME,
+                                         AWAY_PREGAME_ELO,
+                                         AWAY_POSTGAME_ELO,
+                                         HOME_TEAM,
+                                         HOME_POINTS) %>%
+                                  rename(OPPONENT = HOME_TEAM,
+                                         OPPONENT_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
+                arrange(GAME_DATE) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,
                        k = k,
@@ -1676,6 +1828,65 @@ dump("sim_elo_ratings_with_recruiting",
      file = here::here("functions", "sim_elo_ratings_with_recruiting.R"))
 
 
+# function to hot simulate entire season N times
+simulate_season = function(
+                games,
+                sim_season,
+                initial_elo_teams,
+                initial_elo_teams_seasons,
+                points_model,
+                home_field_advantage,
+                reversion,
+                k,
+                v,
+                nsims = 1000) {
+        
+        # filter to games we will simulate
+        sim_games = games %>%
+                filter(SEASON == sim_season) %>%
+                arrange(GAME_DATE) %>%
+                select(GAME_ID, 
+                       SEASON, 
+                       WEEK,
+                       SEASON_TYPE,
+                       GAME_DATE,
+                       NEUTRAL_SITE, 
+                       HOME_TEAM,
+                       AWAY_TEAM,
+                       HOME_CONFERENCE,
+                       AWAY_CONFERENCE,
+                       HOME_POINTS,
+                       AWAY_POINTS)
+        
+        # then, simulate the next season
+        set.seed(1999)
+        sim_seasons = future_replicate(nsims,
+                                       sim_elo_ratings(sim_games,
+                                                       teams = initial_elo$teams,
+                                                       team_seasons = initial_elo$team_seasons,
+                                                       home_field_advantage = selected_pars$home_field_advantage,
+                                                       reversion = selected_pars$reversion,
+                                                       k = selected_pars$k,
+                                                       v = selected_pars$v,
+                                                       verbose=F,
+                                                       ties =F,
+                                                       points_model = points_model))
+        
+        # get the simulated game outcomes
+        out = rbindlist(sim_seasons['game_outcomes',],
+                        idcol = T) %>%
+                mutate(home_field_advantage = selected_pars$home_field_advantage,
+                       reversion = selected_pars$reversion,
+                       k = selected_pars$k,
+                       v = selected_pars$v)
+        
+        return(out)
+        
+}
+
+
+
+### expected points modeling
 # function for calculating expected points from .pred columns from the model
 # takes a df with these fiels as input and calculates the expected points
 expected_points_func = function(x) {

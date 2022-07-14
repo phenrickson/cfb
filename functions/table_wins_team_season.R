@@ -1,8 +1,8 @@
 table_wins_team_season <-
 function(sim_team_outcomes,
-                                  season,
+                                  games,
                                   team,
-                                  week) {
+                                  season) {
         
         # get teams primary color
         team_color = teamcolors %>%
@@ -24,7 +24,6 @@ function(sim_team_outcomes,
                                      right=T,
                                      label = FALSE)
                         col_palette[mycut]
-                        
                 }
         # # win col func
         # win_col_func = 
@@ -36,14 +35,21 @@ function(sim_team_outcomes,
         #                 if (x == 'W') {col_palette[9]} else {'white'}
         #         }
         
+        # join with games data
+        sim_team_outcomes = sim_team_outcomes %>%
+                filter(SEASON_TYPE == 'regular') %>%
+                left_join(., games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID"))
+        
         # create a col func
         sim_team_outcomes %>%
                 filter(SEASON == season) %>%
                 filter(TEAM == team) %>%
-                filter(WEEK < week) %>%
+                filter(CONFERENCE_CHAMPIONSHIP != T) %>%
                 mutate(POSTGAME_ELO = round(POSTGAME_ELO,0)) %>%
                 left_join(.,
-                          games_data_tidied %>%
+                          games %>%
                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                           by = c("GAME_ID")) %>%
                 mutate(OPPONENT = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT),
@@ -51,11 +57,11 @@ function(sim_team_outcomes,
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
                 mutate(GAME = row_number()) %>%
-                mutate(win = MARGIN > 0) %>% 
+                mutate(win = SIM_MARGIN > 0) %>% 
                 group_by(SEASON, GAME_DATE, WEEK, OPPONENT, TEAM) %>% 
                 summarize(wins = sum(win), 
                           games = n(),
-                          margin = round(median(MARGIN), 0),
+                          margin = round(median(SIM_MARGIN), 0),
                           .groups = 'drop') %>%
                 mutate(perc = round(wins / games, 3)) %>%
                 mutate(expected_win = case_when(perc > .5 ~ 'W',
@@ -72,17 +78,17 @@ function(sim_team_outcomes,
                        Date = GAME_DATE,
                        Team = TEAM,
                        Opponent = OPPONENT,
-                       `Pr(Win)` = PROB,
-                       Margin = margin) %>%
+                       `Prob. Win` = PROB,
+                       `Pred. Margin` = margin) %>%
                 #       `Prediction` = PRED) %>%
                 flextable() %>%
-                flextable::align(., j=c("Pr(Win)", "Margin"),
+                flextable::align(., j=c("Prob. Win", "Pred. Margin"),
                       align = "center",
                       part = "all") %>%
-                bg(., j=c("Pr(Win)"),
+                bg(., j=c("Prob. Win"),
                    bg = team_col_func) %>%
                 color(part = "all",
-                      color = "grey20")
+                      color = "grey20") 
         #%>%
                 # bg(., j= "Prediction",
                 #    bg = win_col_func)

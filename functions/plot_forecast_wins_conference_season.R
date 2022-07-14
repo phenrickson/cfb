@@ -1,9 +1,10 @@
 plot_forecast_wins_conference_season <-
 function(actual_team_outcomes,
                                                   midseason_sim_team_outcomes,
-                                                  week,
+                                                  games,
                                                   conference,
-                                                season) {
+                                                season,
+                                                week) {
 
         mode_func <- function(x) {
                 ux <- unique(x)
@@ -28,6 +29,12 @@ function(actual_team_outcomes,
         
         
         week_wins = actual_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>%
                 arrange(GAME_DATE) %>%
                 filter(!is.na(CONFERENCE)) %>%
@@ -39,9 +46,15 @@ function(actual_team_outcomes,
                 rename(SIM_WEEK = WEEK)
         
         midseason_win_forecast =  midseason_sim_team_outcomes %>%
+                left_join(.,
+                          games %>%
+                                  select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                          by = c("GAME_ID")) %>%
+                filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                filter(SEASON_TYPE == 'regular') %>%
                 filter(SEASON == season) %>%
                 filter(!is.na(CONFERENCE)) %>%
-                mutate(sim_win = case_when(MARGIN > 0 ~ 1,
+                mutate(sim_win = case_when(SIM_MARGIN > 0 ~ 1,
                                        TRUE ~ 0)) %>%
                 group_by(.id, SIM_WEEK, SEASON, CONFERENCE, TEAM) %>%
                 summarize(sim_remaining_wins = sum(sim_win),
