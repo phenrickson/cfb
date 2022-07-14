@@ -102,8 +102,6 @@ rm(a)
 
 ```
 
-# What is this? {-}
-
 This notebook explores my methodology for developing Elo ratings for college football teams using data from the late 1800s to present.
 
 # Explaining Elo Ratings
