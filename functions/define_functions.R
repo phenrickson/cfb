@@ -11,21 +11,21 @@ plot_elo_historical_team = function(elo_ratings,
         
         min_date = as.Date(paste(min_year, "01", "01", sep="-"))
         min_year = year(min_date)
+        max_year = max(year(elo_ratings$GAME_DATE))
         
         all_teams_data = elo_ratings %>%
                 filter(SEASON > min_year) %>%
-                filter(!is.na(CONFERENCE))
+                filter(DIVISION == 'fbs') 
         
         all_teams_median = all_teams_data %>%
                 summarize(median = median(POSTGAME_ELO)) %>%
                 pull(median)
         
-        
         p = all_teams_data %>%
                 ggplot(., aes(x=GAME_DATE,
                               by = TEAM,
                               y= POSTGAME_ELO))+
-                geom_point(alpha = 0.01)+
+                geom_point(alpha = 0.008)+
                 geom_hline(yintercept = all_teams_median,
                            linetype = 'dashed',
                            color = 'grey60')+
@@ -36,27 +36,45 @@ plot_elo_historical_team = function(elo_ratings,
                          color = 'grey60',
                          label = paste("FBS", "\n", "Median"))
         
-        team_data = elo_train$team_outcomes %>%
+        team_data = elo_ratings %>%
                 filter(SEASON > min_year) %>%
-                filter(TEAM == team) %>%
+                filter(TEAM %in% team) %>%
                 left_join(., teamcolors %>%
                                   filter(league == 'ncaa') %>%
                                   mutate(TEAM = location),
-                          by = c("TEAM"))
+                          by = c("TEAM")) %>%
+                group_by(TEAM) %>%
+                mutate(TEAM_LABEL = case_when(GAME_DATE == max(GAME_DATE) ~ TEAM)) %>%
+                ungroup()
         
         p + geom_line(data =team_data,
                       aes(color = name),
                       stat = 'smooth',
                       formula = 'y ~ x',
                       method = 'loess',
-                      alpha =0.75,
-                      span = 0.11,
-                      lwd = 1.1)+
+                      alpha =0.85,
+                      span = 0.1,
+                      lwd = 1.04)+
+                geom_text_repel(data =team_data,
+                                aes(label = TEAM_LABEL,
+                                    color = name),
+                        fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.2,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20
+                ) +
                 geom_point(data = team_data,
                            aes(color = name),
                            alpha  =0.4)+
                 theme_phil()+
-                ggtitle(paste("Historical Elo Rating for", team),
+                ggtitle(paste("Historical Elo Rating(s) for", paste(team, collapse="-")),
                         subtitle = str_wrap(paste('Displaying Postagme Elo Ratings for all FBS teams from',
                                                   min_year, 'to present. Highlighted points/line indicate selected team.'), 120))+
                 theme(plot.title = element_text(hjust = 0.5, size = 16),
@@ -66,11 +84,15 @@ plot_elo_historical_team = function(elo_ratings,
                 guides(color = 'none')+
                 xlab("Game Date")+
                 ylab("Postgame Elo Rating")+
-                scale_x_date(breaks = as.Date(paste(seq(min_year, 2020, 10), "01", "01", sep="-")),
+                scale_x_date(breaks = as.Date(paste(seq(min_year, 2020, 5), "01", "01", sep="-")),
                              #date_breaks = c("10 year"),
-                             date_labels = c("%Y"))
+                             date_labels = c("%Y"))+
+                xlab("Season (Game Date)")
         
 }
+
+dump("plot_elo_historical_team",
+     file = here::here("functions", "plot_elo_historical_team.R"))
 
 
 ### functions for plotting simulations from elo ratings
@@ -1225,14 +1247,12 @@ calc_elo_ratings = function(games,
 dump("calc_elo_ratings",
      file = here::here("functions", "calc_elo_ratings.R"))
 
-# calc elo ratings with recruiting
 calc_elo_ratings_with_recruiting = function(games,
-                                            recruiting,
                                             teams = list(),
                                             team_seasons = list(),
                                             home_field_advantage,
                                             reversion,
-                                            recruiting_adjustment =0,
+                                            recruiting_weight,
                                             k,
                                             v,
                                             verbose=T) {
@@ -1253,93 +1273,76 @@ calc_elo_ratings_with_recruiting = function(games,
                 # get home elo rating
                 if (game$HOME_TEAM %in% names(teams))
                 {home_rating = teams[[game$HOME_TEAM]]} else 
-                        if (!is.na(game$HOME_CONFERENCE)) {home_rating = 1500} else {home_rating = 1200}
+                        if (game$HOME_DIVISION == 'fbs') {home_rating = 1500} else {home_rating = 1200}
                 
                 # get away elo rating
                 if (game$AWAY_TEAM %in% names(teams))
                 {away_rating = teams[[game$AWAY_TEAM]]} else 
-                        if (!is.na(game$AWAY_CONFERENCE)) {away_rating = 1500} else {away_rating = 1200}
+                        if (game$AWAY_DIVISION == 'fbs') {away_rating = 1500} else {away_rating = 1200}
                 
                 # check whether its a neutral site game to apply home field advantage adjustment
                 if (game$NEUTRAL_SITE==T) {add_home_field_advantage = 0} else 
                         if (game$NEUTRAL_SITE==F) {add_home_field_advantage = home_field_advantage}
                 
                 # check whether the team has already played in a season
-                # check whether the season of the game is the same season as last game for the team
-                # if not and in FBS, apply a mean reversion + recruiting adjustment
-                # if not and in FCS, apply a mean reversion
+                # check whether the season of the game is the same season 
+                # as the current team season value
+                # if not, apply a mean reversion
                 
-                if(length(team_seasons[[game$HOME_TEAM]])==0) {home_last_season = 0} else 
-                {home_last_season = team_seasons[[game$HOME_TEAM]]}
-                
-                if(length(team_seasons[[game$AWAY_TEAM]])==0) {away_last_season = 0} else 
-                {away_last_season = team_seasons[[game$AWAY_TEAM]]}
-                
-                home_current_season = game$SEASON
-                away_current_season = game$SEASON
-                
-                # now apply reversion to home team
+                # set reversion amount
                 # home team
-                # if the team is not present in previous seasons, then assign them as this season
-                # if the season is the same as the current season then the home rating is the same
-                # if the saeson is less than the current season and the team isnt missing conference (an FBS team), then reversion by 1500
-                # if the season is less than the current season and the team is missing conference, then reversion by 1200
                 if (length(team_seasons[[game$HOME_TEAM]]) ==0) {team_seasons[[game$HOME_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$HOME_TEAM]]) {home_rating = home_rating} else 
                                 if (
-                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & !is.na(game$HOME_CONFERENCE)
+                                        (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION == 'fbs'
                                 )
                                 {home_rating = ((reversion*1500)+ (1-reversion)*home_rating)} else
                                         if (
-                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & is.na(game$HOME_CONFERENCE)
+                                                (team_seasons[[game$HOME_TEAM]] < game$SEASON) & game$HOME_DIVISION != 'fbs'
                                         )
                                         {home_rating = ((reversion*1200)+(1-reversion)*home_rating)}
                 
-                # do the same for the away team
+                # away team
                 if (length(team_seasons[[game$AWAY_TEAM]]) ==0) {team_seasons[[game$AWAY_TEAM]] = game$SEASON} else
                         if (game$SEASON == team_seasons[[game$AWAY_TEAM]]) {away_rating = away_rating} else 
                                 if (
-                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & !is.na(game$AWAY_CONFERENCE)
+                                        (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION == 'fbs'
                                 )
                                 {away_rating = ((reversion*1500)+ (1-reversion)*away_rating)} else
                                         if (
-                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & is.na(game$AWAY_CONFERENCE)
+                                                (team_seasons[[game$AWAY_TEAM]] < game$SEASON) & game$AWAY_DIVISION != 'fbs'
                                         )
                                         {away_rating = ((reversion*1200)+(1-reversion)*away_rating)}
                 
                 
-                ## now apply recruiting adjustment at beginning of the season
-                # pull home recruiting if current season is one less than previous season (ie, next year)
-                if ((home_current_season - home_last_season) ==1) {home_recruiting = recruiting %>% 
-                        filter(SEASON == game$SEASON) %>%
-                        filter(TEAM == game$HOME_TEAM) %>%
-                        pull(RECRUITING_SCORE)} else {away_recruiting = vector()}
+                ### recruiting
+                # get each team's score; set to 0 if does not exist
+                if((length(game$HOME_RECRUITING_SCORE)==0) | is.na(game$HOME_RECRUITING_SCORE)) {home_recruiting_score = 0} else
+                {home_recruiting_score = game$HOME_RECRUITING_SCORE}
                 
-                # pull away
-                if ((away_current_season - away_last_season) ==1) {away_recruiting = recruiting %>% 
-                        filter(SEASON == game$SEASON) %>%
-                        filter(TEAM == game$AWAY_TEAM) %>%
-                        pull(RECRUITING_SCORE)} else {away_recruiting = vector()}
+                if((length(game$AWAY_RECRUITING_SCORE)==0) | is.na(game$AWAY_RECRUITING_SCORE)) {away_recruiting_score = 0} else
+                {away_recruiting_score = game$AWAY_RECRUITING_SCORE}
                 
-                # if it is first game of the new season but we don't have a recruiting score, then home rating isn't adjusted
-                # otherwise, if it is first game of the new season and we have a recruiting score, then adjust home rating
-                if ((home_current_season - home_last_season) !=1) {home_rating = home_rating} else
-                        if ((home_current_season - home_last_season) ==1 & length(home_recruiting)==1) {home_rating = home_rating + 
-                                (home_recruiting*recruiting_adjustment)} else {home_rating = home_rating}
-                
-                # apply same to away team
-                if ((away_current_season - away_last_season) !=1 | length(away_recruiting)==0) {away_rating = away_rating} else
-                        if ((away_current_season - away_last_season) ==1 & length(home_recruiting)==1) {away_rating = away_rating + 
-                                (away_recruiting*recruiting_adjustment)} else {away_rating = away_rating}
+                # now set elo recruiting adjustment based on weight
+                home_recruiting_adjust = (home_recruiting_score - away_recruiting_score) * recruiting_weight
                 
                 ## get the score margin based on the home team
                 home_margin = game$HOME_POINTS - game$AWAY_POINTS
+                
+                # define outcome
+                if (home_margin > 0) {home_outcome = 'win'} else
+                        if (home_margin < 0) {home_outcome = 'loss'} else
+                                if (home_margin == 0) {home_outcome = 'tie'}
+                
+                if (home_margin > 0) {away_outcome = 'loss'} else
+                        if (home_margin < 0) {away_outcome = 'win'} else
+                                if (home_margin == 0) {away_outcome = 'tie'}
                 
                 # get updated elo for both teams
                 new_elos = get_new_elos(home_rating,
                                         away_rating,
                                         home_margin,
-                                        home_field_advantage,
+                                        add_home_field_advantage + home_recruiting_adjust,
                                         k,
                                         v)
                 
@@ -1355,6 +1358,12 @@ calc_elo_ratings_with_recruiting = function(games,
                 # add post game elo ratings to the selected game
                 game$HOME_POSTGAME_ELO = new_elos[1]
                 game$AWAY_POSTGAME_ELO = new_elos[2]
+                
+                # get the score and game outcome
+                game$HOME_MARGIN = home_margin
+                game$HOME_OUTCOME = home_outcome
+                game$AWAY_MARGIN = -home_margin
+                game$AWAY_OUTCOME = away_outcome
                 
                 # update the list storing the current elo rating for each team
                 teams[[game$HOME_TEAM]] = new_elos[1]
@@ -1377,9 +1386,18 @@ calc_elo_ratings_with_recruiting = function(games,
         team_outcomes = game_outcomes %>% 
                 select(GAME_ID, 
                        SEASON,
+                       SEASON_TYPE,
                        WEEK,
                        GAME_DATE,
-                       starts_with("HOME_"), 
+                       HOME_TEAM,
+                       HOME_CONFERENCE,
+                       HOME_DIVISION,
+                       HOME_POINTS,
+                       HOME_MARGIN,
+                       HOME_OUTCOME,
+                       HOME_PREGAME_ELO,
+                       HOME_POSTGAME_ELO,
+                       HOME_RECRUITING_SCORE,
                        AWAY_TEAM,
                        AWAY_POINTS) %>%
                 rename(OPPONENT = AWAY_TEAM,
@@ -1389,20 +1407,28 @@ calc_elo_ratings_with_recruiting = function(games,
                           game_outcomes %>% 
                                   select(GAME_ID, 
                                          SEASON,
+                                         SEASON_TYPE,
                                          WEEK,
                                          GAME_DATE,
-                                         starts_with("AWAY_"),
+                                         AWAY_TEAM,
+                                         AWAY_CONFERENCE,
+                                         AWAY_DIVISION,
+                                         AWAY_POINTS,
+                                         AWAY_MARGIN,
+                                         AWAY_OUTCOME,
+                                         AWAY_PREGAME_ELO,
+                                         AWAY_POSTGAME_ELO,
+                                         AWAY_RECRUITING_SCORE,
                                          HOME_TEAM,
                                          HOME_POINTS) %>%
                                   rename(OPPONENT = HOME_TEAM,
                                          OPPONENT_POINTS = HOME_POINTS) %>%
                                   set_names(., gsub("AWAY_", "", names(.)))) %>%
+                arrange(GAME_DATE) %>%
                 mutate(home_field_advantage = home_field_advantage,
                        reversion = reversion,
                        k = k,
-                       v = v,
-                       recruiting_adjusment = recruiting_adjustment)
-        
+                       v = v)
         return(list(
                 "game_outcomes" = game_outcomes,
                 "team_outcomes" = team_outcomes,
@@ -1411,6 +1437,7 @@ calc_elo_ratings_with_recruiting = function(games,
         )
         
 }
+
 
 dump("calc_elo_ratings_with_recruiting",
      file = here::here("functions", "calc_elo_ratings_with_recruiting.R"))
