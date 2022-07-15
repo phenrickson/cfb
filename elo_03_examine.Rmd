@@ -1,0 +1,550 @@
+---
+title: "Examining CFB Elo Ratings"
+author: "Phil Henrickson"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(jsonlite)
+library(forcats)
+library(teamcolors)
+library(shiny)
+conflict_prefer("lag", "dplyr")
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+```
+
+```{r get colors for ncaa teams}
+
+# look at colors for ncca
+ncaa_colors = teamcolors %>%
+        filter(league == 'ncaa') 
+
+# define palette for ncaa
+#league_pal("ncaa", 1)
+
+```
+
+```{r flextable settings}
+
+library(flextable)
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r load functions}
+
+# integer plotting function
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+source(here::here("functions/theme_phil.R"))
+source(here::here("functions/calc_elo_ratings.R"))
+source(here::here("functions/get_expected_score.R"))
+source(here::here("functions/get_new_elos.R"))
+source(here::here("functions/calc_elo_ratings_with_recruiting.R"))
+source(here::here("functions/plot_elo_historical_team.R"))
+
+rm(a)
+
+```
+
+```{r get the games data}
+
+# data on teams with logos and colors
+teams_raw = bind_rows(
+        DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble())  %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
+        ungroup() %>%
+        # logic for flagging conference championship games
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    HOME_POINTS < AWAY_POINTS ~ 'no',
+                                    HOME_POINTS == AWAY_POINTS ~ 'no'),
+               levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# make a table of team conference by season
+team_conference_season = games_raw %>% 
+        select(SEASON, HOME_TEAM, HOME_CONFERENCE, HOME_DIVISION) %>% 
+        rename(TEAM = HOME_TEAM, 
+               CONFERENCE = HOME_CONFERENCE,
+               DIVISION = HOME_DIVISION) %>% 
+        bind_rows(.,
+            games_raw %>%
+                    select(SEASON, AWAY_TEAM, AWAY_CONFERENCE, AWAY_DIVISION) %>% 
+                    rename(TEAM = AWAY_TEAM, 
+                           CONFERENCE = AWAY_CONFERENCE,
+                           DIVISION = AWAY_DIVISION)) %>%
+        select(SEASON, TEAM, CONFERENCE, DIVISION) %>%
+        unique()
+
+```
+
+```{r get recruiting data}
+
+# recruiting
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+# expand
+library(TTR)
+recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
+             YEAR = seq(min(recruiting_teams_raw$YEAR),
+                        max(recruiting_teams_raw$YEAR))) %>%
+        left_join(., recruiting_teams_raw,
+                  by = c("YEAR", "TEAM")) %>%
+        mutate(RECRUITING_POINTS = replace_na(RECRUITING_POINTS, 0)) %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        mutate(WMA = WMA(RECRUITING_POINTS, n =4, wts = c(.35, .35, .15, .15))) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ EMA)) %>%
+        mutate(WMA = case_when(is.na(WMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ WMA)) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR)  %>%
+        mutate(SEASON = YEAR) %>%
+        ungroup() %>%
+        select(TEAM, SEASON, CONFERENCE, DIVISION, RANK, RECRUITING_POINTS, EMA, WMA)
+
+# get what we need
+recruiting = recruiting_teams %>%
+        select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
+        rename(RECRUITING_SCORE = EMA)
+
+```
+
+
+```{r join recruiting with games}
+
+# specify games to run function
+games = games_raw %>%
+        filter(SEASON >=1970) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "AWAY_TEAM"))
+
+```
+
+```{r calc elo scores both ways}
+
+# set pars
+selected_pars = tibble(k = 35,
+                       v = 400,
+                       reversion = 0.1,
+                       home_field_advantage = 75,
+                       recruiting_weight = 0.8)
+
+# now get the elo ratings based on this training set
+elo_games= calc_elo_ratings(games %>%
+                                    filter(SEASON < 2022) %>%
+                                    filter(!is.na(HOME_POINTS) & !is.na(AWAY_POINTS)),
+                          home_field_advantage = selected_pars$home_field_advantage,
+                          reversion = selected_pars$reversion,
+                          k = selected_pars$k,
+                          v = selected_pars$v,
+                          verbose = T)
+
+# # get with recruiting
+# elo_games_recruiting= calc_elo_ratings_with_recruiting(games %>%
+#                                     filter(SEASON < 2022) %>%
+#                                     filter(!is.na(HOME_POINTS) & !is.na(AWAY_POINTS)),
+#                                                        recruiting_weight = selected_pars$recruiting_weight,
+#                                                           home_field_advantage = selected_pars$home_field_advantage,
+#                                                           reversion = selected_pars$reversion,
+#                                                           k = selected_pars$k,
+#                                                           v = selected_pars$v,
+#                                                           verbose = T)
+
+# fbs teams
+teams = elo_games$team_outcomes %>%
+        filter(SEASON == 2021) %>%
+        filter(DIVISION == 'fbs') %>%
+        distinct(TEAM) %>%
+        arrange(TEAM)
+
+```
+
+
+```{r select a team, fig.height=8, include =F, echo=FALSE}
+
+# shinyApp(
+# 
+#   ui = fluidPage(
+#     selectInput("team", "Team:",
+#                 selected = 'Alabama',
+#                 choices = teams),
+#     plotOutput("phonePlot")
+#   ),
+# 
+#   server = function(input, output) {
+#     output$phonePlot = renderPlot({
+#             
+#             plot_elo_historical_team(elo_games$team_outcomes,
+#                          team = input$team)
+#     })
+#   },
+#   options = list(height = 1000)
+# )
+
+```
+
+# Team Historical Elo Ratings
+
+## Rivalries
+
+```{r plot elo historical michigan}
+
+plot_elo_historical_team(elo_games$team_outcomes,
+                         team = c('Michigan', 'Ohio State'))
+
+```
+
+```{r texas tamu}
+
+plot_elo_historical_team(elo_games$team_outcomes,
+                         team = c('Texas', 'Texas A&M'))
+
+```
+
+
+```{r plot elo historical Michigan}
+
+plot_elo_historical_team(elo_games$team_outcomes,
+                         team = c('Army', 'Navy'))
+
+```
+
+## Highest Variance Teams
+
+Which teams have had the highest variance in the last 40 odd years?
+
+```{r get the variance of all teams}
+
+highest_variance_teams = elo_games$team_outcomes %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        summarize(Elo_Variance = var(POSTGAME_ELO)) %>%
+        mutate_if(is.numeric, round,0) %>%
+        arrange(desc(Elo_Variance))
+
+```
+
+
+
+## Biggest Changes
+
+Which teams have changed the most year over year? 
+```{r which teams have changed most year over year}
+
+year_over_year_changes = elo_games$team_outcomes %>%
+        filter(DIVISION == 'fbs') %>%
+        arrange(SEASON, TEAM) %>%
+        group_by(SEASON, TEAM) %>%
+        filter(GAME_DATE == max(GAME_DATE)) %>%
+        group_by(TEAM) %>%
+        rename(SEASON_END_ELO = POSTGAME_ELO) %>%
+        select(SEASON, TEAM, SEASON_END_ELO) %>%
+        mutate(PREVIOUS_SEASON_END_ELO = lag(SEASON_END_ELO,1)) %>%
+        ungroup() %>%
+        mutate(DIFF = SEASON_END_ELO - PREVIOUS_SEASON_END_ELO) %>%
+        arrange(DIFF)
+
+
+```
+
+Here are the biggest drops from the end of season to the end of the next.
+
+```{r biggest drops}
+
+diff_func = 
+                function(x) {
+                        
+                        breaks = c(-1000, -700, seq(-650, 650, 50), 700, 1000)
+                        colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
+                        col_palette <- colorRamp(length(breaks))
+                        mycut <- cut(x, 
+                                     breaks = breaks,
+                                     include.lowest = TRUE, 
+                                     right=T,
+                                     label = FALSE)
+                        col_palette[mycut]
+                        
+                }
+
+# biggest drops
+year_over_year_changes %>%
+        mutate_if(is.numeric, round, 0) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        rename(Season = SEASON,
+               Team = TEAM,
+               Season_End_Elo = SEASON_END_ELO,
+               Previous_End_Elo = PREVIOUS_SEASON_END_ELO,
+               Elo_Diff = DIFF) %>%
+        arrange(Elo_Diff) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(j='Elo_Diff',
+           bg = diff_func)
+
+```
+
+Here are the teams that gained the most in Elo over the course of one season.
+
+```{r team elo rating gaines}
+
+
+# biggest drops
+year_over_year_changes %>%
+        mutate_if(is.numeric, round, 0) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        rename(Season = SEASON,
+               Team = TEAM,
+               Season_End_Elo = SEASON_END_ELO,
+               Previous_End_Elo = PREVIOUS_SEASON_END_ELO,
+               Elo_Diff = DIFF) %>%
+        arrange(desc(Elo_Diff)) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(j='Elo_Diff',
+           bg = diff_func)
+
+```
+
+## Biggest Upsets
+
+Which games were the biggest upsets?
+
+```{r team upsets}
+
+elo_games$team_outcomes %>%
+        filter(OUTCOME == 'win') %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'tie' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        arrange(desc(DIFF)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        select(Season, Date, Team, Opponent, `Pr(Win)`, Result) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Season", "Date", "Pr(Win)", "Result"),
+              align = 'center', part = 'all')
+
+```
+
+
+## Biggest Swings in Elo
+
+Which games saw the largest drop in Elo? 
+
+```{r biggest wins by underdog}
+
+elo_games$team_outcomes %>%
+        mutate(ELO_DIFF = POSTGAME_ELO - PREGAME_ELO) %>%
+        arrange(ELO_DIFF) %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'tie' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        arrange(desc(ELO_DIFF)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Pre_Elo = PREGAME_ELO,
+               Post_Elo = POSTGAME_ELO,
+               Diff = ELO_DIFF,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        mutate_at(c("Pre_Elo",
+                    "Post_Elo", 
+                    "Diff"),
+                  round, 0) %>%
+        head(25) %>%
+        select(Season, Date, Team, Opponent, Pre_Elo, Post_Elo, Result, Diff) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Season", "Date", "Result", "Diff"),
+              align = 'center', part = 'all')
+        
+```
+
