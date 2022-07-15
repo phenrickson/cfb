@@ -1,0 +1,1832 @@
+---
+title: "Adding Recruiting to CFB Elo Ratings"
+author: "Phil Henrickson"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(jsonlite)
+library(forcats)
+library(teamcolors)
+conflict_prefer("lag", "dplyr")
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+```
+
+```{r get colors for ncaa teams}
+
+# look at colors for ncca
+ncaa_colors = teamcolors %>%
+        filter(league == 'ncaa') 
+
+# define palette for ncaa
+#league_pal("ncaa", 1)
+
+```
+
+```{r flextable settings}
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r load functions}
+
+# integer plotting function
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+source(here::here("functions/theme_phil.R"))
+rm(a)
+
+```
+
+```{r get the games data}
+
+# data on teams with logos and colors
+teams_raw = bind_rows(
+        DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble())  %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
+
+# load teamcolors
+teamcolors = teamcolors %>%
+        mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
+                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
+                                    TRUE ~ location))
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
+        ungroup() %>%
+        # logic for flagging conference championship games
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    HOME_POINTS < AWAY_POINTS ~ 'no',
+                                    HOME_POINTS == AWAY_POINTS ~ 'no'),
+               levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# make a table of team conference by season
+team_conference_season = games_raw %>% 
+        select(SEASON, HOME_TEAM, HOME_CONFERENCE, HOME_DIVISION) %>% 
+        rename(TEAM = HOME_TEAM, 
+               CONFERENCE = HOME_CONFERENCE,
+               DIVISION = HOME_DIVISION) %>% 
+        bind_rows(.,
+            games_raw %>%
+                    select(SEASON, AWAY_TEAM, AWAY_CONFERENCE, AWAY_DIVISION) %>% 
+                    rename(TEAM = AWAY_TEAM, 
+                           CONFERENCE = AWAY_CONFERENCE,
+                           DIVISION = AWAY_DIVISION)) %>%
+        select(SEASON, TEAM, CONFERENCE, DIVISION) %>%
+        unique()
+
+```
+
+```{r get recruiting data}
+
+# recruiting
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+```
+
+# What About the Croots?
+
+So far, the model has been built to predict upcoming games and seasons using nothing more than a tuned Elo rating that accounts for home field advantage and reversion year over year. The results are kind of cool given the simplicity of this approach, but we can imagine that we'd like the model to also know things about the talent of the team.
+
+## Team Recruiting Scores
+
+We have data on recruiting back to the year 2000. The first few years are a bit spotty in terms of quality, but this data is at the year level and is the composite score for a given team's recruiting for a year.
+
+```{r look at a sample of the data}
+
+set.seed(1)
+recruiting_teams_raw %>%
+        filter(YEAR == 2010) %>%
+        mutate(YEAR = factor(YEAR)) %>%
+        sample_n(5) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Here is each team's recruiting score, broken down by conference, for the data we have. What a lovely graph!
+
+```{r look at recruiting rankings by year}
+
+recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        left_join(., teamcolors %>%
+                                  filter(league == 'ncaa') %>%
+                                  mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        filter(!(CONFERENCE == 'FBS Independents') | TEAM %in% c("Notre Dame", "BYU", "Navy", "Army")) %>%
+        ungroup() %>% 
+        filter(CONFERENCE %in% c("ACC",
+                                 "Big 12",
+                                 "Big Ten",
+                                 "FBS Independents",
+                                 "Pac-10",
+                                 "Pac-12",
+                                 "SEC")) %>%
+        mutate(CONFERENCE_LABEL = case_when(CONFERENCE == 'Pac-10' ~ 'Pac-10/Pac-12',
+                                            CONFERENCE == 'Pac-12' ~ 'Pac-10/Pac-12',
+                                            TRUE ~ CONFERENCE)) %>%
+        group_by(CONFERENCE_LABEL, TEAM) %>%
+        mutate(season_number = row_number()) %>%
+        mutate(TEAM_LABEL = case_when(season_number == max(season_number) ~ TEAM)) %>%
+        ggplot(., aes(x=YEAR,
+                      color = name,
+                      label = TEAM_LABEL,
+                      y = RECRUITING_POINTS))+
+               geom_text_repel(
+               fontface = "bold",
+               size = 3,
+               direction = "y",
+               hjust = -1.4,
+               segment.size = .7,
+               segment.alpha = .5,
+               segment.linetype = "dotted",
+               box.padding = .4,
+               segment.curvature = -0.1,
+               segment.ncp = 3,
+               segment.angle = 20) +
+        geom_line(lwd = 1.05,
+                  stat = 'smooth',
+                  method = 'loess',
+                  formula = 'y ~ x',
+                  span = 0.25)+
+        scale_color_teams(name = 'TEAM')+
+        facet_wrap(CONFERENCE_LABEL~.,)+
+        guides(color = "none")+
+        coord_cartesian(xlim = c(NA, 2025),
+                        ylim = c(0,400))+
+        theme_phil()
+
+```
+
+I do have more disaggregated data on recruits down to the player and position level, but the historical quality is less clear and I haven't been able to dive into it as much so I'll punt on using that for now. 
+
+## Recruiting Moving Average
+
+A team's recruiting ranking is scored year by year, but a team's roster is composed of players from the last few years. This means instead of just using recruiting scores, we should probably use some sort of weighted moving average of a team's previous classes. 
+
+In this plot I'm looking at a team's composite score in each year, along with two different types of a weighted moving average. The first (EMA) uses exponentially decaying weights over the last four years, assigning higher weights to recent years. The second uses manually selected weights for the last four years, with 35% weight given to 4 years ago, 25% given to the 2 and 3 years ago, and 15% to the most recent class, assignining higher weights to older years. These are generally extremely similar, but I'll examine both.
+
+```{r get recruiting scores by team}
+
+library(TTR)
+
+recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
+             YEAR = seq(min(recruiting_teams_raw$YEAR),
+                        max(recruiting_teams_raw$YEAR))) %>%
+        left_join(., recruiting_teams_raw,
+                  by = c("YEAR", "TEAM")) %>%
+        mutate(RECRUITING_POINTS = replace_na(RECRUITING_POINTS, 0)) %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        mutate(WMA = WMA(RECRUITING_POINTS, n =4, wts = c(.35, .35, .15, .15))) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ EMA)) %>%
+        mutate(WMA = case_when(is.na(WMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ WMA)) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR)  %>%
+        mutate(SEASON = YEAR) %>%
+        ungroup() %>%
+        select(TEAM, SEASON, CONFERENCE, DIVISION, RANK, RECRUITING_POINTS, EMA, WMA)
+
+```
+
+Here are the SEC teams over this time frame.
+
+```{r show recruiting for SEC}
+
+recruiting_teams %>%
+        left_join(., teamcolors %>%
+                                  filter(league == 'ncaa') %>%
+                                  mutate(TEAM = location),
+                          by = c("TEAM")) %>%
+        # filter(TEAM %in% c("Tennessee", "Florida State", "Georgia", 
+        #                    "Kansas", "Iowa State", "Rutgers")) %>%
+        filter(TEAM %in% (team_conference_season %>% 
+                                  filter(SEASON > 2010) %>% 
+                                  filter(CONFERENCE == 'SEC') %>%
+                                  distinct(TEAM) %>% pull)) %>%
+        select(SEASON, RANK, CONFERENCE, TEAM, name, primary, RECRUITING_POINTS, EMA, WMA) %>%
+        group_by(SEASON) %>%
+        mutate(RECRUITING_POINTS = RECRUITING_POINTS - mean(RECRUITING_POINTS),
+               WMA = WMA - mean(WMA),
+               EMA = EMA-mean(EMA)) %>%
+        ungroup() %>%
+        gather("variable", "value",
+               -SEASON, -RANK, -CONFERENCE, -TEAM, -name, -primary) %>%
+        mutate(variable = factor(variable,
+                                 levels = c("RECRUITING_POINTS", "EMA", "WMA"))) %>%
+        ggplot(., aes(x=SEASON,
+                      color = name,
+                      linetype = variable,
+                      y = value))+
+        geom_line(lwd=1.04)+
+        scale_color_teams(name = 'TEAM')+
+        guides(color = "none")+
+        theme_phil()+
+        facet_wrap(TEAM~.)+
+        geom_hline(yintercept=0,
+                   linetype = 'dotted')+
+     #   coord_cartesian(ylim = c(0, 350))+
+        scale_linetype_manual(values = c("solid", "dashed", "dotted"))+
+        ylab("Recruiting Composite")
+
+```
+
+Some times you can clearly see have been on the rise or falling, though the overall distribution of the recruiting rating seems to have shifted a bit over this time period. This might be a data quality/reporting issue, or it might be that recruiting landscape is shifting over time.
+
+```{r looking at distributions over time for the smoothed and nnot, messages=F}
+
+p = recruiting_teams %>% 
+        filter(SEASON > 2006) %>%
+        ggplot(., aes(x=EMA, y=factor(SEASON)))+
+        stat_density_ridges(quantile_lines = T)+
+        theme_phil()+
+        ylab("Season")+
+        xlab("Distribution of Recruiting Score by Teams")
+
+suppressMessages(print(p))
+
+```
+
+## Team Recruiting Scores and Wins
+
+What is the relationship between recruiting and a team's win total?
+
+```{r recruiting teams and wins}
+
+recruiting_teams %>%
+        filter(SEASON != 2022) %>%
+        left_join(.,
+                  games_raw %>%
+                  filter(SEASON_TYPE == 'regular') %>%
+                  filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                  mutate(HOME_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 1,
+                                              AWAY_POINTS > HOME_POINTS ~ 0),
+                         AWAY_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 0,
+                                              AWAY_POINTS > HOME_POINTS ~ 1)) %>%
+                  select(SEASON, HOME_TEAM, HOME_WIN) %>%
+                  rename(TEAM = HOME_TEAM,
+                         WIN = HOME_WIN) %>%
+                  bind_rows(.,
+                            games_raw %>%
+                                    filter(SEASON_TYPE == 'regular') %>%
+                                    filter(CONFERENCE_CHAMPIONSHIP ==F) %>%
+                                    mutate(HOME_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 1,
+                                                      AWAY_POINTS > HOME_POINTS ~ 0),
+                                           AWAY_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 0,
+                                                      AWAY_POINTS > HOME_POINTS ~ 1)) %>%
+                                    select(SEASON, AWAY_TEAM, AWAY_WIN) %>%
+                                    rename(TEAM = AWAY_TEAM,
+                                           WIN = AWAY_WIN)) %>%
+                  group_by(SEASON, TEAM) %>%
+                  summarize(wins = sum(WIN),
+                            .groups = 'drop'),
+                  by = c("SEASON", "TEAM")) %>%
+        filter(SEASON > 2006) %>%
+        ggplot(., aes(x=EMA,
+                      label = TEAM,
+                      y= wins))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  size = 2.5,
+                  vjust = -1)+
+        facet_wrap(SEASON ~.)+
+        theme_phil()+
+        coord_cartesian(ylim = c(-1, 13))+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x')+
+        stat_cor(p.accuracy = 0.01,
+                 col = 'blue')
+
+```
+
+## Team Recruiting Scores and Season End Elo Ratings
+
+How correlated are team recruiting scores and season end Elo ratings?
+
+```{r correlation between these two things, fig.height=8}
+
+recruiting_teams %>%
+        filter(SEASON > 2005 & SEASON < 2015) %>%
+        left_join(.,
+                  elo_train$team_outcomes %>%
+                          group_by(SEASON, TEAM) %>%
+                          filter(GAME_DATE == max(GAME_DATE)),
+                  by = c("TEAM", "SEASON", "CONFERENCE", "DIVISION")) %>%
+        ggplot(aes(x=EMA,
+                   label = TEAM,
+                     y=POSTGAME_ELO))+
+        geom_text(check_overlap = T,
+                  size = 2,
+                  vjust = -1)+
+        geom_point(size = 1)+
+        facet_wrap(SEASON ~.)+
+        theme_phil()+
+        stat_cor(p.accuracy = 0.01,
+                 size = 2.5)+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x')+
+        ylab("Team Season End Elo")+
+        xlab("Team Recruiting Score")
+                 
+```
+
+## Elo Ratings, Recruiting, and Margin of Victory
+
+I'll now examine the relationship between recruiting scores, Elo ratings, and the outcome of games. Namely, I'll regress the point spread in a game on the difference in Elo and recruiting between the two teams playing.
+
+I'll use games from 2007 to 2015 here to train the model then look to see how a model does in predicting the next few years and whether we see an improvement from using recruiting in addition to Elo.
+
+```{r compute elo ratings through 2015, include=F}
+
+source(here::here("functions/calc_elo_ratings.R"))
+source(here::here("functions/get_expected_score.R"))
+source(here::here("functions/get_new_elos.R"))
+source(here::here("functions/calc_elo_ratings.R"))
+
+rm(train_games,
+   valid_games,
+   elo_train,
+   elo_valid)
+
+# now loop through a set of games
+train_games = games_raw %>%
+        filter(SEASON >=1970) %>%
+        filter(SEASON <= 2015) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# now loop through a set of games
+valid_games = games_raw %>%
+        filter(SEASON > 2015 & SEASON < 2020) %>%
+        # we have some missingness present for selected games in this time period for 2016
+        filter(!is.na(HOME_POINTS)) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS)
+
+# set pars
+selected_pars = tibble(k = 35,
+                       v = 400,
+                       reversion = 0.1,
+                       home_field_advantage = 75)
+
+# now get the elo ratings based on this training set
+elo_train = calc_elo_ratings(train_games,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+
+# now get the elo ratings based on this training set
+elo_valid = calc_elo_ratings(valid_games,
+                             teams = elo_train$teams,
+                             team_seasons = elo_train$team_seasons,
+                             home_field_advantage = selected_pars$home_field_advantage,
+                             reversion = selected_pars$reversion,
+                             k = selected_pars$k,
+                             v = selected_pars$v,
+                             verbose = T)
+
+```
+
+```{r join elo with teams}
+
+games_and_recruiting = 
+        elo_train$game_outcomes %>%
+        filter(SEASON > 2006) %>%
+        left_join(.,
+                  recruiting_teams %>%
+                          select(SEASON,
+                                 TEAM,
+                                 EMA,
+                                 WMA) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_EMA = EMA,
+                                 HOME_WMA = WMA),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting_teams %>%
+                          select(SEASON,
+                                 TEAM,
+                                 EMA,
+                                 WMA) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_EMA = EMA,
+                                 AWAY_WMA = WMA),
+                  by = c("SEASON",
+                         "AWAY_TEAM")) %>%
+        bind_rows(.,
+                  elo_valid$game_outcomes %>%
+                          left_join(.,
+                                    recruiting_teams %>%
+                                            select(SEASON,
+                                                 TEAM,
+                                                 EMA,
+                                                 WMA) %>%
+                                          rename(HOME_TEAM = TEAM,
+                                                 HOME_EMA = EMA,
+                                                 HOME_WMA = WMA),
+                                  by = c("SEASON",
+                                         "HOME_TEAM")) %>%
+                        left_join(.,
+                                  recruiting_teams %>%
+                                          select(SEASON,
+                                                 TEAM,
+                                                 EMA,
+                                                 WMA) %>%
+                                          rename(AWAY_TEAM = TEAM,
+                                                 AWAY_EMA = EMA,
+                                                 AWAY_WMA = WMA),
+                                  by = c("SEASON",
+                                         "AWAY_TEAM"))) %>%
+        mutate_at(c("HOME_EMA",
+                    "AWAY_EMA"),
+                  ~ replace_na(.,0)) %>%
+        mutate(HOME_ELO_DIFF = case_when(NEUTRAL_SITE == F ~ 
+                                                 HOME_PREGAME_ELO + 
+                                                 selected_pars$home_field_advantage - AWAY_PREGAME_ELO ,
+                                         NEUTRAL_SITE == T ~ HOME_PREGAME_ELO + 
+                                                 selected_pars$home_field_advantage - AWAY_PREGAME_ELO)) %>%
+        mutate(HOME_RECRUITING_DIFF = HOME_EMA - AWAY_EMA) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes")))
+
+```
+
+
+
+```{r games and recruiting plot wins, fig.height=8}
+
+games_and_recruiting %>%
+        filter(SEASON > 2007 & SEASON < 2015) %>%
+        mutate(HOME_WIN = case_when(HOME_WIN == 'yes' ~ 'home win',
+                                    HOME_WIN == 'no' ~ 'home loss')) %>%
+        ggplot(., aes(x=HOME_ELO_DIFF,
+                      label = paste(HOME_TEAM, AWAY_TEAM, SEASON),
+                      color = HOME_RECRUITING_DIFF,
+                      y = HOME_RECRUITING_DIFF))+
+        geom_point()+
+        geom_text(check_overlap=T,
+                  vjust = -1,
+                  size = 3)+
+        theme_phil()+
+        #scale_color_manual(values = c("blue", "red"))+
+        facet_wrap(HOME_WIN ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dotted')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dotted')+
+        scale_color_gradient2(low = "red",
+                              mid = "white",
+                              high = "blue",
+                              limits = c(-200, 200),
+                              oob = scales::squish)+
+        theme(legend.title = element_text())+
+        guides(color = guide_colorbar(title = 'Home Recruiting - Away Recruiting',
+                                      barheight =0.5,
+                                      barwidth = 10,
+                                      title.position = 'top'))
+
+```
+
+If we simply predicted the winner based on which team had a positive Elo or recruiting differential, how well would each do? We would hope the Elo score does much better than simply using a recruiting or home team heuristic.
+
+```{r from just a binary perspective}
+
+games_and_recruiting %>%
+        filter(SEASON > 2007 & SEASON < 2020) %>%
+        select(SEASON, HOME_WIN, HOME_TEAM, AWAY_TEAM, HOME_ELO_DIFF, HOME_RECRUITING_DIFF) %>%
+        mutate(HOME_ALWAYS_WINS = 1) %>%
+        gather("method", "value",
+               -SEASON, -HOME_WIN, -HOME_TEAM, -AWAY_TEAM,) %>%
+        mutate(PRED_WIN = factor(case_when(value >=0 ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes")))%>%
+        group_by(method) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = PRED_WIN) %>%
+        spread(method, .estimate) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(.metric, HOME_ALWAYS_WINS, HOME_RECRUITING_DIFF, HOME_ELO_DIFF)
+        
+```
+## Regressing Margin of Victory
+
+```{r now train points model on the games before 2015}
+
+model_no_recruiting = games_and_recruiting %>%
+        filter(SEASON > 2006) %>%
+        filter(SEASON < 2018) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(glm = map(data, ~ glm(HOME_WIN ~ HOME_ELO_DIFF,
+                                    family = 'binomial',
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(augmented = map(lm, augment)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        mutate(method = 'Elo')
+
+model_no_recruiting %>%
+        select(method, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+model_no_recruiting %>%
+        select(method, glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(method, r.squared, sigma, nobs)
+
+lm_no_recruiting = pluck(model_no_recruiting,
+                         "lm",
+                         1)
+
+```
+
+
+
+```{r points model with recruitng}
+
+model_with_recruiting = games_and_recruiting %>%
+        filter(SEASON > 2006) %>%
+        filter(SEASON < 2018) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF + HOME_RECRUITING_DIFF,
+                             data = .x))) %>%
+        mutate(glm = map(data, ~ glm(HOME_WIN ~ HOME_ELO_DIFF + HOME_RECRUITING_DIFF,
+                                     famil = 'binomial',
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        mutate(augmented = map(lm, augment)) %>%
+        mutate(method = 'Elo + Recruiting')
+
+model_with_recruiting %>%
+        select(method, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+model_with_recruiting %>%
+        select(method, glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(method, r.squared, sigma, nobs)
+
+lm_recruiting = pluck(model_with_recruiting,
+                      "lm",
+                      1)
+
+```
+
+If we use them purely to predict wins and losses, how did each fare?
+
+```{r wins and losses}
+
+# compare predictions
+model_no_recruiting %>%
+        bind_rows(model_with_recruiting) %>%
+        select(method, data, augmented) %>%
+        unnest() %>%
+        select(method, .fitted, GAME_ID, WEEK, HOME_TEAM, AWAY_TEAM, HOME_WIN, HOME_SCORE_DIFF, HOME_RECRUITING_DIFF, HOME_ELO_DIFF) %>%
+   #     mutate(.fitted = round(.fitted, 0)) %>%
+        mutate(HOME_PRED = factor(case_when(.fitted > 0 ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        group_by(method) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3)
+
+```
+
+
+```{r games and recruiting examine}
+
+# compare predictions
+model_no_recruiting %>%
+        bind_rows(model_with_recruiting) %>%
+        select(method, data, augmented) %>%
+        unnest() %>%
+        select(method, .fitted, GAME_ID, WEEK, HOME_TEAM, AWAY_TEAM, HOME_WIN, HOME_SCORE_DIFF, HOME_RECRUITING_DIFF, HOME_ELO_DIFF) %>%
+        mutate(.fitted = round(.fitted, 0)) %>%
+        ggplot(., aes(x=.fitted,
+                      color = HOME_RECRUITING_DIFF,
+                      y= HOME_SCORE_DIFF))+
+        geom_point()+
+        facet_wrap(method ~.)+
+        theme_phil()+
+        stat_cor(p.accuracy = 0.01)+
+        geom_vline(xintercept = 0,
+                   linetype = 'dotted')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dotted')+
+        scale_color_gradient2(low = "red",
+                              mid = "white",
+                              high = "blue",
+                              limits = c(-200, 200),
+                              oob = scales::squish)+
+        xlab("Predicted Spread")+
+        ylab("Actual Spread")
+
+```
+
+
+```{r compare some games}
+
+point_func = 
+                function(x) {
+                        
+                        breaks = c(-80, -50, -40, -25, -15, -7, -3,-0.5, 0, 0.5, 3, 7, 15, 25, 40, 50, 80)
+                        colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
+                        col_palette <- colorRamp(length(breaks))
+                        mycut <- cut(x, 
+                                     breaks = breaks,
+                                     include.lowest = TRUE, 
+                                     right=T,
+                                     label = FALSE)
+                        col_palette[mycut]
+                        
+                }
+
+# compare predictions
+model_no_recruiting %>%
+        bind_rows(model_with_recruiting) %>%
+        select(method, data, augmented) %>%
+        unnest() %>%
+        select(method, .fitted, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_RECRUITING_DIFF, HOME_ELO_DIFF, HOME_SCORE_DIFF) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        spread(method, .fitted) %>%
+        mutate_if(is.numeric, round, 0) %>%
+        filter(HOME_RECRUITING_DIFF > 0 & HOME_ELO_DIFF < 0)  %>%
+        rename(Score = HOME_SCORE_DIFF,
+               Recruiting = HOME_RECRUITING_DIFF,
+               Elo_Diff = HOME_ELO_DIFF,
+               `Elo Model` = Elo) %>%
+        arrange(desc(Recruiting)) %>%
+        head(50) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j=c("Score", 
+                  "Elo Model",
+                  "Elo + Recruiting"),
+           bg = point_func)
+
+# compare predictions
+model_no_recruiting %>%
+        bind_rows(model_with_recruiting) %>%
+        select(method, data, augmented) %>%
+        unnest() %>%
+        select(method, .fitted, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_RECRUITING_DIFF, HOME_ELO_DIFF, HOME_SCORE_DIFF) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        spread(method, .fitted) %>%
+        mutate_if(is.numeric, round, 1) %>%
+        filter(HOME_RECRUITING_DIFF < 0 & HOME_ELO_DIFF > 0)  %>%
+        rename(Score = HOME_SCORE_DIFF,
+               Recruiting = HOME_RECRUITING_DIFF,
+               Elo_Diff = HOME_ELO_DIFF,
+               `Elo Model` = Elo) %>%
+        arrange(Recruiting) %>%
+        head(50) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j=c("Score", 
+                  "Elo Model",
+                  "Elo + Recruiting"),
+           bg = point_func)
+        
+        
+# compare predictions
+model_no_recruiting %>%
+        bind_rows(model_with_recruiting) %>%
+        select(method, data, augmented) %>%
+        unnest() %>%
+        select(method, .fitted, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_RECRUITING_DIFF, HOME_ELO_DIFF, HOME_SCORE_DIFF) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        spread(method, .fitted) %>%
+        mutate_if(is.numeric, round, 1) %>%
+        filter(HOME_RECRUITING_DIFF > 0 & HOME_ELO_DIFF > 0)  %>%
+        rename(Score = HOME_SCORE_DIFF,
+               Recruiting = HOME_RECRUITING_DIFF,
+               Elo_Diff = HOME_ELO_DIFF,
+               `Elo Model` = Elo) %>%
+        arrange(desc(Recruiting)) %>%
+        head(50) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j=c("Score", 
+                  "Elo Model",
+                  "Elo + Recruiting"),
+           bg = point_func)
+
+```
+
+Now predict games from 2016 to 2018 with both models.
+
+```{r predict validation games}
+
+valid_set= games_and_recruiting %>%
+        filter(SEASON < 2019 & SEASON > 2015)
+
+# predict with
+valid_preds= predict(lm_no_recruiting,
+               valid_set,
+               interval = 'predict') %>%
+        as_tibble() %>%
+        mutate(method = "Elo") %>%
+        bind_cols(., valid_set) %>%
+        bind_rows(.,
+                  predict(lm_recruiting,
+                          valid_set,
+                          interval = 'predict') %>%
+                          as_tibble() %>%
+                          mutate(method = "Elo + Recruiting") %>%
+                          bind_cols(., valid_set))
+
+valid_preds %>%
+        select(SEASON, method, fit, GAME_ID, WEEK, HOME_TEAM, AWAY_TEAM, HOME_WIN, HOME_SCORE_DIFF, HOME_RECRUITING_DIFF, HOME_ELO_DIFF) %>%
+   #     mutate(.fitted = round(.fitted, 0)) %>%
+        mutate(HOME_PRED = factor(case_when(fit > 0 ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        group_by(method) %>%
+        conf_mat(truth = HOME_WIN,
+                 estimate = HOME_PRED) %>%
+        pull(conf_mat)
+
+valid_preds %>%
+        select(SEASON, method, fit, GAME_ID, WEEK, HOME_TEAM, AWAY_TEAM, HOME_WIN, HOME_SCORE_DIFF, HOME_RECRUITING_DIFF, HOME_ELO_DIFF) %>%
+   #     mutate(.fitted = round(.fitted, 0)) %>%
+        mutate(HOME_PRED = factor(case_when(fit > 0 ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        group_by(SEASON, method) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3)
+
+valid_preds %>%
+        select(SEASON, method, fit, GAME_ID, WEEK, HOME_TEAM, AWAY_TEAM, HOME_WIN, HOME_SCORE_DIFF, HOME_RECRUITING_DIFF, HOME_ELO_DIFF) %>%
+   #     mutate(.fitted = round(.fitted, 0)) %>%
+        mutate(HOME_PRED = factor(case_when(fit > 0 ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        group_by(SEASON, method) %>%
+        yardstick::rmse(truth = HOME_SCORE_DIFF,
+                            estimate = fit) %>%
+        mutate_if(is.numeric, round, 3)
+
+```
+
+We see a very slight improvement in both accuracy and predicting the spread by adding in recruiting. It's not huge, but definitely something we should account for and use.
+
+## Adjusting for Recruiting
+
+How can we handle this? We can apply a pre game adjustment based on the difference in recruiting similar to the way we've been handling the home team advantage. Currently, two teams playing in a game with the same Elo score would have the home team favored by 3.75 points due to our addition of a 75 point home team field advantage adjustment. 
+
+For the purpose of Elo, we found that a one point increase in the recruiting composite, holding the difference in Elo ratings constant, was worth about .04 points - close to the same as a one point increase in Elo.
+
+
+```{r make a grid to see this effect}
+
+df = expand.grid(HOME_ELO_DIFF= seq(-300, 300, 100),
+       HOME_RECRUITING_DIFF = seq(-200, 200, 100)) %>%
+        mutate(id = row_number())
+
+# predict with
+preds= predict(lm_no_recruiting,
+        df,
+        interval = 'predict') %>%
+        as_tibble() %>%
+        mutate(method = "Elo") %>%
+        bind_cols(., df) %>%
+        bind_rows(.,
+                  predict(lm_recruiting,
+        df,
+        interval = 'predict') %>%
+        as_tibble() %>%
+        mutate(method = "Elo + Recruiting") %>%
+        bind_cols(., df)) %>%
+        select(id, method, HOME_ELO_DIFF, HOME_RECRUITING_DIFF, fit, lwr, upr)
+
+# without recruiting
+preds %>%
+        filter(method == 'Elo') %>%
+        mutate_if(is.numeric, round, 0) %>%
+        arrange(HOME_ELO_DIFF, HOME_RECRUITING_DIFF) %>%
+        select(-lwr, -upr, -id) %>%
+        spread(HOME_RECRUITING_DIFF, fit) %>%
+        flextable() %>%
+        autofit() %>%
+        add_header_row(top = T,
+                       values = c("", "", "HOME_RECRUITING_DIFF"),
+                       colwidths = c(1, 1, 5)) %>%
+        bg(j = c("-200", "-100", "0", "100", "200"),
+           bg = point_func)
+
+# predict with recruiting
+preds %>%
+        filter(method == 'Elo + Recruiting') %>%
+        mutate_if(is.numeric, round, 0) %>%
+        arrange(HOME_ELO_DIFF, HOME_RECRUITING_DIFF) %>%
+        select(-lwr, -upr, -id) %>%
+        spread(HOME_RECRUITING_DIFF, fit) %>%
+        flextable() %>%
+        autofit() %>%
+        add_header_row(top = T,
+                       values = c("", "", "HOME_RECRUITING_DIFF"),
+                       colwidths = c(1, 1, 5)) %>%
+        bg(j = c("-200", "-100", "0", "100", "200"),
+           bg = point_func)
+
+```
+
+```{r now use function}
+
+recruiting = recruiting_teams %>%
+        select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
+        rename(RECRUITING_SCORE = EMA)
+
+games_with_recruiting = valid_games %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "AWAY_TEAM"))
+
+```
+
+```{r calc with recruiting}
+
+assess_metrics = metric_set(yardstick::mn_log_loss,
+                           yardstick::accuracy)
+
+recruiting_weight_pars = seq(0, 1, 0.1)
+
+assess_valid = foreach(i = 1:length(recruiting_weight_pars),
+                       .combine = bind_rows) %do% {
+                               
+                                calc_elo_ratings_with_recruiting(games_with_recruiting,
+                                         recruiting_weight = recruiting_weight_pars[i],
+                                         teams = elo_train$teams,
+                                         team_seasons = elo_train$team_seasons,
+                                         reversion = selected_pars$reversion,
+                                         home_field_advantage = selected_pars$home_field_advantage,
+                                         k = selected_pars$k,
+                                         v = selected_pars$v
+                                         ) %$% game_outcomes %>%
+                                               mutate(recruiting_weight = recruiting_weight_pars[i])
+                       }
+
+assess_valid %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                               TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > AWAY_PROB ~ 'yes',
+                                             TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+        mutate(yes = HOME_PROB) %>%
+        mutate(fbs_in_game = case_when(HOME_DIVISION == 'fbs' | AWAY_DIVISION ==' fbs'  ~ T,
+                                       TRUE ~ F)) %>%
+        group_by(recruiting_weight) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                    estimate = HOME_PRED,
+                    event_level = 'second') %>%
+        filter(.metric == 'mn_log_loss') %>%
+        spread(.metric, .estimate) %>%
+        mutate_if(is.numeric, round, 3)
+      #  spread(fbs_in_game, .estimate)
+        # ggplot(aes(x=WEEK,
+        #            color = factor(recruiting_weight),
+        #            y = .estimate))+
+        # geom_point()+
+        # geom_line(stat = 'smooth',
+        #           formula = 'y ~ x',
+        #           method = 'loess',
+        #           span = 0.25)+
+        # scale_color_viridis_d()+
+        # facet_wrap(.metric ~.)+
+        # theme_phil()
+        # arrange(.estimate) %>%
+        # mutate_if(is.numeric, round, 3) %>%
+        # flextable() %>%
+        # autofit()
+
+```
+
+
+```{r simulate to get the distribution}
+
+boots_games_and_recruiting = bootstraps(
+        games_and_recruiting %>%
+        filter(SEASON > 2007) %>%
+        filter(SEASON < 2015),
+        times = 500) %>%
+        mutate(glm = map(splits, ~ glm(HOME_WIN ~ HOME_ELO_DIFF,
+                                         family = 'binomial',
+                                         data =analysis(.x)))) %>%
+        mutate(augmented = map(glm, augment, type.predict = 'response'))
+
+
+boots_games_and_recruiting %>%
+        select(id, augmented) %>%
+        unnest(augmented) %>%
+        mutate(HOME_WIN = case_when(HOME_WIN == 'yes' ~ 1,
+                                    TRUE ~ 0)) %>%
+        ggplot(., aes(x=HOME_ELO_DIFF,
+                      y= HOME_WIN))+
+        geom_line(aes(y = .fitted,
+                      group = id),
+                  lwd = 0.5,
+                      alpha = 0.2)+
+        theme_phil()+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        ggtitle("Home Win Probability = f(Elo)")
+      #  geom_jitter()
+                       
+        
+```
+
+
+
+```{r build points model with and without recruting differential}
+
+# train points model
+points_model = elo_train$game_outcomes %>%
+        filter(SEASON > 2007) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest() %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        pluck("lm",1)
+
+```
+
+
+
+
+
+## Team Recruiting Scores and Elo Ratings
+
+How can we use recruiting information in an Elo model? My initial thinking is to explore adjusting each team's preseason Elo score at the start of the season based on the talent on their roster (as proxied for by their rolling composite score). A team full of young, talented recruits might not have won many games, but the talent on their roster would make us think that they would be due to break through soon. We would expect teams that have been building talented rosters to punch above their Elo weight in future seasons. Similarly, if a team has graduated a lot of its talent, we would expect their Elo rating to drop soon. We're already handling this somewhat with mean reversion season over season, but that doesn't allow for the possibility that a team with a talented roster will overtake a team with a less talented roster.
+
+I only mention giving a boost to Elo at the start of the season because eventually a team will start to demonstrate its value on the field and their Elo rating will catch up. The question is whether we can adjust ratings at the beginning of the season so as to catch onto these types of teams faster.
+
+Here's how I plan to test this out. First, I'll get each team's Elo rating through 2014 using the methodology described so far.
+
+
+
+Next, I'll get each team's recruiting score in the lead up to these seasons. I only have a rolling recruiting score for each team starting in 2007, so I'll be looking at the years 2007-2014 in particular here. Recruiting overlaps with the season, so for a team's recruiting score I'll use a moving average of their previous (four) years, not including the current year. This means each team's recruiting score will be constant throughout the season. (Yes, I am aware of injuries and transfers, but this is a start.)
+
+Then, I'll look at how many wins 
+
+<!-- Each team will have an Elo rating at the **start** of the season, which is based on their previous seasons, and an Elo rating at the **end** of the season. For the years 2007-2014, I'll regress their **season end Elo** on their **season start Elo** and their **recruiting score**. If a team's recruiting score has a (positive) effect on a team's season end Elo, conditional on their starting Elo, we'll have some evidence in favor of adding a recruiting adjustment at the beginning of each season. -->
+
+
+<!-- This is the correlation between a team's ending Elo, year over year. Note: I'm not including FCS teams in this analysis, as I don't have readily available recruiting information for them and I've already set their initial ratings lower than FBS teams to account for the talent gap. If we were to penalize them again for having low recruiting scores, they would just get pulled down further at the start of every year. -->
+
+```{r join recruiting info with elo ratings}
+
+teams_elo_and_recruiting = elo_train$team_outcomes %>%
+        arrange(GAME_DATE) %>%
+        left_join(., recruiting_teams_averages %>%
+                          select(-CONFERENCE),
+              by = c("TEAM", "SEASON")) %>%
+        # remove FCS teams, as we don't have season long totals for these teams
+        filter(!is.na(CONFERENCE)) %>%
+        arrange(TEAM, GAME_DATE) %>%
+        filter(SEASON >= 2007) %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(GAME_NUMBER = row_number()) %>%
+        select(SEASON, TEAM, CONFERENCE, GAME_NUMBER, PREGAME_ELO, POSTGAME_ELO, RECRUITING_POINTS, EMA, WMA) %>%
+        ungroup()
+
+games_elo_and_recruiting = elo_train$game_outcomes %>%
+        filter(SEASON > 2006) %>%
+        left_join(., recruiting_teams_averages %>%
+                          select(SEASON, TEAM, RECRUITING_POINTS, EMA, WMA) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING = RECRUITING_POINTS,
+                                 HOME_RECRUITING_EMA = EMA,
+                                 HOME_RECRUITING_WMA = WMA),
+                  by = c("HOME_TEAM", "SEASON")) %>%
+        left_join(., recruiting_teams_averages %>%
+                          select(SEASON, TEAM, RECRUITING_POINTS, EMA, WMA) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING = RECRUITING_POINTS,
+                                 AWAY_RECRUITING_EMA = EMA,
+                                 AWAY_RECRUITING_WMA = WMA),
+                  by = c("AWAY_TEAM", "SEASON")) %>%
+        # replace missing with 0 for teams that have no observed recruiting
+        mutate_at(vars(contains("RECRUITING")),
+                  ~ replace_na(.,0)) %>%
+        mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING - AWAY_RECRUITING,
+               HOME_RECRUITING_EMA_DIFF = HOME_RECRUITING_EMA - AWAY_RECRUITING_EMA,
+               HOME_RECRUITING_WMA_DIFF = HOME_RECRUITING_WMA - AWAY_RECRUITING_WMA) %>%
+        mutate(HOME_ELO_DIFF = HOME_PREGAME_ELO + selected_pars$home_field_advantage - AWAY_PREGAME_ELO) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS)
+
+```
+
+For the seasons 2007 to 2015, I'll model the home point differential as before, but I'll now run a version with and without recruiting.
+
+```{r look at recruting in points model}
+
+points_without_recruiting = games_elo_and_recruiting %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) 
+
+
+points_with_recruiting = games_elo_and_recruiting %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF + HOME_RECRUITING_WMA_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) 
+
+```
+
+
+```{r }
+
+# teams_elo_and_recruiting %>%
+#         mutate(Change = Elo_Season_End - Elo_Last_Season_End) %>%
+#         ggplot(., aes(x=Elo_Last_Season_End,
+#                       color = WMA_Diff,
+#                       label = TEAM,
+#                       y=Elo_Season_End))+
+#         geom_point()+
+#         geom_text(check_overlap = T,
+#                   vjust = -1)+
+#         facet_wrap(SEASON ~.)+
+#         theme_phil()+
+#         geom_abline()+
+#         scale_color_gradient2(low = "red",
+#                               mid = "grey80",
+#                               high = "deepskyblue1",
+#                               midpoint = 150,
+#                               limits = c(50, 250),
+#                               oob = scales::squish)+
+#         theme(legend.title = element_text()) +
+#         guides(color = guide_colorbar(title = 'Season, Recruiting Score',
+#                                       title.position = 'top',
+#                                       barheight =0.5,
+#                                       barwidth = 10))
+# 
+# teams_elo_and_recruiting %>%
+#         filter(CONFERENCE == 'SEC') %>%
+#         mutate(Elo_Change = Elo_Season_End - Elo_Last_Season_End) %>%
+#         ggplot(., aes(x=WMA,
+#                       label = TEAM,
+#                       y=Elo_Change))+
+#         geom_point()+
+#         geom_text(check_overlap = T,
+#                   vjust = -1)+
+#         facet_wrap(SEASON ~.)+
+#         theme_phil()+
+#        # geom_abline()+
+#         stat_cor(p.accuracy = 0.01)+
+#         geom_smooth(method = 'lm',
+#                     formula = 'y ~ x')
+# 
+# teams_elo_and_recruiting %>%
+#         mutate(Change = Elo_Season_End - Elo_Last_Season_End) %>%
+#         arrange(desc(Change)) %>%
+#         mutate_if(is.numeric, round, 0) %>%
+#         select(SEASON, TEAM, Elo_Season_End, Elo_Last_Season_End, Change, RECRUITING_POINTS, EMA, WMA)
+#         
+        
+```
+
+```{r regress ema on wins}
+
+lm_wins = teams_elo_and_recruiting %>%
+        mutate(Wins_Last_Season = Wins_Last_Season - mean(Wins_Last_Season),
+               EMA = EMA - mean(EMA),
+               Elo_Last_Season_End = Elo_Last_Season_End - mean(Elo_Last_Season_End)) %>%
+        nest() %>%
+        mutate(lm = map(data,
+                        ~ lm(Wins_Season ~ Wins_Last_Season + Elo_Last_Season_End + EMA,
+                             data = .x))) %>%
+        mutate(nb = map(data,
+                        ~ glm.nb(Wins_Season ~ Wins_Last_Season + Elo_Last_Season_End + EMA,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se="robust", conf.int=T)) %>%
+        mutate(glanced = map(lm, glance))
+
+lm_wins %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) 
+
+# %>%
+#         mutate_at(c("estimate", "conf.low", "conf.high"),
+#                   ~ exp(.))
+
+```
+
+
+
+Now, I'll regress Elo End on Elo Start, with and without recruiting for FBS teams. To make this a bit easier to interpret, I'll center the predictors at zero so that the intercept will indicate the average Elo rating for teams at the end of the season.
+
+The first model looks at predicting a team's season ending Elo using just its starting Elo. The model indicates that a team with an average Elo at the start of the year will end up with a rating of around 1520, with each additional point above on starting Elo the mean increasing their ending Elo by .92. This should make sense: where you end up is on average a function of where you start, and knowing your starting Elo explains a little under 70% of the ending Elo.
+
+```{r regress elo end on elo start}
+
+without_recruiting_lm = teams_elo_and_recruiting %>%
+        mutate(Elo_Start = Elo_Start - mean(Elo_Start),
+               EMA = EMA - mean(EMA)) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(Elo_End ~ Elo_Start,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm,
+                            tidy,
+                            conf.int=T, se="robust")) %>%
+        mutate(glanced = map(lm, glance)) 
+
+without_recruiting_lm %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+without_recruiting_lm %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(r.squared, sigma, nobs)
+
+```
+
+Now, looking at the model that includes recruiting, we can see that the coefficient for Elo Start has dropped slightly, down to .76, and the coefficient on Elo is .8. This means, functionally, that each additional point above the average on a team's recruiting score is worth an additional .8 Elo points at the end of the season, holding the starting Elo rating constant.
+
+```{r now look at effects }
+
+with_recruiting_lm = teams_elo_and_recruiting %>%
+        mutate(Elo_Start = Elo_Start - mean(Elo_Start),
+               EMA = EMA - mean(EMA)) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(Elo_End ~ Elo_Start + EMA,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm,
+                            tidy,
+                            conf.int=T, se="robust")) %>%
+        mutate(glanced = map(lm, glance))
+
+with_recruiting_lm %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3)
+
+with_recruiting_lm %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(r.squared, sigma, nobs)
+
+```
+
+For our purposes, this means that we can look at adjusting teams slightly at the beginning of each season based on their recruiting talent going into the season. For instance, if we had adjusted teams at the start of the 2007 season based on their recruiting score going into the season, here is how the Elo ratings compare.
+
+```{r above and below average teams in }
+
+teams_elo_and_recruiting %>%
+        filter(SEASON == 2007) %>%
+        rename(Elo = Elo_Start) %>%
+        select(SEASON, TEAM, CONFERENCE, EMA, Elo) %>%
+        arrange(desc(Elo)) %>%
+        group_by(SEASON) %>%
+        mutate(EMA = EMA - mean(EMA)) %>%
+        mutate(Elo_Recruiting= Elo + (EMA*.7)) %>%
+        rename(Recruiting = EMA) %>%
+        ungroup() %>%
+        mutate(Diff = Elo_Recruiting-Elo) %>%
+        gather("type", "value",
+               -SEASON, -TEAM, -CONFERENCE, -Recruiting, -Diff) %>%
+        mutate(TEAM_LABEL = case_when(type == 'Elo_Recruiting' ~ TEAM)) %>%
+        ggplot(., aes(x=Recruiting,
+                      label = TEAM_LABEL,
+                      shape = type,
+                      color = Diff,
+                      by = type,
+                      y = value))+
+        geom_point()+
+        geom_line(aes(group = TEAM))+
+        geom_text(check_overlap = T,
+                  size = 3,
+                  vjust = -1)+
+        theme_phil()+
+        facet_wrap(SEASON~.)+
+        geom_hline(yintercept = 1580,
+                   linetype = 'dashed')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        scale_color_gradient2(low = "red",
+                              mid = "grey80",
+                              high = "deepskyblue1",
+                              limit = c(-50, 50),
+                              oob = scales::squish)+
+        guides(color = "none")+
+        scale_shape_manual(values = c(1, 16))+
+        xlab("Team Recruiting Score")+
+        ylab("Team Elo Rating")
+
+```
+
+The ratings don't change all that dramatically, as weaker teams get pulled down slightly and stronger teams get pulled up slightly. Where this might help us is with teams that performed poorly in the previous season but had the talent to succeed in the upcoming season.
+
+```{r table for 2007 season}
+
+adjust_func = 
+        function(x) {
+                
+                breaks = c(-200, -150, -100, -50, -25, -5, 0, 5, 25, 50, 100, 150, 200)
+                colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
+                col_palette <- colorRamp(length(breaks))
+                mycut <- cut(x, 
+                             breaks = breaks,
+                             include.lowest = TRUE, 
+                             right=T,
+                             label = FALSE)
+                col_palette[mycut]
+                
+        }
+
+teams_elo_and_recruiting %>%
+        filter(SEASON == 2007) %>%
+        rename(Elo = Elo_Start) %>%
+        select(SEASON, TEAM, CONFERENCE, EMA, Elo) %>%
+        arrange(desc(Elo)) %>%
+        mutate(Elo_Rank = row_number()) %>%
+        group_by(SEASON) %>%
+        mutate(EMA = EMA - mean(EMA)) %>%
+        ungroup() %>%
+        mutate(Elo_Recruiting= Elo + (EMA*.7)) %>%
+        rename(Recruiting = EMA) %>%
+        mutate_if(is.numeric, round, 0) %>%
+        arrange(desc(Recruiting)) %>%
+        mutate(Recruiting_Rank = row_number()) %>%
+        arrange(desc(Elo_Recruiting)) %>%
+        mutate(Elo_Recruiting_Rank = row_number()) %>%
+        mutate(Diff = Elo_Recruiting  - Elo,
+               Rank_Diff = Elo_Recruiting_Rank - Elo_Rank) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        select(-CONFERENCE) %>%
+        select(SEASON, TEAM, Recruiting, Elo, Elo_Recruiting, Diff, Elo_Rank, Elo_Recruiting_Rank) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j=c("Diff"),
+           bg = adjust_func)
+
+```
+
+Alternatively, we might end up worse off here because it might overly penalize teams like Boise State that were consistently strong despite their recruiting being below average, and overly help teams that later underperformed for their recruiting level (Texas).
+
+```{r adjustment at the start of each of these seasons}
+
+teams_elo_and_recruiting %>%
+        rename(Elo = Elo_Start) %>%
+        select(SEASON, TEAM, CONFERENCE, EMA, Elo) %>%
+        arrange(desc(Elo)) %>%
+        group_by(SEASON) %>%
+        mutate(EMA = EMA - mean(EMA)) %>%
+        mutate(Elo_Recruiting= Elo + (EMA*.7)) %>%
+        rename(Recruiting = EMA) %>%
+        ungroup() %>%
+        mutate(Diff = Elo_Recruiting-Elo) %>%
+        gather("type", "value",
+               -SEASON, -TEAM, -CONFERENCE, -Recruiting, -Diff) %>%
+        mutate(TEAM_LABEL = case_when(type == 'Elo_Recruiting' ~ TEAM)) %>%
+        ggplot(., aes(x=Recruiting,
+                      label = TEAM_LABEL,
+                      shape = type,
+                      color = Diff,
+                      by = type,
+                      y = value))+
+        geom_point()+
+        geom_line(aes(group = TEAM))+
+        geom_text(check_overlap = T,
+                  size = 3,
+                  vjust = -1)+
+        theme_phil()+
+        facet_wrap(SEASON~.)+
+        geom_hline(yintercept = 1580,
+                   linetype = 'dashed')+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        scale_color_gradient2(low = "red",
+                              mid = "grey80",
+                              high = "deepskyblue1",
+                              limit = c(-50, 50),
+                              oob = scales::squish)+
+        guides(color = "none")+
+        scale_shape_manual(values = c(1, 16))+
+        xlab("Team Recruiting Score")+
+        ylab("Team Elo Rating")
+
+```
+
+## Evaluate Elo vs Elo + Recruiting
+
+Which wins out? Well this is ultimately an empirical question. We'll add the preseason recruiting adjustment as another parameter and see how we do with or without it.
+
+```{r create our recruiting dataset}
+
+recruiting = recruiting_teams_raw %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        # remove fcs teams
+        filter(!is.na(CONFERENCE)) %>%
+        # remove teams for which we have less than 4 years data
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        select(-n) %>%
+        # compute ema over a 4 year window
+        mutate(RECRUITING_EMA= EMA(RECRUITING_POINTS, n =4)) %>%
+        # if a team is missing over this time period but it is obdserved, then fill it in with their actual value
+        mutate(RECRUITING_EMA = case_when(is.na(RECRUITING_EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ RECRUITING_EMA)) %>%
+        arrange(TEAM, YEAR) %>%
+        # now make our score lag by a year; i'll accomplish this by making SEASON = YEAR + 1
+        group_by(TEAM) %>%
+        # lag recruiting by a year
+        mutate(SEASON = dplyr::lead(YEAR, 1)) %>%
+        # now fill in the missing seasons, as this will be the year +1
+        mutate(SEASON = case_when(is.na(SEASON) ~ dplyr::lag(SEASON+1, 1),
+                                  TRUE ~ SEASON)) %>%
+        # this was such a dumb way to do this just to avoid having to type "SEASON" = "YEAR"
+        ungroup() %>%
+        # now normalize by season, so recruiting score is how far above or below average a team is going into that year
+        group_by(SEASON) %>%
+        mutate(RECRUITING_SCORE = RECRUITING_EMA - mean(RECRUITING_EMA)) %>%
+        ungroup()
+
+# recruiting %>%
+#         filter(SEASON == 2022) %>%
+#         arrange(desc(RECRUITING_SCORE))
+        
+```
+
+I'll now tune the recruiting parameter over the seasons 2007 to 2015.
+
+```{r now calc ratings with recruiting parameter}
+
+source(here::here("functions", "calc_elo_ratings_with_recruiting.R"))
+
+recruiting_pars = c(0, 0.25, 0.5, 0.75)
+
+# now get the elo ratings based on this training set
+elo_valid = calc_elo_ratings(valid_games,
+                             teams = elo_train$teams,
+                             team_seasons = elo_train$team_seasons,
+                  home_field_advantage = selected_pars$home_field_advantage,
+                  reversion = selected_pars$reversion,
+                  k = selected_pars$k,
+                  v = selected_pars$v,
+                  verbose = T)
+
+# # now get the elo ratings based on this training set
+# elo_train_with_recruiting = calc_elo_ratings_with_recruiting(games = train_games,
+#                                              recruiting = recruiting,
+#                   home_field_advantage = selected_pars$home_field_advantage,
+#                   reversion = selected_pars$reversion,
+#                   recruiting_adjustment = 0.5,
+#                   k = selected_pars$k,
+#                   v = selected_pars$v,
+#                   verbose = T)
+
+# now get the validation set
+elo_valid_with_recruiting = calc_elo_ratings_with_recruiting(games = valid_games,
+                                            teams = elo_train$teams,
+                                            team_seasons = elo_train$team_seasons,
+                                             recruiting = recruiting,
+                                                  home_field_advantage = selected_pars$home_field_advantage,
+                                                  reversion = selected_pars$reversion,
+                                                  recruiting_adjustment = 0.5,
+                                                  k = selected_pars$k,
+                                                  v = selected_pars$v,
+                                                  verbose = T)
+
+```
+
+```{r now compare how they did}
+
+compare_with_recruiting = bind_rows(
+        elo_valid$game_outcomes %>%
+                mutate(method = 'Elo') %>%
+                mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                               TRUE ~ 'no'))) %>%
+                mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                                TRUE ~ 'no')) %>%
+                mutate(yes = HOME_PROB) %>%
+                group_by(method, SEASON) %>%
+                assess_metrics(truth = HOME_WIN,
+                               yes,
+                               estimate = HOME_PRED,
+                               event_level = 'second') %>%
+                mutate_if(is.numeric, round, 3),
+        elo_valid_with_recruiting$game_outcomes %>%
+                mutate(method = 'Elo + Recruiting') %>%
+                mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                               TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                               TRUE ~ 'no'))) %>%
+                mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                                TRUE ~ 'no')) %>%
+                mutate(yes = HOME_PROB) %>%
+                group_by(method, SEASON) %>%
+                assess_metrics(truth = HOME_WIN,
+                               yes,
+                               estimate = HOME_PRED,
+                               event_level = 'second') %>%
+                mutate_if(is.numeric, round, 3))
+
+compare_with_recruiting %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        filter(.metric == 'accuracy') %>%
+        select(-.estimator) %>%
+        spread(method, .estimate) %>%
+        flextable()
+
+compare_with_recruiting %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        filter(.metric != 'accuracy') %>%
+        select(-.estimator) %>%
+        spread(method, .estimate) %>%
+        flextable()
+        
+```
+
+The real assessment here is in simulating a season.
+
+```{r simulate the 2010 season with and without} 
+
+source(here::here("functions", "sim_elo_ratings_with_recruiting.R"))
+
+rm(sim_seasons,
+   sim_team_outcomes,
+   sim_game_outcomes)
+
+set.seed(1999)
+sim_seasons = future_replicate(1000,
+                  sim_elo_ratings(valid_games %>%
+                                          filter(SEASON == 2016),
+                                  teams = elo_train$teams,
+                                  team_seasons = elo_train$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+set.seed(1999)
+sim_seasons_with_recruiting = future_replicate(1000,
+                  sim_elo_ratings_with_recruiting(valid_games %>%
+                                          filter(SEASON == 2016),
+                                          recruiting = recruiting,
+                                  teams = elo_train$teams,
+                                  team_seasons = elo_train$team_seasons,
+                                  home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  recruiting_adjustment = .5,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose=F,
+                                  ties =F,
+                                  points_model = points_model))
+
+```
+
+```{r examine 2016}
+
+# get outcomes into data frames
+sim_team_outcomes = rbindlist(sim_seasons['team_outcomes',],
+          idcol = T)
+
+sim_game_outcomes = rbindlist(sim_seasons['game_outcomes',],
+                              idcol = T)
+
+# get outcomes into data frames
+sim_team_outcomes_with_recruiting = rbindlist(sim_seasons_with_recruiting['team_outcomes',],
+          idcol = T)
+
+sim_game_outcomes_with_recruiting = rbindlist(sim_seasons_with_recruiting['game_outcomes',],
+                              idcol = T)
+
+```
+
+```{r sime game outcomes}
+
+plot_elo_team_season(sim_team_outcomes = sim_team_outcomes,
+                     season = 2016,
+                     team = 'Texas A&M',
+                     week = 14)
+
+plot_elo_team_season(sim_team_outcomes = sim_team_outcomes_with_recruiting,
+                     season = 2016,
+                     team = 'Kansas',
+                     week = 14)
+
+```
+
+Compare win totals.
+
+```{r compare}
+bind_rows(
+        sim_game_outcomes %>%
+        mutate(method = 'Elo') %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(method, GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        mutate(yes = HOME_PROB),
+                sim_game_outcomes_with_recruiting %>%
+        mutate(method = 'Elo + Recruiting') %>%
+        mutate(HOME_PRED = case_when(HOME_MARGIN >0 ~ 1,
+                                     TRUE ~ 0)) %>%
+        group_by(method, GAME_ID, SEASON, WEEK, GAME_DATE, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS) %>%
+        summarize(HOME_PROB = sum(HOME_PRED) / n(),
+                  PRED_MARGIN = mean(HOME_MARGIN),
+                  .groups = 'drop') %>%
+        mutate(AWAY_PROB = 1-HOME_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        mutate(yes = HOME_PROB)) %>%
+        group_by(SEASON, method) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+ 
+```
+
+
+```{r exd}
+
+# get results for all teams
+bind_rows(
+sim_team_outcomes %>%
+        mutate(method = 'Elo') %>%
+        filter(!is.na(CONFERENCE)) %>%
+        left_join(., valid_games %>%
+                          mutate(WINNER = case_when(HOME_POINTS > AWAY_POINTS ~ HOME_TEAM, TRUE ~ AWAY_TEAM)) %>%
+                          select(GAME_ID, WINNER),
+                  by = c("GAME_ID")) %>%
+        mutate(WIN = case_when(TEAM == WINNER ~ 1,
+                               TRUE ~ 0)) %>%
+        mutate(PRED_WIN = case_when(MARGIN >0 ~ 1,
+                                    TRUE ~ 0)) %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, .id) %>%
+        summarize(pred_wins = sum(PRED_WIN),
+                  actual_wins = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, actual_wins) %>%
+        summarize(mean_wins= mean(pred_wins),
+                  mode_wins = mode_func(pred_wins),
+                  .groups = 'drop'),
+sim_team_outcomes_with_recruiting %>%
+        mutate(method = 'Elo + Recruiting') %>%
+        filter(!is.na(CONFERENCE)) %>%
+        left_join(., valid_games %>%
+                          mutate(WINNER = case_when(HOME_POINTS > AWAY_POINTS ~ HOME_TEAM, TRUE ~ AWAY_TEAM)) %>%
+                          select(GAME_ID, WINNER),
+                  by = c("GAME_ID")) %>%
+        mutate(WIN = case_when(TEAM == WINNER ~ 1,
+                               TRUE ~ 0)) %>%
+        mutate(PRED_WIN = case_when(MARGIN >0 ~ 1,
+                                    TRUE ~ 0)) %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, .id) %>%
+        summarize(pred_wins = sum(PRED_WIN),
+                  actual_wins = sum(WIN),
+                  .groups = 'drop') %>%
+        group_by(method, SEASON, CONFERENCE, TEAM, actual_wins) %>%
+        summarize(mean_wins= mean(pred_wins),
+                  mode_wins = mode_func(pred_wins),
+                  .groups = 'drop')) %>%
+        group_by(method, SEASON) %>%
+        yardstick::rmse(truth = actual_wins,
+                        estimate = mean_wins)
+
+```
+
+```{r compare sim outcomes}
+
+table_wins_season(sim_team_outcomes = sim_team_outcomes,
+                  season = 2016)
+
+table_wins_season(sim_team_outcomes = sim_team_outcomes_with_recruiting,
+                  season = 2016, 
+                  week = 14)
+
+table_wins_conference_season(sim_team_outcomes = sim_team_outcomes_with_recruiting,
+                             conference = 'Big Ten',
+                             season = 2016, 
+                             week = 14)
+
+```
+
+
+
