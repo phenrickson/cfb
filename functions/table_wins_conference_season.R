@@ -108,7 +108,7 @@ function (sim_team_outcomes,
                 bg(., j = paste(win_counts),
                    bg = col_func) %>%
                 add_header_row(.,
-                               values = c("","", paste("Probability of Win Totals for", conference)),
+                               values = c("","", paste("Simulated Win Totals for", conference, season, "Regular")),
                                colwidths = c(1, 2, max(win_counts))) %>%
                 flextable::align(j = c(paste(seq(0, max(win_counts), 1))),
                                  part = "all",

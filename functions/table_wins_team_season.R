@@ -2,12 +2,13 @@ table_wins_team_season <-
 function(sim_team_outcomes,
                                   games,
                                   team,
-                                  season) {
+                                  season,
+                                  input_teamcolors = teamcolors) {
         
         # get teams primary color
-        team_color = teamcolors %>%
-                filter(league == 'ncaa') %>%
-                filter(location == team) %>%
+        team_color = input_teamcolors %>%
+             #   filter(league == 'ncaa') %>%
+                filter(TEAM == team) %>%
                 mutate(TEAM = location) %>%
                 pull(primary)
         
@@ -15,7 +16,7 @@ function(sim_team_outcomes,
         team_col_func = 
                 function(x) {
                         
-                        breaks = seq(0, 1.3, 0.1)
+                        breaks = seq(0, 1.5, 0.1)
                         colorRamp=colorRampPalette(c("white", team_color))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
@@ -61,9 +62,12 @@ function(sim_team_outcomes,
                 group_by(SEASON, GAME_DATE, WEEK, OPPONENT, TEAM) %>% 
                 summarize(wins = sum(win), 
                           games = n(),
-                          margin = round(median(SIM_MARGIN), 0),
+                          margin = round(median(SIM_MARGIN), 1),
                           .groups = 'drop') %>%
                 mutate(perc = round(wins / games, 3)) %>%
+                mutate(perc = case_when(perc == 1 ~ (games-1)/100,
+                                        perc == 0 ~ (1-games)/100,
+                                        TRUE ~ perc)) %>%
                 mutate(expected_win = case_when(perc > .5 ~ 'W',
                                                 TRUE ~ 'L')) %>%
                 select(SEASON, WEEK, GAME_DATE, TEAM, OPPONENT, perc, margin) %>%
