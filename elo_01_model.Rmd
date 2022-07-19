@@ -373,7 +373,7 @@ elo_returned$team_outcomes %>%
                       label = TEAM_LABEL,
                       color = name,
                       y=POSTGAME_ELO))+
-       geom_text_repel(
+t       geom_text_repel(
                fontface = "bold",
                size = 2.5,
                direction = "y",

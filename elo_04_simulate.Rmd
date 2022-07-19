@@ -1,8 +1,15 @@
 ---
-title: "Simulating CFB Seasons"
+title: "Adding Recruiting to CFB Elo Ratings"
 author: "Phil Henrickson"
-date: "7/7/2022"
-output: html_document
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
 ---
 
 ```{r setup, include=FALSE}
@@ -12,12 +19,11 @@ knitr::opts_chunk$set(echo = F,
                       warning=F,
                       dev="png",
                       fig.width = 10,
-                      fig.height = 8)
+                      fig.height = 6)
 
 options(knitr.duplicate.label = "allow")
 
 options(scipen=999)
-
 
 ```
 
@@ -52,22 +58,18 @@ conflict_prefer("lag", "dplyr")
 # load teamcolors
 teamcolors = teamcolors %>%
         mutate(location = case_when(location == 'Ole' ~ name,
+                                    location == 'Southern California Trojans' ~ 'USC',
                                     location == 'Miami' & name == 'Miami (OH)' ~ name,
-                                    TRUE ~ location))
+                                    TRUE ~ location)) %>%
+        bind_rows(., 
+                  teams_raw %>%
+                          filter(TEAM == 'SMU' | TEAM == 'USC') %>%
+                          mutate(name = TEAM,
+                                 location = TEAM) %>%
+                          rename(primary = COLOR,
+                                 secondary = ALT_COLOR))
 
 ```
-
-```{r get colors for ncaa teams}
-
-# look at colors for ncca
-ncaa_colors = teamcolors %>%
-        filter(league == 'ncaa') 
-
-# define palette for ncaa
-#league_pal("ncaa", 1)
-
-```
-
 
 ```{r flextable settings}
 
@@ -91,106 +93,93 @@ int_breaks <- function(x, n = 5) {
 }
 
 source(here::here("functions/theme_phil.R"))
+source(here::here("functions/calc_elo_ratings.R"))
+source(here::here("functions/get_expected_score.R"))
+source(here::here("functions/get_new_elos.R"))
+source(here::here("functions/calc_elo_ratings_with_recruiting.R"))
+source(here::here("functions/plot_elo_historical_team.R"))
+source(here::here("functions", "simulateX.R"))
+source(here::here("functions", "sim_game_margin.R"))
+source(here::here("functions", "sim_elo_ratings.R"))
 rm(a)
 
 ```
 
-```{r load and tidy games}
+```{r get the games data}
+
+# data on teams with logos and colors
+teams_raw = bind_rows(
+        DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble())  %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
 
 # get games
-games_data_raw = DBI::dbGetQuery(myconn,
-                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.GAMES')) %>%
+games_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
         as_tibble() %>%
         mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
                                            CONFERENCE_GAME == 'false' ~ F)) %>%
-        # remove extraneous conferences
-        mutate(ID = as.numeric(ID)) %>%
-        rename(GAME_ID = ID) %>%
-        mutate(GAME_DATE = as.Date(START_DATE))
-
-# get list of conferences that only appear in 2022
-fbs_conferences = c(
-        games_data_raw %>% 
-                filter(SEASON <=2022) %>%
-                group_by(SEASON, HOME_CONFERENCE) %>%
-                count() %>% group_by(HOME_CONFERENCE) %>%
-                mutate(seasons = n_distinct(SEASON)) %>%
-                ungroup() %>%
-                filter(seasons != 1) %>% 
-                filter(!is.na(HOME_CONFERENCE)) %>%
-                pull(HOME_CONFERENCE), 
-        games_data_raw %>% 
-                filter(SEASON <=2022) %>%
-                group_by(SEASON, AWAY_CONFERENCE) %>%
-                count() %>% group_by(AWAY_CONFERENCE) %>%
-                mutate(seasons = n_distinct(SEASON)) %>%
-                ungroup() %>%
-                filter(seasons != 1) %>%
-                filter(!is.na(AWAY_CONFERENCE)) %>%
-                pull(AWAY_CONFERENCE)) %>%
-        unique()
-
-# list of new conferences
-fcs_conferences = c(games_data_raw %>% 
-                filter(SEASON <=2022) %>%
-                group_by(SEASON, HOME_CONFERENCE) %>%
-                count() %>% group_by(HOME_CONFERENCE) %>%
-                mutate(seasons = n_distinct(SEASON)) %>%
-                ungroup() %>%
-                filter(seasons == 1) %>%
-                pull(HOME_CONFERENCE), 
-        games_data_raw %>% 
-                filter(SEASON <=2022) %>%
-                group_by(SEASON, AWAY_CONFERENCE) %>%
-                count() %>% group_by(AWAY_CONFERENCE) %>%
-                mutate(seasons = n_distinct(SEASON)) %>%
-                ungroup() %>%
-                filter(seasons == 1) %>%
-                pull(AWAY_CONFERENCE)) %>%
-        unique()
-
-# add flag for fbs game
-games_data_tidied = games_data_raw %>%
         mutate(GAME_DATE = as.Date(START_DATE)) %>%
-        mutate(GAME_MONTH = lubridate::month(GAME_DATE)) %>%
-        arrange(GAME_DATE) %>%
-        # group_by(SEASON, HOME_CONFERENCE) %>%
-        # mutate(CONFERENCE_LAST_WEEK = max(WEEK)) %>%
-        # ungroup() %>%
-        # mutate(CONFERENCE_CHAMPIONSHIP = case_when(WEEK == LAST_WEEK 
-        #                                                    CONFERENCE_GAME == T
-        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T &
-                                                           (HOME_CONFERENCE != 'FBS Independents') &
-                                                           NEUTRAL_SITE == T &
-                                                           WEEK > 11 ~ T, TRUE ~ F)) %>%
-        mutate(FBS_GAME = (HOME_CONFERENCE%in% fbs_conferences | AWAY_CONFERENCE %in% fbs_conferences) | SEASON <= 1954) %>%
-        # filter(!(HOME_CONFERENCE %in% fcs_conferences)) %>%
-        # filter(!(AWAY_CONFERENCE %in% fcs_conferences)) %>%
-        mutate(HOME_CONFERENCE = case_when(HOME_CONFERENCE %in% fcs_conferences ~ NA_character_,
-                                           TRUE ~ HOME_CONFERENCE)) %>%
-        mutate(AWAY_CONFERENCE = case_when(HOME_CONFERENCE %in% fcs_conferences ~ NA_character_,
-                                           TRUE ~ AWAY_CONFERENCE))
-
-# flag conference championships
-games_data_tidied %>%
-        filter(SEASON > 1998 & SEASON < 2022) %>%
-        filter(!((HOME_CONFERENCE %in% 'Big Ten') & SEASON < 2011)) %>%
-        group_by(SEASON, HOME_CONFERENCE) %>%
-        mutate(CONFERENCE_LAST_WEEK = max(WEEK)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
         ungroup() %>%
-        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T &
-                                                           WEEK == CONFERENCE_LAST_WEEK &
-                                                           (HOME_CONFERENCE != 'FBS Independents') &
-                                                           (NEUTRAL_SITE == T | (is.na(VENUE_ID) & SEASON > 2000)) & 
-                                                           WEEK > 11 ~ T, TRUE ~ F)) %>%
-        filter(CONFERENCE_CHAMPIONSHIP == T) %>%
-        rename(CONFERENCE = HOME_CONFERENCE) %>%
-        select(GAME_ID, SEASON, WEEK, CONFERENCE_GAME, CONFERENCE, HOME_TEAM, AWAY_TEAM)
+        # logic for flagging conference championship games
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    HOME_POINTS < AWAY_POINTS ~ 'no',
+                                    HOME_POINTS == AWAY_POINTS ~ 'no'),
+               levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# make a table of team conference by season
+team_conference_season = games_raw %>% 
+        select(SEASON, HOME_TEAM, HOME_CONFERENCE, HOME_DIVISION) %>% 
+        rename(TEAM = HOME_TEAM, 
+               CONFERENCE = HOME_CONFERENCE,
+               DIVISION = HOME_DIVISION) %>% 
+        bind_rows(.,
+            games_raw %>%
+                    select(SEASON, AWAY_TEAM, AWAY_CONFERENCE, AWAY_DIVISION) %>% 
+                    rename(TEAM = AWAY_TEAM, 
+                           CONFERENCE = AWAY_CONFERENCE,
+                           DIVISION = AWAY_DIVISION)) %>%
+        select(SEASON, TEAM, CONFERENCE, DIVISION) %>%
+        unique()
 
 ```
 
-
-```{r get games}
+```{r get recruiting data}
 
 # recruiting
 recruiting_teams_raw = DBI::dbGetQuery(myconn,
@@ -199,66 +188,14 @@ recruiting_teams_raw = DBI::dbGetQuery(myconn,
         mutate(POINTS = as.numeric(POINTS)) %>%
         rename(RECRUITING_POINTS = POINTS)
 
-
-# make a table of team conference by season
-team_conference_season = games_data_raw %>% 
-  select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>% 
-  rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>% 
-  bind_rows(.,
-            games_data_raw %>%
-                    select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>% 
-                    rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>%
-  select(SEASON, TEAM, CONFERENCE) %>%
-  unique()
-
-# now make our recruiting table
-recruiting = recruiting_teams_raw %>%
-        filter(YEAR > 2001) %>%
-        left_join(., team_conference_season,
-                  by = c("YEAR"="SEASON", "TEAM")) %>%
-        # remove fcs teams
-        filter(!is.na(CONFERENCE)) %>%
-        # remove teams for which we have less than 4 years data
-        group_by(TEAM) %>%
-        mutate(n = n()) %>%
-        filter(n > 4) %>%
-        select(-n) %>%
-        # compute ema over a 4 year window
-        mutate(RECRUITING_EMA= EMA(RECRUITING_POINTS, n =4)) %>%
-        # if a team is missing over this time period but it is obdserved, then fill it in with their actual value
-        mutate(RECRUITING_EMA = case_when(is.na(RECRUITING_EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
-                                  TRUE ~ RECRUITING_EMA)) %>%
-        arrange(TEAM, YEAR) %>%
-        # now make our score lag by a year; i'll accomplish this by making SEASON = YEAR + 1
-        group_by(TEAM) %>%
-        # lag recruiting by a year
-        mutate(SEASON = dplyr::lead(YEAR, 1)) %>%
-        # now fill in the missing seasons, as this will be the year +1
-        mutate(SEASON = case_when(is.na(SEASON) ~ dplyr::lag(SEASON+1, 1),
-                                  TRUE ~ SEASON)) %>%
-        # this was such a dumb way to do this just to avoid having to type "SEASON" = "YEAR"
-        ungroup() %>%
-        # now normalize by season, so recruiting score is how far above or below average a team is going into that year
-        group_by(SEASON) %>%
-        mutate(RECRUITING_SCORE = RECRUITING_EMA - mean(RECRUITING_EMA)) %>%
-        ungroup()
-
 ```
-
-```{r rm what we dont need}
-
-rm(games_data_raw,
-   recruiting_teams_raw)
-
-```
-
-
 
 ```{r get elo functions}
 
 source(here::here("functions/get_expected_score.R"))
 source(here::here("functions/get_new_elos.R"))
 source(here::here("functions/calc_elo_ratings.R"))
+source(here::here("functions/calc_elo_ratings_with_recruiting"))
 source(here::here("functions", "simulateX.R"))
 source(here::here("functions", "sim_game_margin.R"))
 source(here::here("functions", "sim_elo_ratings.R"))
@@ -267,14 +204,13 @@ source(here::here("functions", "sim_elo_ratings.R"))
 source(here::here("functions", "calc_elo_ratings_with_recruiting.R"))
 source(here::here("functions", "sim_elo_ratings_with_recruiting.R"))
 
-
 ```
 
 # Simulating Regular Season Games
 
 I'll now do this for every season through 2020. This means I'll compute Elo ratings in the run up to each season, then simulate the season based on the ratings going into the season.
 
-```{r initialize elo}
+```{r initialize elo, include=F}
 
 # set of games on which to learn baseline elo
 initial_games = games_data_tidied %>%
@@ -312,15 +248,14 @@ elo_initial = calc_elo_ratings(
 
 ```
 
-```{r set parallel}
+```{r set parallel, include=F}
 
 library(future.apply)
 plan(multisession, workers = 7)
 
 ```
 
-
-```{r look at performance through 2022, include=F, eval=T}
+```{r look at performance through 2022, include=F, eval=F}
 
 rm(sim_seasons,
    train_games,
@@ -437,23 +372,36 @@ simulated_seasons = foreach(i = 1:length(seasons)) %do% {
 
 }
 
+rm(out)
+
 # set the names
 names(simulated_seasons) = seasons
 
-# save
+# save each season
 for(i in 1:length(seasons)) {
         
         season = names(simulated_seasons)[i]
         sims = simulated_seasons[i]
         simulation_from = 0
         save(sims,
-             file = here::here("simulations", paste("sims_", season, "_week_", simulation_from, ".Rdata", sep="")))
+             file = here::here("simulations", paste("sims_seasons", "_week_", simulation_from, ".Rdata", sep="")))
         
 }
 
+# save all seasons
+save(simulated_seasons,
+             file = here::here("simulations", paste("sims_seasons", "_week_", simulation_from, ".Rdata", sep="")))
+
 ```
 
-```{r flip to team out comes}
+```{r load seasons back in}
+
+load(here::here("simulations", paste("sims_seasons", "_week_", simulation_from, ".Rdata", sep="")))
+
+```
+
+
+```{r make team outcomes}
 
 sim_game_outcomes = rbindlist(simulated_seasons)
 
@@ -480,24 +428,14 @@ sim_team_outcomes = sim_game_outcomes %>%
         mutate(home_field_advantage = selected_pars$home_field_advantage,
                reversion = selected_pars$reversion,
                k = selected_pars$k,
-               v = selected_pars$v)
+               v = selected_pars$v) %>%
+        left_join(., games_data_tidied %>%
+                          select(GAME_ID, CONFERENCE_GAME, CONFERENCE_CHAMPIONSHIP),
+                  by = c("GAME_ID"))
 
 ```
 
-
-```{r load season sims}
-
-# load(file = here::here("data/simulated_seasons.Rdata"))
-# 
-# # get the games
-# sim_game_outcomes = rbindlist(lapply(simulated_seasons,'[[','sim_game_outcomes'))
-# 
-# # get by team
-# sim_team_outcomes = rbindlist(lapply(simulated_seasons,'[[','sim_team_outcomes'))
-# 
-# rm(simulated_seasons)
-
-```
+## Assess Historical Performance
 
 I'll get season by season accuracy/log-loss.
 
@@ -591,6 +529,8 @@ sim_game_outcomes %>%
 
 ### Examine Seasons
 
+Now that we have preseason simulations for the selected seasons, we can start diving into the results and examine them.
+
 ```{r source functions again}
 
 source(here::here("functions", "plot_elo_conference_season.R"))
@@ -604,16 +544,15 @@ source(here::here("functions", "table_wins_season.R"))
 
 
 ```{r wins season}
-
-table_wins_season(sim_team_outcomes,
-                  season = 2005,
-                  14)
+# 
+# table_wins_season(sim_team_outcomes,
+#                   season = 2005,
+#                   14)
 
 table_wins_conference_season(sim_team_outcomes %>%
                                      filter(CONFERENCE_GAME == T),
-                          conference = 'SEC',
-                  season = 2022,
-                  14)
+                             conference = 'SEC',
+                             season = 2022)
 
 ```
 
@@ -622,14 +561,20 @@ table_wins_conference_season(sim_team_outcomes %>%
 ```{r look at specific teams}
 
 plot_elo_conference_season(sim_team_outcomes,
-                           season = 2021,
-                           'Sun Belt',
-                           16)
+                           season = 2022,
+                           conference = 'Big Ten',
+                           15)
+
 
 plot_wins_conference_season(sim_team_outcomes,
                            season = 2022,
-                           'Big Ten',
-                           14)
+                           conference = 'Big Ten',
+                           15)
+
+plot_elo_team_season(sim_team_outcomes %>%
+                           season = 2022,
+                           'Wisconsin',
+                           15)
 
 ```
 
@@ -650,18 +595,23 @@ table_wins_team_season(sim_team_outcomes,
 ```{r plot win totals selected}
 
 plot_wins_conference_season(sim_team_outcomes,
-                           season = 2021,
+                           season = 2022,
                            conference = 'ACC',
                            week = 15)
 
-table_wins_conference_season(sim_team_outcomes,
-                           season = 2021,
-                           conference = 'Big Ten',
-                           week = 14)
+table_wins_team_season(sim_team_outcomes,
+                       season = 2022,
+                       team = 'Ohio State',
+                       week = 15)
+
+table_wins_conference_season(sim_team_outcomes %>%
+                                     filter(CONFERENCE_GAME == T),
+                           season = 2022,
+                           conference = 'ACC')
 
 plot_elo_team_season(sim_team_outcomes,
-                     season = 2013,
-                     team = 'Florida State',
+                     season = 2022,
+                     team = 'Ohio State',
                      week = 15)
 
 plot_elo_conference_season(sim_team_outcomes,

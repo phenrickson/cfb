@@ -114,11 +114,27 @@ teams_raw = bind_rows(
                TEAM_ABBREVIATION = ABBREVIATION)
 
 # load teamcolors
-teamcolors = teamcolors %>%
-        mutate(location = case_when(location == 'Ole' ~ name,
+teamcolors = teamcolors::teamcolors %>%
+        filter(league == 'ncaa')
+
+# join up to get missing teams
+teamcolors = teams_raw %>%
+        select(TEAM, COLOR, ALT_COLOR) %>%
+        left_join(.,
+                  teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(location = case_when(location == 'Ole' ~ name,
                                     location == 'Southern California Trojans' ~ 'USC',
                                     location == 'Miami' & name == 'Miami (OH)' ~ name,
-                                    TRUE ~ location))
+                                    TRUE ~ location)) %>%
+                          mutate(TEAM = location),
+                  by = c("TEAM")) %>%
+        mutate(name = case_when(is.na(name) ~ TEAM,
+                                TRUE ~ name)) %>%
+        mutate(primary = case_when(is.na(primary) ~ COLOR,
+                                   TRUE ~ primary)) %>%
+        mutate(secondary = case_when(is.na(secondary) ~ COLOR,
+                                   TRUE ~ secondary))
 
 # get games
 games_raw = DBI::dbGetQuery(myconn,
@@ -181,6 +197,53 @@ team_conference_season = games_raw %>%
         unique()
 
 ```
+
+```{r get rankings data}
+
+# recruiting
+ranking_teams_raw = DBI::dbGetQuery(myconn,
+                                    paste('SELECT * FROM CFB_DEMO.CFD_RAW.RANKINGS')) %>%
+        as_tibble() %>%
+        arrange(SEASON, WEEK)
+
+# flatten out the initial json
+ranking_teams_flattened = lapply(ranking_teams_raw$POLLS,
+                                 function(x) fromJSON(x, flatten=T))
+
+# name with the season and week
+names(ranking_teams_flattened) = paste(ranking_teams_raw$SEASON,
+                                       ranking_teams_raw$WEEK,
+                                       sep = ";")
+
+# create a function to assign the name of the poll to the rankings
+tidy_rankings = function(x) {
+        
+        polls = x[1]$poll
+        names(x[2]$ranks) = polls
+        
+        ranks = rbindlist(x[2]$ranks,
+                          idcol = T,
+                          fill = T) %>%
+                rename(poll = .id)
+        
+        return(ranks)
+        
+        # df = x %$% ranks %>%
+        #         arrange(rank)
+        # 
+        # df$poll = x
+        
+}
+
+# map the function over every element of the list to create a df, then bind that all together
+rankings_tidied = rbindlist(purrr::map(ranking_teams_flattened, tidy_rankings),
+                            fill = T,
+                            idcol=T) %>%
+        separate(.id, into = c("SEASON", "WEEK"), sep=";")
+
+
+```
+
 
 ```{r get recruiting data}
 
@@ -292,7 +355,7 @@ recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
         filter(YEAR > 2001) %>%
         left_join(., team_conference_season,
                   by = c("YEAR"="SEASON", "TEAM")) %>%
-        filter(DIVISION == 'fbs') %>%
+    #    filter(DIVISION == 'fbs') %>%
         group_by(TEAM) %>%
         mutate(n = n()) %>%
         filter(n > 4) %>%
@@ -319,9 +382,7 @@ Here are the SEC teams over this time frame.
 ```{r show recruiting for SEC}
 
 recruiting_teams %>%
-        left_join(., teamcolors %>%
-                                  filter(league == 'ncaa') %>%
-                                  mutate(TEAM = location),
+        left_join(., teamcolors,
                           by = c("TEAM")) %>%
         # filter(TEAM %in% c("Tennessee", "Florida State", "Georgia", 
         #                    "Kansas", "Iowa State", "Rutgers")) %>%
@@ -362,11 +423,14 @@ Some times you can clearly see have been on the rise or falling, though the over
 
 p = recruiting_teams %>% 
         filter(SEASON > 2006) %>%
+        mutate(DIVISION_TYPE = case_when(DIVISION == 'fbs' ~ 'fbs',
+                                         TRUE ~ 'fcs/other')) %>%
         ggplot(., aes(x=EMA, y=factor(SEASON)))+
         stat_density_ridges(quantile_lines = T)+
         theme_phil()+
         ylab("Season")+
-        xlab("Distribution of Recruiting Score by Teams")
+        xlab("Distribution of Recruiting Score by Teams")+
+        facet_wrap(DIVISION_TYPE ~.)
 
 suppressMessages(print(p))
 
@@ -374,11 +438,13 @@ suppressMessages(print(p))
 
 ## Team Recruiting Scores and Wins
 
-What is the relationship between recruiting and a team's win total?
+What is the relationship between recruiting and a team's win percentage?
 
 ```{r recruiting teams and wins}
 
 recruiting_teams %>%
+        filter(DIVISION == 'fbs') %>%
+        filter(SEASON >= 2015 & SEASON < 2022) %>%
         filter(SEASON != 2022) %>%
         left_join(.,
                   games_raw %>%
@@ -402,60 +468,36 @@ recruiting_teams %>%
                                     select(SEASON, AWAY_TEAM, AWAY_WIN) %>%
                                     rename(TEAM = AWAY_TEAM,
                                            WIN = AWAY_WIN)) %>%
-                  group_by(SEASON, TEAM) %>%
-                  summarize(wins = sum(WIN),
-                            .groups = 'drop'),
+                          group_by(SEASON, TEAM) %>%
+                          summarize(wins = sum(WIN),
+                            games = n(),
+                            .groups = 'drop') %>%
+                          mutate(wins = replace_na(wins, 0)) %>%
+                          mutate(win_perc = wins/games),
                   by = c("SEASON", "TEAM")) %>%
         filter(SEASON > 2006) %>%
+        mutate(SEASON = factor(SEASON)) %>%
         ggplot(., aes(x=EMA,
-                      label = TEAM,
-                      y= wins))+
+                    #  color = SEASON,
+                      label = paste(TEAM, SEASON),
+                      y= win_perc))+
         geom_point()+
         geom_text(check_overlap = T,
                   size = 2.5,
                   vjust = -1)+
         facet_wrap(SEASON ~.)+
         theme_phil()+
-        coord_cartesian(ylim = c(-1, 13))+
+      #  coord_cartesian(ylim = c(-1, 13))+
         geom_smooth(method = 'lm',
                     formula = 'y ~ x')+
         stat_cor(p.accuracy = 0.01,
                  col = 'blue')
+#+
+      #  scale_color_viridis_d()
 
 ```
 
-## Team Recruiting Scores and Season End Elo Ratings
-
-How correlated are team recruiting scores and season end Elo ratings?
-
-```{r correlation between these two things, fig.height=8}
-
-recruiting_teams %>%
-        filter(SEASON > 2005 & SEASON < 2015) %>%
-        left_join(.,
-                  elo_train$team_outcomes %>%
-                          group_by(SEASON, TEAM) %>%
-                          filter(GAME_DATE == max(GAME_DATE)),
-                  by = c("TEAM", "SEASON", "CONFERENCE", "DIVISION")) %>%
-        ggplot(aes(x=EMA,
-                   label = TEAM,
-                     y=POSTGAME_ELO))+
-        geom_text(check_overlap = T,
-                  size = 2,
-                  vjust = -1)+
-        geom_point(size = 1)+
-        facet_wrap(SEASON ~.)+
-        theme_phil()+
-        stat_cor(p.accuracy = 0.01,
-                 size = 2.5)+
-        geom_smooth(method = 'lm',
-                    formula = 'y ~ x')+
-        ylab("Team Season End Elo")+
-        xlab("Team Recruiting Score")
-                 
-```
-
-## Elo Ratings, Recruiting, and Margin of Victory
+# Elo Ratings, Recruiting, and Margin of Victory
 
 I'll now examine the relationship between recruiting scores, Elo ratings, and the outcome of games. Namely, I'll regress the point spread in a game on the difference in Elo and recruiting between the two teams playing.
 
@@ -542,6 +584,8 @@ elo_valid = calc_elo_ratings(valid_games,
 
 ```
 
+
+
 ```{r join elo with teams}
 
 games_and_recruiting = 
@@ -609,7 +653,36 @@ games_and_recruiting =
 
 ```
 
+How correlated are team recruiting scores and season end Elo ratings?
 
+```{r correlation between these two things, fig.height=8}
+
+recruiting_teams %>%
+        filter(SEASON > 2005 & SEASON < 2015) %>%
+        left_join(.,
+                  elo_train$team_outcomes %>%
+                          group_by(SEASON, TEAM) %>%
+                          filter(GAME_DATE == max(GAME_DATE)),
+                  by = c("TEAM", "SEASON", "CONFERENCE", "DIVISION")) %>%
+        ggplot(aes(x=EMA,
+                   label = TEAM,
+                     y=POSTGAME_ELO))+
+        geom_text(check_overlap = T,
+                  size = 2,
+                  vjust = -1)+
+        geom_point(size = 1)+
+        facet_wrap(SEASON ~.)+
+        theme_phil()+
+        stat_cor(p.accuracy = 0.01,
+                 size = 2.5)+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x')+
+        ylab("Team Season End Elo")+
+        xlab("Team Recruiting Score")
+                 
+```
+
+Predict wins using Elo ratings vs using recruiting scores.
 
 ```{r games and recruiting plot wins, fig.height=8}
 
@@ -945,7 +1018,6 @@ We see a very slight improvement in both accuracy and predicting the spread by a
 How can we handle this? We can apply a pre game adjustment based on the difference in recruiting similar to the way we've been handling the home team advantage. Currently, two teams playing in a game with the same Elo score would have the home team favored by 3.75 points due to our addition of a 75 point home team field advantage adjustment. 
 
 For the purpose of Elo, we found that a one point increase in the recruiting composite, holding the difference in Elo ratings constant, was worth about .04 points - close to the same as a one point increase in Elo.
-
 
 ```{r make a grid to see this effect}
 

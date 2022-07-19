@@ -56,13 +56,6 @@ library(teamcolors)
 library(shiny)
 conflict_prefer("lag", "dplyr")
 
-# load teamcolors
-teamcolors = teamcolors %>%
-        mutate(location = case_when(location == 'Ole' ~ name,
-                                    location == 'Southern California Trojans' ~ 'USC',
-                                    location == 'Miami' & name == 'Miami (OH)' ~ name,
-                                    TRUE ~ location))
-
 ```
 
 ```{r get colors for ncaa teams}
@@ -121,12 +114,28 @@ teams_raw = bind_rows(
                TEAM_MASCOT = MASCOT,
                TEAM_ABBREVIATION = ABBREVIATION)
 
-# load teamcolors
-teamcolors = teamcolors %>%
-        mutate(location = case_when(location == 'Ole' ~ name,
+teamcolors = teamcolors::teamcolors %>%
+        filter(league == 'ncaa')
+
+# get teamcolors
+teamcolors = teams_raw %>%
+        select(TEAM, COLOR, ALT_COLOR) %>%
+        left_join(.,
+                  teamcolors %>%
+                          filter(league == 'ncaa') %>%
+                          mutate(location = case_when(location == 'Ole' ~ name,
                                     location == 'Southern California Trojans' ~ 'USC',
                                     location == 'Miami' & name == 'Miami (OH)' ~ name,
-                                    TRUE ~ location))
+                                    TRUE ~ location)) %>%
+                          mutate(TEAM = location),
+                  by = c("TEAM")) %>%
+        mutate(name = case_when(is.na(name) ~ TEAM,
+                                TRUE ~ name)) %>%
+        mutate(location = case_when(is.na(location) ~ TEAM)) %>%
+        mutate(primary = case_when(is.na(primary) ~ COLOR,
+                                   TRUE ~ primary)) %>%
+        mutate(secondary = case_when(is.na(secondary) ~ COLOR,
+                                   TRUE ~ secondary))
 
 # get games
 games_raw = DBI::dbGetQuery(myconn,
@@ -280,14 +289,16 @@ games = games_raw %>%
 
 ```
 
+
+
 ```{r calc elo scores both ways}
 
 # set pars
 selected_pars = tibble(k = 35,
                        v = 400,
-                       reversion = 0.1,
+                       reversion = 0.2,
                        home_field_advantage = 75,
-                       recruiting_weight = 0.8)
+                       recruiting_weight = 0)
 
 # now get the elo ratings based on this training set
 elo_games= calc_elo_ratings(games %>%
@@ -345,7 +356,44 @@ teams = elo_games$team_outcomes %>%
 
 # Team Historical Elo Ratings
 
+Having developed Elo ratings for all teams back to 1970, I can now just explore the results a bit. 
+
+## Strongest Teams
+
+Based on ratings over this time period, which teams have had the highest average?
+
+```{r get highest average elo}
+
+top_teams = elo_games$team_outcomes %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        summarize(Elo_Mean= mean(POSTGAME_ELO)) %>%
+        mutate_if(is.numeric, round,0) %>%
+        arrange(desc(Elo_Mean))
+
+top_teams %>%
+        head(10) %>%
+        flextable() %>%
+        autofit()
+        
+```
+
+```{r plot these teams}
+
+plot_elo_historical_team(
+        elo_games$team_outcomes,
+        team = top_teams %>%
+        head(9) %>%
+        pull(TEAM))+
+        ggtitle("Historical Elo Ratings for Top CFB Teams")+
+        facet_wrap(SELECTED_TEAM ~.)
+
+```
+
+
 ## Rivalries
+
+I can look at rivals side by side to see how the two teams typically compared in strength.
 
 ```{r plot elo historical michigan}
 
@@ -382,13 +430,31 @@ highest_variance_teams = elo_games$team_outcomes %>%
         mutate_if(is.numeric, round,0) %>%
         arrange(desc(Elo_Variance))
 
+highest_variance_teams %>%
+        head(10) %>%
+        flextable() %>%
+        autofit()
+```
+
+
+```{r most volatile teams}
+
+plot_elo_historical_team(
+        elo_games$team_outcomes,
+        team = highest_variance_teams %>%
+        head(9) %>%
+        pull(TEAM))+
+        ggtitle("Historical Elo Ratings for Most Volatile CFB Teams")+
+        facet_wrap(SELECTED_TEAM ~.)
+
 ```
 
 
 
-## Biggest Changes
+## Biggest Season Changes in Elo
 
-Which teams have changed the most year over year? 
+Which teams have changed the most between seasons?
+
 ```{r which teams have changed most year over year}
 
 year_over_year_changes = elo_games$team_outcomes %>%
@@ -407,14 +473,14 @@ year_over_year_changes = elo_games$team_outcomes %>%
 
 ```
 
-Here are the biggest drops from the end of season to the end of the next.
+Here are the biggest drops from the end of one season to the end of the next.
 
 ```{r biggest drops}
 
 diff_func = 
                 function(x) {
                         
-                        breaks = c(-1000, -700, seq(-650, 650, 50), 700, 1000)
+                        breaks = c(-1000, -700, seq(-500, 500, 50), 700, 1000)
                         colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
@@ -481,7 +547,7 @@ elo_games$team_outcomes %>%
         mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
                                 TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
         mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
-                               OUTCOME == 'tie' ~ 0)) %>%
+                               OUTCOME == 'loss' ~ 0)) %>%
         mutate(DIFF = WIN - PROB) %>%
         mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
                                   OUTCOME == 'loss' ~ OPPONENT)) %>%
@@ -504,9 +570,9 @@ elo_games$team_outcomes %>%
 ```
 
 
-## Biggest Swings in Elo
+## Biggest Game Changes in Elo
 
-Which games saw the largest drop in Elo? 
+Which games saw the largest changes in Elo? This is a combination of being an upset as well as the margin of victory. Teams where the underdog won by a lot will see the a big increase.
 
 ```{r biggest wins by underdog}
 
@@ -519,7 +585,7 @@ elo_games$team_outcomes %>%
         mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
                                 TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
         mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
-                               OUTCOME == 'tie' ~ 0)) %>%
+                               OUTCOME == 'loss' ~ 0)) %>%
         mutate(DIFF = WIN - PROB) %>%
         mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
                                   OUTCOME == 'loss' ~ OPPONENT)) %>%
@@ -546,5 +612,279 @@ elo_games$team_outcomes %>%
         flextable::align(., j = c("Season", "Date", "Result", "Diff"),
               align = 'center', part = 'all')
         
+```
+
+# Examining Specific Teams
+
+## Texas A&M
+
+### Best Teams
+
+```{r season end elo tamu}
+
+elo_games$team_outcomes %>%
+        filter(DIVISION == 'fbs') %>%
+        filter(TEAM == 'Texas A&M') %>%
+        arrange(SEASON, TEAM) %>%
+        group_by(SEASON, TEAM) %>%
+        filter(GAME_DATE == max(GAME_DATE)) %>%
+        rename(SEASON_END_ELO = POSTGAME_ELO) %>%
+        mutate(SEASON_END_ELO = round(SEASON_END_ELO, 0)) %>%
+        select(SEASON, TEAM, SEASON_END_ELO) %>%
+        arrange(desc(SEASON_END_ELO)) %>%
+        ungroup() %>%
+        head(10) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+### Biggest Upsets
+
+```{r tamu upsets}
+
+elo_games$team_outcomes %>%
+        filter(TEAM == 'Texas A&M' & OUTCOME == 'win') %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'loss' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        arrange(desc(DIFF)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        mutate(Rank = row_number()) %>%
+        select(Rank, Season, Date, Team, Opponent, `Pr(Win)`, Result) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Rank", "Season", "Date", "Pr(Win)", "Result"),
+              align = 'center', part = 'all')
+
+
+```
+
+### Worst Losses
+
+```{r wrost losses} 
+
+elo_games$team_outcomes %>%
+        filter(TEAM == 'Texas A&M' & OUTCOME == 'loss') %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'loss' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        arrange(DIFF) %>%
+        mutate(Rank = row_number()) %>%
+        select(Rank, Season, Date, Team, Opponent, `Pr(Win)`, Result) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Rank", "Season", "Date", "Pr(Win)", "Result"),
+              align = 'center', part = 'all')
+
+```
+
+### Biggest Game Changes
+
+```{r elo swings tamu}
+
+elo_games$team_outcomes %>%
+        mutate(ELO_DIFF = POSTGAME_ELO - PREGAME_ELO) %>%
+        filter(TEAM == 'Texas A&M') %>%
+        arrange(ELO_DIFF) %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'loss' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Pre_Elo = PREGAME_ELO,
+               Post_Elo = POSTGAME_ELO,
+               Diff = ELO_DIFF,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        mutate_at(c("Pre_Elo",
+                    "Post_Elo", 
+                    "Diff"),
+                  round, 0) %>%
+        arrange(desc(abs(ELO_DIFF))) %>%
+        head(25) %>%
+        select(Season, Date, Team, Opponent, Pre_Elo, Post_Elo, Result, Diff) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Season", "Date", "Result", "Diff"),
+              align = 'center', part = 'all') %>%
+        bg(., j = c("Diff"),
+           bg = diff_func)
+        
+
+```
+
+
+## Ohio State
+
+### Best Teams
+
+### Biggest Upsets
+
+```{r ohio state upsets}
+
+elo_games$team_outcomes %>%
+        filter(TEAM == 'Ohio State' & OUTCOME == 'win') %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'loss' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        arrange(desc(DIFF)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        mutate(Rank = row_number()) %>%
+        select(Rank, Season, Date, Team, Opponent, `Pr(Win)`, Result) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Rank", "Season", "Date", "Pr(Win)", "Result"),
+              align = 'center', part = 'all')
+
+
+```
+
+### Worst Losses
+
+```{r wrost losses} 
+
+elo_games$team_outcomes %>%
+        filter(TEAM == 'Ohio State' & OUTCOME == 'loss') %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'loss' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        arrange(DIFF) %>%
+        mutate(Rank = row_number()) %>%
+        select(Rank, Season, Date, Team, Opponent, `Pr(Win)`, Result) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Rank", "Season", "Date", "Pr(Win)", "Result"),
+              align = 'center', part = 'all')
+
+```
+
+
+```{r elo swings tamu}
+
+elo_games$team_outcomes %>%
+        mutate(ELO_DIFF = POSTGAME_ELO - PREGAME_ELO) %>%
+        filter(TEAM == 'Texas A&M') %>%
+        arrange(ELO_DIFF) %>%
+        left_join(., elo_games$game_outcomes %>% 
+                          select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
+                  by = c("GAME_ID")) %>%
+        mutate(PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
+                                TEAM == AWAY_TEAM ~ AWAY_PROB)) %>%
+        mutate(WIN = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'tie' ~ 0)) %>%
+        mutate(DIFF = WIN - PROB) %>%
+        mutate(WINNER = case_when(OUTCOME == 'win' ~ TEAM,
+                                  OUTCOME == 'loss' ~ OPPONENT)) %>%
+        mutate(Season = factor(SEASON),
+               Date = GAME_DATE,
+               Opponent = case_when(HOME_TEAM == OPPONENT ~ paste("@", OPPONENT),
+                                    AWAY_TEAM == OPPONENT ~ paste("vs", OPPONENT)),
+               Team = TEAM,
+               Pre_Elo = PREGAME_ELO,
+               Post_Elo = POSTGAME_ELO,
+               Diff = ELO_DIFF,
+               Opponent = Opponent,
+               `Pr(Win)` = round(PROB, 3), 
+               Result = paste(POINTS, "-", OPPONENT_POINTS, " ", WINNER, sep="")) %>%
+        mutate_at(c("Pre_Elo",
+                    "Post_Elo", 
+                    "Diff"),
+                  round, 0) %>%
+        arrange(desc(ELO_DIFF)) %>%
+        head(25) %>%
+        select(Season, Date, Team, Opponent, Pre_Elo, Post_Elo, Result, Diff) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::align(., j = c("Season", "Date", "Result", "Diff"),
+              align = 'center', part = 'all') %>%
+        bg(., j = c("Diff"),
+           bg = diff_func)
+        
+
+```
+
+## James Madison
+
+```{r plot historical elo for jmu}
+
+plot_elo_historical_team(elo_games$team_outcomes,
+                         min_year = 1970,
+                         team = 'James Madison')
+
 ```
 
