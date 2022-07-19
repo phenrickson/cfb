@@ -1,19 +1,19 @@
 ---
-title: "CFB Expected Points Added"
+        title: "CFB Expected Points Added"
 author: "Phil Henrickson"
 date: "6/7/2022"
 output: 
-  html_document:
-    toc: TRUE #adds a Table of Contents
-    theme: cerulean
-    number_sections: TRUE #number your headings/sections
-    toc_float: TRUE #let your ToC follow you as you scroll
-    keep_md: no
-    fig.caption: yes
-    css: "styles.css"
+        html_document:
+        toc: TRUE #adds a Table of Contents
+theme: cerulean
+number_sections: TRUE #number your headings/sections
+toc_float: TRUE #let your ToC follow you as you scroll
+keep_md: no
+fig.caption: yes
+css: "styles.css"
 ---
-
-```{r setup, include=FALSE}
+        
+        ```{r setup, include=FALSE}
 
 knitr::opts_chunk$set(echo = F,
                       error = F,
@@ -53,6 +53,16 @@ library(jsonlite)
 library(forcats)
 conflict_prefer("lag", "dplyr")
 
+library(flextable)
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
 ```
 
 ```{r load functions}
@@ -69,8 +79,8 @@ rm(a)
 
 ### pull from snowflake
 # get plays
-plays_data_raw = DBI::dbGetQuery(myconn,
-                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.PLAY_BY_PLAY')) %>%
+plays_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.PLAY_BY_PLAY')) %>%
         as_tibble() %>%
         mutate(TIME = gsub('\\{|}|"', '', CLOCK)) %>%
         separate(TIME, into=c("MINUTES", "SECONDS"), sep=",") %>%
@@ -94,8 +104,8 @@ plays_data_raw = DBI::dbGetQuery(myconn,
         ungroup() %>%
         # clean up PERIOD by game
         mutate(STATUS_PERIOD = case_when(PERIOD == 0 & nchar(PLAY_TEXT) <=1 ~ 'Drop',
-                                        PERIOD == 0 ~ 'Take Previous Value',
-                                        TRUE ~ 'Valid')) %>%
+                                         PERIOD == 0 ~ 'Take Previous Value',
+                                         TRUE ~ 'Valid')) %>%
         filter(STATUS_PERIOD != 'Drop') %>%
         mutate(PERIOD = case_when(STATUS_PERIOD == 'Take Previous Value' ~ lag(PERIOD, 1),
                                   TRUE ~ PERIOD)) %>%
@@ -107,7 +117,7 @@ plays_data_raw = DBI::dbGetQuery(myconn,
                                 TRUE ~ 'OT')) %>%
         # then clean up the down
         mutate(FLAG_DOWN = case_when(DOWN %in% c(1, 2, 3, 4) ~ 0,
-                                       TRUE ~ 1)) %>%
+                                     TRUE ~ 1)) %>%
         mutate(DOWN = case_when(DOWN %in% c(1, 2, 3, 4) ~ DOWN,
                                 TRUE ~ -1)) %>%
         # then flag the distance
@@ -118,15 +128,15 @@ plays_data_raw = DBI::dbGetQuery(myconn,
                                           TRUE ~ 0))
 
 # get games
-games_data_raw = DBI::dbGetQuery(myconn,
-                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.GAMES')) %>%
+games_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
         as_tibble() %>%
-        mutate(ID = as.numeric(ID)) %>%
-        rename(GAME_ID = ID)
-        
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        arrange(START_DATE)
+
 # get drives
-drives_data_raw = DBI::dbGetQuery(myconn,
-                              paste('SELECT * FROM CFB_DEMO.CFD_RAW.DRIVES')) %>%
+drives_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.DRIVES')) %>%
         as_tibble() %>%
         mutate(ID = as.numeric(ID),
                GAME_ID = as.numeric(GAME_ID)) %>%
@@ -147,13 +157,13 @@ drives_data_raw = DBI::dbGetQuery(myconn,
         separate(ELAPSED, into=c("ELAPSED_MINUTES", "ELAPSED_SECONDS"), sep=",") %>%
         mutate(ELAPSED_MINUTES = as.numeric(gsub("minutes:", "", ELAPSED_MINUTES))) %>% 
         mutate(ELAPSED_SECONDS = as.numeric(gsub("seconds:", "", ELAPSED_SECONDS))) 
-        
+
 ```
 
 ```{r apply clean up functions}
 
 # now get scoring events for the drives data
-drives_data_score_events = drives_data_raw %>%
+drives_score_events = drives_raw %>%
         group_by(GAME_ID) %>%
         arrange(DRIVE_ID) %>%
         mutate(HALF = case_when(START_PERIOD == 1 | START_PERIOD == 2 ~ 'First Half',
@@ -208,9 +218,9 @@ drives_data_score_events = drives_data_raw %>%
 ```{r now join this with plays}
 
 # now join with plays
-plays_data_score_events = plays_data_raw %>%
+plays_score_events = plays_raw %>%
         left_join(.,
-                  drives_data_score_events %>%
+                  drives_score_events %>%
                           select(GAME_ID,
                                  DRIVE_ID,
                                  HOME, 
@@ -226,11 +236,13 @@ plays_data_score_events = plays_data_raw %>%
                          "AWAY")) %>%
         # now join with games to get seasons
         left_join(.,
-                  games_data_raw %>%
+                  games_raw %>%
                           select(GAME_ID,
                                  SEASON,
                                  HOME_TEAM,
-                                 AWAY_TEAM),
+                                 AWAY_TEAM,
+                                 HOME_DIVISION,
+                                 AWAY_DIVISION),
                   by = c("GAME_ID")) %>%
         rename(NEXT_SCORE_EVENT_HOME = NEXT_SCORE_EVENT) %>%
         mutate(NEXT_SCORE_EVENT_OFFENSE = case_when(OFFENSE == HOME & NEXT_SCORE_EVENT_HOME == 'HOME TD' ~ 'TD',
@@ -247,28 +259,28 @@ plays_data_score_events = plays_data_raw %>%
                                                     OFFENSE == AWAY & NEXT_SCORE_EVENT_HOME == 'AWAY Safety' ~ 'Safety',
                                                     NEXT_SCORE_EVENT_HOME == 'No_Score' ~ 'No_Score')) %>%
         mutate(NEXT_SCORE_EVENT_HOME_DIFF = case_when(NEXT_SCORE_EVENT_HOME == 'HOME TD' ~ 7,
-                                              NEXT_SCORE_EVENT_HOME == 'HOME FG' ~ 3,
-                                              NEXT_SCORE_EVENT_HOME == 'HOME Safety' ~ 2,
-                                              NEXT_SCORE_EVENT_HOME == 'No_Score' ~ 0,
-                                              NEXT_SCORE_EVENT_HOME == 'HOME Safety' ~ -2,
-                                              NEXT_SCORE_EVENT_HOME == 'HOME FG' ~ -3,
-                                              NEXT_SCORE_EVENT_HOME == 'HOME TD' ~ -7)) %>%
+                                                      NEXT_SCORE_EVENT_HOME == 'HOME FG' ~ 3,
+                                                      NEXT_SCORE_EVENT_HOME == 'HOME Safety' ~ 2,
+                                                      NEXT_SCORE_EVENT_HOME == 'No_Score' ~ 0,
+                                                      NEXT_SCORE_EVENT_HOME == 'HOME Safety' ~ -2,
+                                                      NEXT_SCORE_EVENT_HOME == 'HOME FG' ~ -3,
+                                                      NEXT_SCORE_EVENT_HOME == 'HOME TD' ~ -7)) %>%
         mutate(NEXT_SCORE_EVENT_OFFENSE_DIFF = case_when(NEXT_SCORE_EVENT_OFFENSE == 'TD' ~ 7,
-                                              NEXT_SCORE_EVENT_OFFENSE == 'FG' ~ 3,
-                                              NEXT_SCORE_EVENT_OFFENSE == 'Safety' ~ 2,
-                                              NEXT_SCORE_EVENT_OFFENSE == 'No_Score' ~ 0,
-                                              NEXT_SCORE_EVENT_OFFENSE == 'Opp_Safety' ~ -2,
-                                              NEXT_SCORE_EVENT_OFFENSE == 'Opp_FG' ~ -3,
-                                              NEXT_SCORE_EVENT_OFFENSE == 'Opp_TD' ~ -7)) %>%
+                                                         NEXT_SCORE_EVENT_OFFENSE == 'FG' ~ 3,
+                                                         NEXT_SCORE_EVENT_OFFENSE == 'Safety' ~ 2,
+                                                         NEXT_SCORE_EVENT_OFFENSE == 'No_Score' ~ 0,
+                                                         NEXT_SCORE_EVENT_OFFENSE == 'Opp_Safety' ~ -2,
+                                                         NEXT_SCORE_EVENT_OFFENSE == 'Opp_FG' ~ -3,
+                                                         NEXT_SCORE_EVENT_OFFENSE == 'Opp_TD' ~ -7)) %>%
         mutate(NEXT_SCORE_EVENT_OFFENSE = factor(NEXT_SCORE_EVENT_OFFENSE,
-                                                     levels = c("TD",
-                                                                "FG",
-                                                                "Safety",
-                                                                "No_Score",
-                                                                "Opp_Safety",
-                                                                "Opp_FG",
-                                                                "Opp_TD")))
-                                                 
+                                                 levels = c("TD",
+                                                            "FG",
+                                                            "Safety",
+                                                            "No_Score",
+                                                            "Opp_Safety",
+                                                            "Opp_FG",
+                                                            "Opp_TD")))
+
 ```
 
 # Defining Expected Points
@@ -279,9 +291,9 @@ The data used is from college football games from 2003 to present. Each observat
 
 ## Sequences of Play
 
-For each play in a game, I model the probability of the next scoring event that will occur within the same half. This means the analysis is not at the *drive* level, but at what I dub the *sequence* level. Suppose a team has the ball on offense to start the first half.  The next scoring event can take on one of seven outcomes:
-
-* Touchdown (7 points)
+For each play in a game, I model the probability of the next scoring event that will occur within the same half. This means the analysis is not at the *drive* level, but at what I dub the *sequence* level. For any given play, the next scoring event can take on one of seven outcomes:
+        
+        * Touchdown (7 points)
 * Field goal (3 points)
 * Safety (2 points)
 * No Score (0 points)
@@ -289,13 +301,13 @@ For each play in a game, I model the probability of the next scoring event that 
 * Opp field goal (-3 points)
 * Opp touchdown (-7 points)
 
-If the team on offense drives down and scores a TD/FG, this will end the sequence. If the team on offense does not score but punts or turns the ball over, the sequence will continue with the other team now on offense. The sequence will continue until either one team scores, or the half comes to an end. From this, a sequence begins at kickoff and ends at the next kick off. 
-
 Suppose we have two teams, A and B, playing in a game. Team A receives the opening kickoff, drives for a few plays, and then punts. Team B takes over, which starts drive 2, and they drive for a few plays before also punting. Team A then manages to put together a drive that finally scores. 
 
 All plays on these three drives are one **sequence**. The outcome of this sequence is the points scored by Team A - if they score a touchdown, their points from this sequence is 7 (assuming for now they make the extra point). Team B's points from this sequence is -7 points.
 
 When Team A kicks off to Team B to start drive 4, we start our next sequence, which will end either with one team scoring or at the end of the half. We'll then start over with a new sequence in the second half.
+
+If the team on offense drives down and scores a TD/FG, this will end the sequence. If the team on offense does not score but punts or turns the ball over, the sequence will continue with the other team now on offense. The sequence will continue until either one team scores, or the half comes to an end. From this, a sequence begins at kickoff and ends at the next kick off.
 
 Why model the outcome of sequences rather than individual drives? Individual plays have the potential to affect both team's chances of scoring, positively or negatively, and we want our model to directly capture this. If an offense turns the ball over at midfield, they are not only hurting their own chances of scoring, they are increasing the other team's chance of scoring. The value of a play in terms of expected points is function of how both team's probabilities are affected by the outcome.
 
@@ -315,9 +327,9 @@ The outcome for our analysis is the **NEXT_SCORE_EVENT**. Each play in a given s
 
 ```{r show a full game of sequences}
 
-drives_data_score_events %>%
+drives_score_events %>%
         left_join(.,
-                  games_data_raw %>%
+                  games_raw %>%
                           select(GAME_ID,
                                  SEASON,
                                  HOME_TEAM,
@@ -338,7 +350,7 @@ For this game, we can filter to the plays that took place in the lead up to firs
 
 ```{r zoom in on a sequence}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(HOME_TEAM == 'Texas A&M' & AWAY_TEAM == 'Florida') %>%
         filter(SEASON == 2012) %>%
         filter(DRIVE_NUMBER == 1) %>%
@@ -355,7 +367,7 @@ If we look at another sequence in the second half, there were multiple drives be
 
 ```{r zoom in on another sequence}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(HOME_TEAM == 'Texas A&M' & AWAY_TEAM == 'Florida') %>%
         filter(SEASON == 2012) %>%
         filter(DRIVE_NUMBER>=9 & DRIVE_NUMBER <=14) %>%
@@ -376,7 +388,7 @@ For instance, in the first drive of the Texas A&M-Florida game in 2012,  Texas A
 
 ```{r expected points given situation}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         filter(!grepl("kick", tolower(PLAY_TEXT))) %>%
@@ -389,8 +401,8 @@ plays_data_score_events %>%
         flextable() %>%
         autofit() 
 
-plays_data_score_events %>%
-       # filter(SEASON >=2010) %>%
+plays_score_events %>%
+        # filter(SEASON >=2010) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         filter(YARDS_TO_GOAL == 75 & DRIVE_NUMBER ==1) %>%
@@ -410,7 +422,7 @@ But, this is also a function of the down. If we look at the expected points for 
 
 ```{r how does this vary as a function of }
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(YARDS_TO_GOAL == 75  & DRIVE_NUMBER ==1) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
@@ -423,7 +435,7 @@ plays_data_score_events %>%
         flextable() %>%
         autofit()
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(YARDS_TO_GOAL == 75  & DRIVE_NUMBER ==1) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
         group_by(YARDS_TO_GOAL, DOWN) %>%
@@ -442,7 +454,7 @@ For any given play, we get a sense of the expected points a team can expect from
 
 ```{r expected points as a function of yard line for opening}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(!grepl("kick", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
@@ -471,7 +483,7 @@ This should make sense - if you're backed up against your own end zone, your opp
 my_col = colorRampPalette(c("blue", "white", "red"))
 score_palette = c(my_col(6)[1:3], "grey80", my_col(6)[4:6])
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         filter(DOWN %in% c(1,2,3,4)) %>%
@@ -497,7 +509,7 @@ But, it's not just position on the field - it's also about the situation. If we 
 
 ```{r look at expected points by down and field position}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(PLAY_TYPE != 'Timeout') %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
@@ -531,7 +543,7 @@ We also have other features like distance to convert the first down (filtering h
 
 ```{r distance remaining}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(FLAG_SECONDS_IN_HALF != 1) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
@@ -560,7 +572,7 @@ And we also have info on time remaining in the half - as we might expect, the pr
 
 ```{r look at outcomes as a function of time remaining}
 
-plays_data_score_events %>%
+plays_score_events %>%
         filter(FLAG_SECONDS_IN_HALF != 1) %>%
         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>%
         filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
@@ -585,28 +597,27 @@ We use all of this historical data to learn the expected points from a given sit
 
 ## Building Models
 
-How do these various features like down, distance, yards to goal, and time remaining affect the probability of the next scoring event? We use a model to learn this relationship from historical plays. I'll now proceed to building the model which I'll use for the bulk of the analysis.
+How do these various features like down, distance, yards to goal, and time remaining affect the probability of the next scoring event? We use a model to learn this relationship from historical plays. I'll now proceed to building models which I'll use for the bulk of the analysis.
 
-I'll set up training, validation, and test sets based around the season. I'm mostly going to build the model using plays from the 2007 season onwards, as the data quality of the play by play data starts to get worse the further back we go, though I'll do some backtesting of the model on older seasons.
+I'll set up training, validation, and test sets based around the season. I'm mostly going to build the model using plays from the 2007 season onwards, as the data quality of the play by play data starts to get worse the further back we go, though I can later do some backtesting of the model on older seasons.
 
-I'm going to use the seasons of 2007-2018 as my main training set, building and evaluating the model using a leave-one-season out approach, akin to k-fold cross validation using seasons as the folds. I'll use the 2019-2020 seasons as a validation set, and leave 2021 as my test set which I won't look at till later on.
+I'm going to use the seasons 2007-2015 as my main training set, 2016-2019 as a validation set, and leave 2020 and 2021 as my test set that I won't look at until later on.
+
+I want to evaluate the output of this model for later predicting games in a season, so I'm going to train the model based on the seasons in the run up to each season so that predictions are always occuring using only information available at the time.
+
+<!-- I'm going to use the seasons of 2007-2018 as my main training set, building and evaluating the model using a leave-one-season out approach, akin to k-fold cross validation using seasons as the folds. I'll use the 2019-2020 seasons as a validation set, and leave 2021 as my test set which I won't look at till later on. -->
 
 ```{r set up training valid test splits, echo =T}
 
 # full plays
-plays_full = plays_data_score_events %>%
+plays_full = plays_score_events %>%
         filter(PLAY_TYPE != 'Kickoff') %>%
         arrange(SEASON, GAME_ID) %>%
-        # group_by(DEFENSE) %>%
-        # mutate(DEFENSE_PLAY_NUMBER = row_number()) %>%
-        # group_by(OFFENSE) %>%
-        # mutate(OFFENSE_PLAY_NUMBER = row_number()) %>%
-        # ungroup() %>%
-        # group_by(OFFENSE, GAME_ID) %>%
-        # mutate(OFFENSE_GAME_NUMBER = row_number()) %>%
-        # group_by(DEFENSE, GAME_ID) %>%
-        # mutate(DEFENSE_GAME_NUMBER = row_number()) %>%
         ungroup() %>%
+        mutate(OFFENSE_DIVISION = case_when(HOME_TEAM == OFFENSE ~ HOME_DIVISION,
+                                            HOME_TEAM == DEFENSE ~ AWAY_DIVISION),
+               DEFENSE_DIVISION = case_when(AWAY_TEAM == DEFENSE ~ AWAY_DIVISION,
+                                            AWAY_TEAM == OFFENSE ~ HOME_DIVISION)) %>%
         select(GAME_ID,
                DRIVE_ID,
                PLAY_ID,
@@ -617,6 +628,8 @@ plays_full = plays_data_score_events %>%
                DEFENSE,
                OFFENSE_CONFERENCE,
                DEFENSE_CONFERENCE,
+               OFFENSE_DIVISION,
+               DEFENSE_DIVISION,
                OFFENSE_SCORE,
                DEFENSE_SCORE,
                # OFFENSE_PLAY_NUMBER,
@@ -637,6 +650,10 @@ plays_full = plays_data_score_events %>%
                DISTANCE,
                YARD_LINE,
                YARDS_TO_GOAL) %>%
+        mutate(OFFENSE_ID = factor(case_when(OFFENSE_DIVISION == 'fbs' ~ OFFENSE,
+                                      TRUE ~ 'fcs')),
+               DEFENSE_ID = factor(case_when(DEFENSE_DIVISION == 'fbs' ~ DEFENSE,
+                                              TRUE ~ 'fcs'))) %>%
         filter(DOWN %in% c(1, 2, 3, 4)) %>%
         filter(PERIOD %in% c(1,2,3,4)) %>%
         filter(!is.na(SECONDS_IN_HALF)) %>%
@@ -654,11 +671,11 @@ plays_full = plays_data_score_events %>%
 
 # training set
 plays_train = plays_full %>%
-        filter(SEASON >= 2007 & SEASON <2019)
+        filter(SEASON >= 2007 & SEASON <2016)
 
 # validation set
 plays_valid = plays_full %>%
-        filter(SEASON >= 2019 & SEASON <= 2020)
+        filter(SEASON >= 2017 & SEASON <= 2020)
 
 # test
 plays_test = plays_full %>%
@@ -727,6 +744,10 @@ baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
                   "AWAY",
                   "OFFENSE",
                   "DEFENSE",
+                  "OFFENSE_ID",
+                  "DEFENSE_ID",
+                  "OFFENSE_DIVISION",
+                  "DEFENSE_DIVISION",
                   "OFFENSE_CONFERENCE",
                   "DEFENSE_CONFERENCE",
                   "SCORING",
@@ -744,13 +765,13 @@ baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
         step_mutate(PERIOD_ID = PERIOD,
                     role = "ID") %>%
         # features we're inheriting
-        update_role(
-                c("PERIOD", 
-                "SECONDS_IN_HALF",
-                "DOWN",
-                "DISTANCE",
-                "YARDS_TO_GOAL"),
-                new_role = "predictor") %>%
+update_role(
+        c("PERIOD", 
+          "SECONDS_IN_HALF",
+          "DOWN",
+          "DISTANCE",
+          "YARDS_TO_GOAL"),
+        new_role = "predictor") %>%
         # filters for issues
         step_filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
         step_filter(YARD_LINE <= 100 & YARD_LINE >=0) %>%
@@ -762,9 +783,11 @@ baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
         step_filter(PERIOD_ID == 1 | PERIOD_ID == 2 | PERIOD_ID == 3 | PERIOD_ID == 4) %>%
         # create features
         step_mutate(KICKOFF = case_when(grepl("kickoff", tolower(PLAY_TEXT)) | grepl("kickoff", tolower(PLAY_TYPE))==T ~ 1,
-                                        TRUE ~ 0)) %>%
+                                        TRUE ~ 0),
+                    role = "id") %>%
         step_mutate(TIMEOUT = case_when(grepl("timeout", tolower(PLAY_TEXT)) ~ 1,
-                                        TRUE ~ 0)) %>%
+                                        TRUE ~ 0),
+                    role = "id") %>%
         step_filter(TIMEOUT != 1) %>%
         step_filter(KICKOFF != 1) %>%
         step_mutate(DOWN_TO_GOAL = case_when(DISTANCE == YARDS_TO_GOAL ~ 1,
@@ -779,190 +802,211 @@ baseline_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
         step_interact(terms = ~ YARDS_TO_GOAL:(starts_with("DOWN_"))) %>%
         step_interact(terms = ~ YARDS_TO_GOAL*SECONDS_IN_HALF) %>%
         check_missing(all_predictors()) %>%
+        step_zv(all_predictors()) %>%
         step_normalize(all_numeric_predictors())
 
 ```
 
-### Defense Fixed Effects
-
-Not all defenses are created equal. When evaluating offenses, we'll want to account for the quality of the defense a team is facing. I'll handle this by making recipe with a fixed effect for the defense that the offense is facing.
-
-```{r defense fixed effect recipe}
-
-defense_adjusted_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
-                         data = plays_train) %>%
-        update_role(all_predictors(),
-                    new_role = "ID") %>%
-        update_role(
-                c("GAME_ID",
-                  "DRIVE_ID",
-                  "PLAY_ID",
-                  "SEASON",
-                  "HOME",
-                  "AWAY",
-                  "OFFENSE",
-                  "DEFENSE",
-                  "OFFENSE_CONFERENCE",
-                  "DEFENSE_CONFERENCE",
-                  "SCORING",
-                  "OFFENSE_SCORE",
-                  "DEFENSE_SCORE",
-                  "PLAY_TEXT",
-                  "PLAY_TYPE",
-                  "NEXT_SCORE_EVENT_HOME",
-                  "NEXT_SCORE_EVENT_HOME_DIFF",
-                  "NEXT_SCORE_EVENT_OFFENSE_DIFF",
-                  "YARD_LINE",
-                  "MINUTES_IN_HALF",
-                  "HALF"),
-                new_role = "ID") %>%
-        step_mutate(PERIOD_ID = PERIOD,
-                    role = "ID") %>%
-        # features we're inheriting
-        update_role(
-                c("SEASON",
-                "PERIOD", 
-                "SECONDS_IN_HALF",
-                "DOWN",
-                "DISTANCE",
-                "YARDS_TO_GOAL"),
-                new_role = "predictor") %>%
-        # filters for issues
-        step_filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
-        step_filter(YARD_LINE <= 100 & YARD_LINE >=0) %>%
-        step_filter(YARDS_TO_GOAL <=100 & YARD_LINE >=0) %>%
-        step_filter(DOWN %in% c(1, 2, 3, 4)) %>%
-        step_filter(DISTANCE >=0 & DISTANCE <=100) %>%
-        step_filter(SECONDS_IN_HALF <=1800) %>%
-        step_filter(!is.na(SECONDS_IN_HALF)) %>%
-        step_filter(PERIOD_ID == 1 | PERIOD_ID == 2 | PERIOD_ID == 3 | PERIOD_ID == 4) %>%
-        # create features
-        step_mutate(KICKOFF = case_when(grepl("kickoff", tolower(PLAY_TEXT)) | grepl("kickoff", tolower(PLAY_TYPE))==T ~ 1,
-                                        TRUE ~ 0)) %>%
-        step_mutate(TIMEOUT = case_when(grepl("timeout", tolower(PLAY_TEXT)) ~ 1,
-                                        TRUE ~ 0)) %>%
-        step_mutate(DOWN_TO_GOAL = case_when(DISTANCE == YARDS_TO_GOAL ~ 1,
-                                             TRUE ~ 0)) %>%
-        step_mutate(DOWN = factor(DOWN)) %>%
-        step_mutate(PERIOD = factor(PERIOD)) %>%
-        step_log(DISTANCE, offset =1) %>%
-        # defense fixed effect
-        step_mutate(DEFENSE_ID = DEFENSE) %>%
-        step_novel(DEFENSE_ID,
-                   new_level = "New_Team") %>%
-        step_novel(all_nominal_predictors(),
-                   -DEFENSE_ID,
-                   new_level = "New") %>%
-        step_dummy(all_nominal_predictors()) %>%
-      #  step_interact(terms = ~ SEASON:(starts_with("DEFENSE_ID"))) %>%
-        step_interact(terms = ~ DISTANCE:(starts_with("DOWN_"))) %>%
-        step_interact(terms = ~ YARDS_TO_GOAL:(starts_with("DOWN_"))) %>%
-        step_interact(terms = ~ YARDS_TO_GOAL*SECONDS_IN_HALF) %>%
-        check_missing(all_predictors()) %>%
-        step_normalize(all_numeric_predictors())
-
-```
-
-### Offense Fixed Effect
-
-And also a model specification with a fixed effect for the offense the defense is facing, so we can flip the analysis around for the defense.
-
-```{r offense fixed effect recipe}
-
-offense_adjusted_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~.,
-                         data = plays_train) %>%
-        update_role(all_predictors(),
-                    new_role = "ID") %>%
-        update_role(
-                c("GAME_ID",
-                  "DRIVE_ID",
-                  "PLAY_ID",
-                  "SEASON",
-                  "HOME",
-                  "AWAY",
-                  "OFFENSE",
-                  "DEFENSE",
-                  "OFFENSE_CONFERENCE",
-                  "DEFENSE_CONFERENCE",
-                  "SCORING",
-                  "OFFENSE_SCORE",
-                  "DEFENSE_SCORE",
-                  "PLAY_TEXT",
-                  "PLAY_TYPE",
-                  "NEXT_SCORE_EVENT_HOME",
-                  "NEXT_SCORE_EVENT_HOME_DIFF",
-                  "NEXT_SCORE_EVENT_OFFENSE_DIFF",
-                  "YARD_LINE",
-                  "MINUTES_IN_HALF",
-                  "HALF"),
-                new_role = "ID") %>%
-        step_mutate(PERIOD_ID = PERIOD,
-                    role = "ID") %>%
-        # features we're inheriting
-        update_role(
-                c("SEASON",
-                "PERIOD", 
-                "SECONDS_IN_HALF",
-                "DOWN",
-                "DISTANCE",
-                "YARDS_TO_GOAL"),
-                new_role = "predictor") %>%
-        # filters for issues
-        step_filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
-        step_filter(YARD_LINE <= 100 & YARD_LINE >=0) %>%
-        step_filter(YARDS_TO_GOAL <=100 & YARD_LINE >=0) %>%
-        step_filter(DOWN %in% c(1, 2, 3, 4)) %>%
-        step_filter(DISTANCE >=0 & DISTANCE <=100) %>%
-        step_filter(SECONDS_IN_HALF <=1800) %>%
-        step_filter(!is.na(SECONDS_IN_HALF)) %>%
-        step_filter(PERIOD_ID == 1 | PERIOD_ID == 2 | PERIOD_ID == 3 | PERIOD_ID == 4) %>%
-        # create features
-        step_mutate(KICKOFF = case_when(grepl("kickoff", tolower(PLAY_TEXT)) | grepl("kickoff", tolower(PLAY_TYPE))==T ~ 1,
-                                        TRUE ~ 0)) %>%
-        step_mutate(TIMEOUT = case_when(grepl("timeout", tolower(PLAY_TEXT)) ~ 1,
-                                        TRUE ~ 0)) %>%
-        step_filter(TIMEOUT != 1) %>%
-        step_filter(KICKOFF != 1) %>%
-        step_mutate(DOWN_TO_GOAL = case_when(DISTANCE == YARDS_TO_GOAL ~ 1,
-                                             TRUE ~ 0)) %>%
-        step_mutate(DOWN = factor(DOWN)) %>%
-        step_mutate(PERIOD = factor(PERIOD)) %>%
-        step_log(DISTANCE, offset =1) %>%
-        # defense fixed effect
-        step_mutate(OFFENSE_ID = OFFENSE) %>%
-        step_novel(OFFENSE_ID,
-                   new_level = "New_Team") %>%
-        step_novel(all_nominal_predictors(),
-                   -OFFENSE_ID,
-                   new_level = "New") %>%
-        step_dummy(all_nominal_predictors()) %>%
-      #  step_interact(terms = ~ SEASON:(starts_with("OFFENSE_ID"))) %>%
-        step_interact(terms = ~ DISTANCE:(starts_with("DOWN_"))) %>%
-        step_interact(terms = ~ YARDS_TO_GOAL:(starts_with("DOWN_"))) %>%
-        step_interact(terms = ~ YARDS_TO_GOAL*SECONDS_IN_HALF) %>%
-        check_missing(all_predictors()) %>%
-        step_normalize(all_numeric_predictors())
-
-```
-
-
-## Workflows
-
-I'll define the model I'll be using here, which is a multinomial logistic regression.
+<!-- ### Defense Adjusted -->
+        
+        <!-- But, we know that all teams are not created equal. When evaluating offenses, we'll want to account for the quality of the defense a team is facing. I'll handle this by making a recipe with a fixed effect for the defense that the offense is facing. To wit, I'll make FCS schools the reference category and add a team effect for every FBS school's defense. -->
+        
+        <!-- ```{r defense fixed effect recipe} -->
+        
+        <!-- defense_adjusted_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~., -->
+                                                      <!--                          data = plays_train) %>% -->
+        <!--         update_role(all_predictors(), -->
+                                         <!--                     new_role = "ID") %>% -->
+        <!--         update_role( -->
+                                          <!--                     c("GAME_ID", -->
+                                                                             <!--                   "DRIVE_ID", -->
+                                                                             <!--                   "PLAY_ID", -->
+                                                                             <!--                   "SEASON", -->
+                                                                             <!--                   "HOME", -->
+                                                                             <!--                   "AWAY", -->
+                                                                             <!--                   "OFFENSE", -->
+                                                                             <!--                   "DEFENSE", -->
+                                                                             <!--                   "OFFENSE_ID", -->
+                                                                             <!--                   "DEFENSE_ID", -->
+                                                                             <!--                   "OFFENSE_DIVISION", -->
+                                                                             <!--                   "DEFENSE_DIVISION", -->
+                                                                             <!--                   "OFFENSE_CONFERENCE", -->
+                                                                             <!--                   "DEFENSE_CONFERENCE", -->
+                                                                             <!--                   "SCORING", -->
+                                                                             <!--                   "OFFENSE_SCORE", -->
+                                                                             <!--                   "DEFENSE_SCORE", -->
+                                                                             <!--                   "PLAY_TEXT", -->
+                                                                             <!--                   "PLAY_TYPE", -->
+                                                                             <!--                   "NEXT_SCORE_EVENT_HOME", -->
+                                                                             <!--                   "NEXT_SCORE_EVENT_HOME_DIFF", -->
+                                                                             <!--                   "NEXT_SCORE_EVENT_OFFENSE_DIFF", -->
+                                                                             <!--                   "YARD_LINE", -->
+                                                                             <!--                   "MINUTES_IN_HALF", -->
+                                                                             <!--                   "HALF"), -->
+                                          <!--                 new_role = "ID") %>% -->
+        <!--         step_mutate(PERIOD_ID = PERIOD, -->
+                                         <!--                     role = "ID") %>% -->
+        <!--         # features we're inheriting -->
+        <!--         update_role( -->
+                                          <!--                 c("SEASON", -->
+                                                                         <!--                 "PERIOD",  -->
+                                                                         <!--                 "SECONDS_IN_HALF", -->
+                                                                         <!--                 "DOWN", -->
+                                                                         <!--                 "DISTANCE", -->
+                                                                         <!--                 "YARDS_TO_GOAL", -->
+                                                                         <!--                 "DEFENSE_ID"), -->
+                                          <!--                 new_role = "predictor") %>% -->
+        <!--         # filters for issues -->
+        <!--         step_filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>% -->
+        <!--         step_filter(YARD_LINE <= 100 & YARD_LINE >=0) %>% -->
+        <!--         step_filter(YARDS_TO_GOAL <=100 & YARD_LINE >=0) %>% -->
+        <!--         step_filter(DOWN %in% c(1, 2, 3, 4)) %>% -->
+        <!--         step_filter(DISTANCE >=0 & DISTANCE <=100) %>% -->
+        <!--         step_filter(SECONDS_IN_HALF <=1800) %>% -->
+        <!--         step_filter(!is.na(SECONDS_IN_HALF)) %>% -->
+        <!--         step_filter(PERIOD_ID == 1 | PERIOD_ID == 2 | PERIOD_ID == 3 | PERIOD_ID == 4) %>% -->
+        <!--         # create features -->
+        <!--         step_mutate(KICKOFF = case_when(grepl("kickoff", tolower(PLAY_TEXT)) | grepl("kickoff", tolower(PLAY_TYPE))==T ~ 1, -->
+                                                             <!--                                         TRUE ~ 0), -->
+                                         <!--                     role = "id") %>% -->
+        <!--         step_mutate(TIMEOUT = case_when(grepl("timeout", tolower(PLAY_TEXT)) ~ 1, -->
+                                                             <!--                                         TRUE ~ 0), -->
+                                         <!--                     role = "id") %>% -->
+        <!--         step_filter(TIMEOUT != 1) %>% -->
+        <!--         step_filter(KICKOFF != 1) %>% -->
+        <!--         step_mutate(DOWN_TO_GOAL = case_when(DISTANCE == YARDS_TO_GOAL ~ 1, -->
+                                                                  <!--                                              TRUE ~ 0)) %>% -->
+        <!--         step_mutate(DOWN = factor(DOWN)) %>% -->
+        <!--         step_mutate(PERIOD = factor(PERIOD)) %>% -->
+        <!--         step_log(DISTANCE, offset =1) %>% -->
+        <!--         # defense fixed effect -->
+        <!--         step_relevel(DEFENSE_ID, -->
+                                          <!--                      ref_level = "fcs") %>% -->
+        <!--         step_novel(DEFENSE_ID, -->
+                                        <!--                    new_level = "New_Team") %>% -->
+        <!--         step_novel(all_nominal_predictors(), -->
+                                        <!--                    -DEFENSE_ID, -->
+                                        <!--                    new_level = "New") %>% -->
+        <!--         step_dummy(all_nominal_predictors()) %>% -->
+        <!--        # step_interact(terms = ~ SEASON:(starts_with("DEFENSE_ID"))) %>% -->
+        <!--         step_interact(terms = ~ DISTANCE:(starts_with("DOWN_"))) %>% -->
+        <!--         step_interact(terms = ~ YARDS_TO_GOAL:(starts_with("DOWN_"))) %>% -->
+        <!--         step_interact(terms = ~ YARDS_TO_GOAL*SECONDS_IN_HALF) %>% -->
+        <!--         check_missing(all_predictors()) %>% -->
+        <!--         step_zv(all_predictors()) %>% -->
+        <!--         step_normalize(all_numeric_predictors()) -->
+        
+        <!-- ``` -->
+        
+        <!-- ### Offense Adjusted -->
+        
+        <!-- And also a model specification with a fixed effect for the offense the defense is facing, so we can flip the analysis around for the defense. -->
+        
+        <!-- ```{r offense fixed effect recipe} -->
+        
+        <!-- offense_adjusted_recipe = recipe(NEXT_SCORE_EVENT_OFFENSE ~., -->
+                                                      <!--                          data = plays_train) %>% -->
+        <!--         update_role(all_predictors(), -->
+                                         <!--                     new_role = "ID") %>% -->
+        <!--         update_role( -->
+                                          <!--                 c("GAME_ID", -->
+                                                                         <!--                   "DRIVE_ID", -->
+                                                                         <!--                   "PLAY_ID", -->
+                                                                         <!--                   "SEASON", -->
+                                                                         <!--                   "HOME", -->
+                                                                         <!--                   "AWAY", -->
+                                                                         <!--                   "OFFENSE", -->
+                                                                         <!--                   "DEFENSE", -->
+                                                                         <!--                   "OFFENSE_ID", -->
+                                                                         <!--                   "DEFENSE_ID", -->
+                                                                         <!--                   "OFFENSE_DIVISION", -->
+                                                                         <!--                   "DEFENSE_DIVISION", -->
+                                                                         <!--                   "OFFENSE_CONFERENCE", -->
+                                                                         <!--                   "DEFENSE_CONFERENCE", -->
+                                                                         <!--                   "SCORING", -->
+                                                                         <!--                   "OFFENSE_SCORE", -->
+                                                                         <!--                   "DEFENSE_SCORE", -->
+                                                                         <!--                   "PLAY_TEXT", -->
+                                                                         <!--                   "PLAY_TYPE", -->
+                                                                         <!--                   "NEXT_SCORE_EVENT_HOME", -->
+                                                                         <!--                   "NEXT_SCORE_EVENT_HOME_DIFF", -->
+                                                                         <!--                   "NEXT_SCORE_EVENT_OFFENSE_DIFF", -->
+                                                                         <!--                   "YARD_LINE", -->
+                                                                         <!--                   "MINUTES_IN_HALF", -->
+                                                                         <!--                   "HALF"), -->
+                                          <!--                 new_role = "ID") %>% -->
+        <!--         step_mutate(PERIOD_ID = PERIOD, -->
+                                         <!--                     role = "ID") %>% -->
+        <!--         # features we're inheriting -->
+        <!--         update_role( -->
+                                          <!--                 c("SEASON", -->
+                                                                         <!--                 "PERIOD",  -->
+                                                                         <!--                 "SECONDS_IN_HALF", -->
+                                                                         <!--                 "DOWN", -->
+                                                                         <!--                 "DISTANCE", -->
+                                                                         <!--                 "YARDS_TO_GOAL", -->
+                                                                         <!--                 "OFFENSE_ID"), -->
+                                          <!--                 new_role = "predictor") %>% -->
+        <!--         # filters for issues -->
+        <!--         step_filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>% -->
+        <!--         step_filter(YARD_LINE <= 100 & YARD_LINE >=0) %>% -->
+        <!--         step_filter(YARDS_TO_GOAL <=100 & YARD_LINE >=0) %>% -->
+        <!--         step_filter(DOWN %in% c(1, 2, 3, 4)) %>% -->
+        <!--         step_filter(DISTANCE >=0 & DISTANCE <=100) %>% -->
+        <!--         step_filter(SECONDS_IN_HALF <=1800) %>% -->
+        <!--         step_filter(!is.na(SECONDS_IN_HALF)) %>% -->
+        <!--         step_filter(PERIOD_ID == 1 | PERIOD_ID == 2 | PERIOD_ID == 3 | PERIOD_ID == 4) %>% -->
+        <!--         # create features -->
+        <!--         step_mutate(KICKOFF = case_when(grepl("kickoff", tolower(PLAY_TEXT)) | grepl("kickoff", tolower(PLAY_TYPE))==T ~ 1, -->
+                                                             <!--                                         TRUE ~ 0), -->
+                                         <!--                     role = "id") %>% -->
+        <!--         step_mutate(TIMEOUT = case_when(grepl("timeout", tolower(PLAY_TEXT)) ~ 1, -->
+                                                             <!--                                         TRUE ~ 0), -->
+                                         <!--                     role = "id") %>% -->
+        <!--         step_filter(TIMEOUT != 1) %>% -->
+        <!--         step_filter(KICKOFF != 1) %>% -->
+        <!--         step_mutate(DOWN_TO_GOAL = case_when(DISTANCE == YARDS_TO_GOAL ~ 1, -->
+                                                                  <!--                                              TRUE ~ 0)) %>% -->
+        <!--         step_mutate(DOWN = factor(DOWN)) %>% -->
+        <!--         step_mutate(PERIOD = factor(PERIOD)) %>% -->
+        <!--         step_log(DISTANCE, offset =1) %>% -->
+        <!--         # offense fixed effect -->
+        <!--         step_relevel(OFFENSE_ID, -->
+                                          <!--                      ref_level = "fcs") %>% -->
+        <!--         step_novel(OFFENSE_ID, -->
+                                        <!--                    new_level = "New_Team") %>% -->
+        <!--         step_novel(all_nominal_predictors(), -->
+                                        <!--                    -OFFENSE_ID, -->
+                                        <!--                    new_level = "New") %>% -->
+        <!--         step_dummy(all_nominal_predictors()) %>% -->
+        <!--     #    step_interact(terms = ~ SEASON:(starts_with("OFFENSE_ID"))) %>% -->
+        <!--         step_interact(terms = ~ DISTANCE:(starts_with("DOWN_"))) %>% -->
+        <!--         step_interact(terms = ~ YARDS_TO_GOAL:(starts_with("DOWN_"))) %>% -->
+        <!--         step_interact(terms = ~ YARDS_TO_GOAL*SECONDS_IN_HALF) %>% -->
+        <!--         check_missing(all_predictors()) %>% -->
+        <!--         step_zv(all_predictors()) %>% -->
+        <!--         step_normalize(all_numeric_predictors()) -->
+        
+        <!-- ``` -->
+        
+        
+        ## Workflows
+        
+        I'll define the model I'll be using here, which is a multinomial logistic regression.
 
 ```{r define model objs, echo=T}
 
 # from glmnet
 multinom_mod = multinom_reg(
-  mode = "classification",
-  engine = "glmnet",
-  penalty = 0,
-  mixture = NULL
+        mode = "classification",
+        engine = "glmnet",
+        penalty = 0,
+        mixture = NULL
 )
 
 ```
 
-I'll then create workflows for each.
+I'll then create workflows for each of these models.
 
 ```{r craete workflow, echo=T}
 
@@ -993,40 +1037,17 @@ keep_pred <- control_resamples(save_pred = TRUE,
 
 ```
 
-At this point I can remove the recipes, as they're now embedded in the workflows.
 
 ```{r rm recipes}
 
+# At this point I can remove the recipes, as they're now embedded in the workflows.
 rm(baseline_recipe,
    defense_adjusted_recipe,
    offense_adjusted_recipe)
 
 ```
 
-<!-- I'll manually define resamples based on the seasons - rather than doing k-fold cross validation, I'll assign each season to be a fold and train and assess the model leaving one season out at a time. -->
-
-```{r set up manual resamples by season}
-
-# # get unique seasons
-# seasons = unique(plays_train$SEASON) %>%
-#         sort
-# 
-# # define indices by seasons
-# indices = foreach(i = 1:length(seasons)) %do% {
-#         list(analysis = which(plays_train$SEASON != seasons[i]),
-#              assessment = which(plays_train$SEASON == seasons[i]))
-# }
-# 
-# # get the splits
-# splits <- lapply(indices, make_splits, data = plays_train)
-# 
-# # define rset object
-# manual_resamples = manual_rset(splits, 
-#                                paste("holdout:", seasons))
-
-```
-
-```{r register parallel cores}
+```{r register parallel cores, include=F}
 
 # register parallel
 library(doParallel)
@@ -1037,7 +1058,7 @@ registerDoParallel(numcores -2)
 
 ```{r create workflow sets}
 
-# create workflow set
+# # create workflow set
 # multinom_workflow_set = workflow_set(
 #         preproc = list(baseline = baseline_recipe,
 #                        defense_adjusted_recipe = defense_adjusted_recipe),
@@ -1046,35 +1067,37 @@ registerDoParallel(numcores -2)
 
 ```
 
-
 ## Training
+
+I'll now train models to each of these different sets in the training data.
 
 <!-- Now I'll train and assess each model on the training set via leave-one-season-out cross validation, then I'll refit the model to the entire training set. -->
 
-```{r fit on set, echo=T}
+```{r load previously run resamples}
 
-# # fit to resamples
-# resamples_multinom = multinom_wf %>%
+# baseline model
+# resamples_baseline = baseline_wf %>%
 #         fit_resamples(data = plays_train,
 #                       metrics = class_metrics,
 #                       resamples = manual_resamples,
 #                       control = keep_pred,
 #                       verbose=T)
-
-# # # save locally so as to not need to retrain everytime
-# write_rds(resamples_multinom,
-#      file = here::here("models", "resamples_expected_points.Rds"),
-#      compress = "gz")
-
-```
-
-```{r load previously run resamples}
-
-# resamples_multinom = multinom_workflow_set %>%
-#         workflow_map("fit_resamples",
-#                      metrics = class_metrics,
-#                      resamples = manual_resamples,
-#                      control = keep_pred)
+# 
+# # defense adjusted
+# resamples_defense_adjusted = defense_adjusted_wf %>%
+#         fit_resamples(data = plays_train,
+#                       metrics = class_metrics,
+#                       resamples = manual_resamples,
+#                       control = keep_pred,
+#                       verbose=T)
+# 
+# # offense adjusted
+# resamples_offense_adjusted = offense_adjusted_wf %>%
+#         fit_resamples(data = plays_train,
+#                       metrics = class_metrics,
+#                       resamples = manual_resamples,
+#                       control = keep_pred,
+#                       verbose=T)
 
 ```
 
@@ -1082,26 +1105,37 @@ registerDoParallel(numcores -2)
 ```{r fit to training set, echo=T, eval=T}
 
 # fit the model to the whole training set
-fit_baseline = baseline_wf %>%
-        fit(data = plays_train)
-
+last_fit_baseline = baseline_wf %>%
+        last_fit(split = valid_split)
+                 
 # fit the defense adjusted model
-fit_defense_adjusted = defense_adjusted_wf %>%
-        fit(data = plays_train)
+last_fit_defense_adjusted = defense_adjusted_wf %>%
+        last_fit(split = valid_split)
 
-# fit the offense adjusted model
-fit_offense_adjusted = offense_adjusted_wf %>%
-        fit(data = plays_train)
+# fit the offense adjusted modelgames
+last_fit_offense_adjusted = offense_adjusted_wf %>%
+        last_fit(split = valid_split)
 
 ```
+
+```{r extract the models from this}
+
+fit_baseline = last_fit_baseline %>%
+        pluck(".workflow", 1)
+
+fit_defense_adjusted = last_fit_defense_adjusted %>%
+        pluck(".workflow", 1)
+
+```
+
 
 
 ```{r save models locally, eval=T}
 # 
 # # save 
-save(fit_baseline, file = here::here("models/fit_baseline.Rds"))
-save(fit_defense_adjusted, file = here::here("models/fit_defense_adjusted.Rds"))
-save(fit_offense_adjusted, file = here::here("models/fit_offense_adjusted.Rds"))
+save(fit_baseline, file = here::here("workflows/expected_points_baseline.Rds"))
+save(fit_defense_adjusted, file = here::here("workflows/expected_points_defense_adjusted.Rds"))
+save(fit_offense_adjusted, file = here::here("workflows/offense_adjusted.Rds"))
 
 ```
 
@@ -1114,14 +1148,23 @@ load(here::here("models/fit_offense_adjusted.Rds"))
 
 ```
 
-<!-- ## Resampling Performance -->
+<!-- ## Model Performance -->
 
-<!-- How did the model perform on each resample? I'm looking at the logloss and area under the receiver operating characteristic curve (roc_auc). The logloss is only meaningful by comparison, I'll compare how the model does to a null model on the validation set. -->
+<!-- How did each model perform in predicting upcoming seasons? I'll evaluate the performance of the models using measures like the logloss and area under the ROC, but calibration is what I really care about the most - are the probabilities from the model well calibrated? -->
+        
+        <!-- How did the model perform on each resample? I'm looking at the logloss and area under the receiver operating characteristic curve (roc_auc). The logloss is only meaningful by comparison, I'll compare how the model does to a null model on the validation set. -->
+        
+        ```{r get results}
 
-```{r get results}
-
-# collect metrics
-# resamples_multinom %>%
+# # collect metrics
+# resamples_baseline %>%
+#         mutate(method = 'unadjusted') %>%
+#         group_by(method) %>%
+#         collect_metrics(summarize=F)
+#           resamples_defense_adjusted %>%
+#                   mutate(method = 'defense_adjusted'),
+#           resamples_offense_adjusted %>%
+#                   mutate(method = 'offense_adjusted')) %>%
 #         collect_metrics(summarize=F) %>%
 #         mutate_if(is.numeric, round, 3) %>%
 #         select(id, .metric, .estimator, .estimate) %>%
@@ -1154,8 +1197,8 @@ Understanding partial effects from a multinomial logit is already difficult, and
 I'll look at predicted probabilities using an observed values approach for particular features (using a sample rather than the full dataset to save time). This means taking the model and then altering the feature of interest for every observation and taking the average predicted probability for each outcome across all observations.
 
 How is the probability of the next scoring event influenced by where the offense has possession?
-
-```{r look at defense fixed effect}
+        
+        ```{r look at defense fixed effect}
 
 # define min and max for feature
 setting = seq(1, 100,
@@ -1163,27 +1206,27 @@ setting = seq(1, 100,
 
 # loop over
 pred_settings = foreach(i = 1:length(setting),
-        .combine = bind_rows) %do% {
-                
-                set.seed(1999)
-                sample_plays =  plays_train %>%
-                        sample_n(50000) %>%
-                        mutate(YARDS_TO_GOAL = setting[i])
-                
-                fit_baseline %>%
-                        predict(new_data = sample_plays, type = 'prob') %>%
-                        bind_cols(., sample_plays) %>%
-                        group_by(YARDS_TO_GOAL) %>%
-                        summarize(.pred_No_Score = mean(.pred_No_Score),
-                                  .pred_TD = mean(.pred_TD),
-                                  .pred_FG = mean(.pred_FG),
-                                  .pred_Safety = mean(.pred_Safety),
-                                  .pred_Opp_Safety = mean(.pred_Opp_Safety),
-                                  .pred_Opp_FG = mean(.pred_Opp_FG),
-                                  .pred_Opp_TD = mean(.pred_Opp_TD)) %>%
-                        gather("outcome", ".pred",
-                               -YARDS_TO_GOAL)
-}
+                        .combine = bind_rows) %do% {
+                                
+                                set.seed(1999)
+                                sample_plays =  plays_train %>%
+                                        sample_n(50000) %>%
+                                        mutate(YARDS_TO_GOAL = setting[i])
+                                
+                                fit_baseline %>%
+                                        predict(new_data = sample_plays, type = 'prob') %>%
+                                        bind_cols(., sample_plays) %>%
+                                        group_by(YARDS_TO_GOAL) %>%
+                                        summarize(.pred_No_Score = mean(.pred_No_Score),
+                                                  .pred_TD = mean(.pred_TD),
+                                                  .pred_FG = mean(.pred_FG),
+                                                  .pred_Safety = mean(.pred_Safety),
+                                                  .pred_Opp_Safety = mean(.pred_Opp_Safety),
+                                                  .pred_Opp_FG = mean(.pred_Opp_FG),
+                                                  .pred_Opp_TD = mean(.pred_Opp_TD)) %>%
+                                        gather("outcome", ".pred",
+                                               -YARDS_TO_GOAL)
+                        }
 
 ```
 
@@ -1195,21 +1238,21 @@ pred_settings = foreach(i = 1:length(setting),
 # now plot this effect
 pred_settings %>%
         mutate(outcome = paste(gsub(".pred_", "Pr(", outcome), ")", sep="")) %>%
-             mutate(outcome = factor(outcome,
+        mutate(outcome = factor(outcome,
                                 levels = paste("Pr(", c("TD",
-                                      "FG",
-                                      "Safety",
-                                      "No_Score",
-                                      "Opp_Safety",
-                                      "Opp_FG",
-                                      "Opp_TD"),
-                                      ")",
-                                      sep =""))) %>%
+                                                        "FG",
+                                                        "Safety",
+                                                        "No_Score",
+                                                        "Opp_Safety",
+                                                        "Opp_FG",
+                                                        "Opp_TD"),
+                                               ")",
+                                               sep =""))) %>%
         ggplot(., 
                aes(x=YARDS_TO_GOAL,
-               y = .pred,
-               color = outcome,
-               group = outcome))+
+                   y = .pred,
+                   color = outcome,
+                   group = outcome))+
         facet_wrap(outcome ~.,
                    ncol = 4)+
         geom_line(lwd=1.1)+
@@ -1227,27 +1270,27 @@ pred_settings %>%
         geom_vline(xintercept = 50,
                    linetype = 'dotted')+
         ggtitle("Probability of Next Scoring Event by Offensive Field Position",
-                subtitle = str_wrap("Predicted probabilities from multinomial logistic regression. Displaying probabilities using observed values approach for a sample of training set. Model trained on regular season college football plays from 2007-2018. ",
+                subtitle = str_wrap("Predicted probabilities from multinomial logistic regression. Displaying probabilities using observed values approach for a sample of training set. Model trained on regular season college football plays from 2007-2015. ",
                                     120))
 
 # now plot this effect
 pred_settings %>%
         mutate(outcome = paste(gsub(".pred_", "Pr(", outcome), ")", sep="")) %>%
-             mutate(outcome = factor(outcome,
+        mutate(outcome = factor(outcome,
                                 levels = paste("Pr(", c("TD",
-                                      "FG",
-                                      "Safety",
-                                      "No_Score",
-                                      "Opp_Safety",
-                                      "Opp_FG",
-                                      "Opp_TD"),
-                                      ")",
-                                      sep =""))) %>%
+                                                        "FG",
+                                                        "Safety",
+                                                        "No_Score",
+                                                        "Opp_Safety",
+                                                        "Opp_FG",
+                                                        "Opp_TD"),
+                                               ")",
+                                               sep =""))) %>%
         ggplot(., 
                aes(x=YARDS_TO_GOAL,
-               y = .pred,
-               fill = outcome,
-               group = outcome))+
+                   y = .pred,
+                   fill = outcome,
+                   group = outcome))+
         geom_col(position = 'fill',
                  lwd=1.1)+
         # scale_fill_viridis_d(option = 'B',
@@ -1257,22 +1300,22 @@ pred_settings %>%
         theme_phil()+
         theme(legend.title = element_text())+
         guides(fill = guide_legend(title = 'Next Scoring Event',
-                                    title.position = 'top'))+
+                                   title.position = 'top'))+
         xlab("Yards to Opponent End Zone")+
         ylab("Pr(Next Scoring Event)")+
         coord_cartesian(ylim= c(0, 1))+
         geom_vline(xintercept = 50,
                    linetype = 'dotted')+
         ggtitle("Probability of Next Scoring Event by Offensive Field Position",
-                subtitle = str_wrap("Predicted probabilities from multinomial logistic regression. Displaying probabilities using observed values approach for a sample of training set. Model trained on regular season college football plays from 2007-2018. ",
+                subtitle = str_wrap("Predicted probabilities from multinomial logistic regression. Displaying probabilities using observed values approach for a sample of training set. Model trained on regular season college football plays from 2007-2015. ",
                                     120))
 
 
 ```
 
 How is this affected by the down?
-
-```{r loop over yards to goal and down}
+        
+        ```{r loop over yards to goal and down}
 
 # define min and max for feature
 setting_1 = seq(1, 100, 5)
@@ -1280,11 +1323,11 @@ setting_2 = c(1, 2, 3, 4)
 
 # loop over both
 pred_settings_12 = foreach(i = 1:length(setting_1),
-                        .combine = bind_rows) %:% 
+                           .combine = bind_rows) %:% 
         foreach(j = 1:length(setting_2)) %do% {
                 
                 set.seed(1999)
-                 fit_baseline %>%
+                fit_baseline %>%
                         predict(new_data = plays_train %>% 
                                         sample_n(50000) %>%
                                         mutate(YARDS_TO_GOAL = setting_1[i],
@@ -1298,7 +1341,7 @@ pred_settings_12 = foreach(i = 1:length(setting_1),
                                DOWN = setting_2[j])
                 
         }
-                
+
 ```
 
 ```{r look at predicted probs by down and yards to goal}
@@ -1306,27 +1349,27 @@ pred_settings_12 = foreach(i = 1:length(setting_1),
 # now plot this effect
 pred_settings_12 %>%
         mutate(outcome = paste(gsub(".pred_", "Pr(", outcome), ")", sep="")) %>%
-             mutate(outcome = factor(outcome,
+        mutate(outcome = factor(outcome,
                                 levels = paste("Pr(", c("TD",
-                                      "FG",
-                                      "Safety",
-                                      "No_Score",
-                                      "Opp_Safety",
-                                      "Opp_FG",
-                                      "Opp_TD"),
-                                      ")",
-                                      sep =""))) %>%
+                                                        "FG",
+                                                        "Safety",
+                                                        "No_Score",
+                                                        "Opp_Safety",
+                                                        "Opp_FG",
+                                                        "Opp_TD"),
+                                               ")",
+                                               sep =""))) %>%
         mutate(DOWN = factor(DOWN)) %>%
         ggplot(., 
                aes(x=YARDS_TO_GOAL,
-               y = .pred,
-               color = DOWN,
-               group = DOWN))+
+                   y = .pred,
+                   color = DOWN,
+                   group = DOWN))+
         facet_wrap(outcome ~.,
                    ncol = 4)+
         geom_line(lwd=1.1)+
         scale_color_viridis_d(option = 'D',
-                           begin = 0.2)+        
+                              begin = 0.2)+        
         theme_phil()+
         theme(legend.title = element_text())+
         guides(color = guide_legend(title = 'Down',
@@ -1334,29 +1377,29 @@ pred_settings_12 %>%
         xlab("Yards to Opponent End Zone")+
         ylab("Pr(Next Scoring Event)")+
         ggtitle("Probability of Next Scoring Event by Offensive Field Position and Down",
-                subtitle = str_wrap("Predicted probabilities from multinomial logistic regression. Displaying probabilities using observed values approach for a sample of training set. Model trained on regular season college football plays from 2007-2018. ",
+                subtitle = str_wrap("Predicted probabilities from multinomial logistic regression. Displaying probabilities using observed values approach for a sample of training set. Model trained on regular season college football plays from 2007-2015. ",
                                     120))
 
 ```
 
 How does this translate into expected points?
-
-```{r expected points by distance and down}
+        
+        ```{r expected points by distance and down}
 
 # loop over both
 point_settings_12 = foreach(i = 1:length(setting_1),
-                        .combine = bind_rows) %:% 
+                            .combine = bind_rows) %:% 
         foreach(j = 1:length(setting_2)) %do% {
                 
                 set.seed(1999)
-                 fit_baseline %>%
+                fit_baseline %>%
                         predict(new_data = plays_train %>% 
                                         sample_n(50000) %>%
                                         mutate(YARDS_TO_GOAL = setting_1[i],
                                                DOWN = setting_2[j]),
                                 type = 'prob') %>%
-                         expected_points_func %>%
-                         summarize(EP = mean(EP)) %>%
+                        expected_points_func %>%
+                        summarize(EP = mean(EP)) %>%
                         mutate(YARDS_TO_GOAL = setting_1[i],
                                DOWN = setting_2[j])
                 
@@ -1371,14 +1414,14 @@ point_settings_12 %>%
         mutate(DOWN = factor(DOWN)) %>%
         ggplot(., 
                aes(x=YARDS_TO_GOAL,
-               y = EP,
-               color = DOWN,
-               group = DOWN))+
+                   y = EP,
+                   color = DOWN,
+                   group = DOWN))+
         # facet_wrap(outcome ~.,
         #            ncol = 4)+
         geom_line(lwd=1.1)+
         scale_color_viridis_d(option = 'D',
-                           begin = 0.2)+        
+                              begin = 0.2)+        
         theme_phil()+
         geom_hline(yintercept = 0,
                    linetype = 'dashed')+
@@ -1388,85 +1431,114 @@ point_settings_12 %>%
         xlab("Yards to Opponent End Zone")+
         ylab("Expected Points")+
         ggtitle("Expected Points by Offensive Field Position and Down",
-                subtitle = str_wrap("Expected points using probabilities from multinomial logistic regression. Displaying expected points a portion of the training set using observed values approach, Model trained on regular season college football plays from 2007-2018. ",
+                subtitle = str_wrap("Expected points using probabilities from multinomial logistic regression. Displaying expected points a portion of the training set using observed values approach, Model trained on regular season college football plays from 2007-2015. ",
                                     120))+
         geom_vline(xintercept = 50,
                    linetype = 'dotted')
 
 ```
 
-### Team Effects
+<!-- ### Team Effects -->
+        
+        <!-- ```{r extract coefficient from defense adjusted} -->
+        
+        <!-- tidy(fit_defense_adjusted) %>% -->
+        <!--         mutate(term = factor(term)) %>% -->
+        <!--         mutate(term = relevel(term, ref = "(Intercept)")) %>% -->
+        <!--         filter(grepl("DEFENSE", term)) %>% -->
+        <!--      #   arrange(desc(estimate)) -->
+        <!--         mutate(crude = case_when(class == 'TD' ~ 7*estimate, -->
+                                                      <!--                                  class == 'FG' ~ 3*estimate, -->
+                                                      <!--                                  class == 'Safety' ~ 2*estimate, -->
+                                                      <!--                                  class == 'No_Score' ~ 0*estimate, -->
+                                                      <!--                                  class == 'Opp_Safety' ~ -2*estimate, -->
+                                                      <!--                                  class == 'Opp_TD' ~ -7*estimate, -->
+                                                      <!--                                  class == 'Opp_FG' ~ -3*estimate)) %>% -->
+        <!--         filter(!is.na(crude)) %>% -->
+        <!--         group_by(term) %>% -->
+        <!--         summarize(rank = sum(crude)) %>% -->
+        <!--         arrange(rank) -->
+        <!--         ggplot(., aes(x=estimate, -->
+                                           <!--                       y=term))+ -->
+        <!--         geom_point()+ -->
+        <!--         facet_wrap(class ~.) -->
+        
+        <!-- ``` -->
+        
+        
+        
+        <!-- For the models that include team effects, we end up with a coefficient for the opponent's offense or defense that affects the amount of points an offense or defense can expect when playing a team.  -->
 
-For the models that include team effects, we end up with a coefficient for the opponent's offense or defense that affects the amount of points an offense or defense can expect when playing a team. 
+<!-- ```{r expected points by team and yard line} -->
 
-```{r expected points by team and yard line}
+<!-- teams = c("Alabama", -->
+<!--           "LSU", -->
+<!--           "Ohio State", -->
+<!--           "Wisconsin", -->
+<!--           "Texas Tech", -->
+<!--           "Oregon State", -->
+<!--           "Kansas", -->
+<!--           "Idaho") -->
 
-teams = c("Alabama",
-          "LSU",
-          "Ohio State",
-          "Wisconsin",
-          "Kansas",
-          "Idaho")
+<!-- point_teams_12 = foreach(i = 1:length(setting_1), -->
+<!--                         .combine = bind_rows) %:%  -->
+<!--         foreach(j = 1:length(teams)) %do% { -->
 
-point_teams_12 = foreach(i = 1:length(setting_1),
-                        .combine = bind_rows) %:% 
-        foreach(j = 1:length(teams)) %do% {
-                
-                set.seed(1999)
-                sample_plays =  plays_train %>% 
-                                        sample_n(50000) %>%
-                                        mutate(YARDS_TO_GOAL = setting_1[i],
-                                               DEFENSE = teams[j])
-                
-                 fit_defense_adjusted %>%
-                        predict(new_data = sample_plays,
-                                type = 'prob') %>%
-                         bind_cols(., sample_plays) %>%
-                         group_by(YARDS_TO_GOAL,
-                                  DEFENSE) %>%
-                         summarize(.pred_No_Score = mean(.pred_No_Score),
-                                  .pred_TD = mean(.pred_TD),
-                                  .pred_FG = mean(.pred_FG),
-                                  .pred_Safety = mean(.pred_Safety),
-                                  .pred_Opp_Safety = mean(.pred_Opp_Safety),
-                                  .pred_Opp_FG = mean(.pred_Opp_FG),
-                                  .pred_Opp_TD = mean(.pred_Opp_TD),
-                                  .groups = 'drop') %>%
-                         expected_points_func
-                
-        }
+<!--                 set.seed(1999) -->
+<!--                 sample_plays =  plays_train %>%  -->
+<!--                                         sample_n(50000) %>% -->
+<!--                                         mutate(YARDS_TO_GOAL = setting_1[i], -->
+<!--                                                DEFENSE = teams[j]) -->
 
-```
+<!--                  fit_defense_adjusted %>% -->
+<!--                         predict(new_data = sample_plays, -->
+<!--                                 type = 'prob') %>% -->
+<!--                          bind_cols(., sample_plays) %>% -->
+<!--                          group_by(YARDS_TO_GOAL, -->
+<!--                                   DEFENSE) %>% -->
+<!--                          summarize(.pred_No_Score = mean(.pred_No_Score), -->
+<!--                                   .pred_TD = mean(.pred_TD), -->
+<!--                                   .pred_FG = mean(.pred_FG), -->
+<!--                                   .pred_Safety = mean(.pred_Safety), -->
+<!--                                   .pred_Opp_Safety = mean(.pred_Opp_Safety), -->
+<!--                                   .pred_Opp_FG = mean(.pred_Opp_FG), -->
+<!--                                   .pred_Opp_TD = mean(.pred_Opp_TD), -->
+<!--                                   .groups = 'drop') %>% -->
+<!--                          expected_points_func -->
 
-This means, for instance, that when facing a team like Alabama, your expected points are expected to be lower regardless of where you are on the field due to the strength of their defense. If you're facing a weaker team, like Idaho, your expected points are higher.
+<!--         } -->
 
-```{r expected points by team}
+<!-- ``` -->
 
-point_teams_12 %>%
-        ggplot(., aes(x=YARDS_TO_GOAL,
-                      color = DEFENSE,
-                      y=EP))+
-        geom_line(lwd=1.)+
-        scale_color_colorblind()+
-        theme_phil()+
-                geom_hline(yintercept = 0,
-                   linetype = 'dashed')+
-        theme(legend.title = element_text())+
-        guides(color = guide_legend(title = 'Defense',
-                                    title.position = 'top'))+
-        xlab("Yards to Opponent End Zone")+
-        ylab("Expected Points")+
-        ggtitle("Expected Points by Offensive Field Position and Defense",
-                subtitle = str_wrap("Expected points using probabilities from multinomial logistic regression with defense fixed effects. Displaying expected points for a portion of the training set using observed values approach, Model trained on regular season college football plays from 2007-2020. ",
-                                    120))+
-        geom_vline(xintercept = 50,
-                   linetype = 'dotted')
-
-```
-
-I interacted team effects with season, which means this effect will vary for each team by the season.
-
-```{r rm objects from memory}
+<!-- This means, for instance, that when facing a team like Alabama, your expected points are expected to be lower regardless of where you are on the field due to the strength of their defense. If you're facing a weaker team, like Idaho, your expected points are higher. -->
+        
+        <!-- ```{r expected points by team} -->
+        
+        <!-- point_teams_12 %>% -->
+        <!--         ggplot(., aes(x=YARDS_TO_GOAL, -->
+                                           <!--                       color = DEFENSE, -->
+                                           <!--                       y=EP))+ -->
+        <!--         geom_line(lwd=1.)+ -->
+        <!--         scale_color_colorblind()+ -->
+        <!--         theme_phil()+ -->
+        <!--                 geom_hline(yintercept = 0, -->
+                                                <!--                    linetype = 'dashed')+ -->
+        <!--         theme(legend.title = element_text())+ -->
+        <!--         guides(color = guide_legend(title = 'Defense', -->
+                                                         <!--                                     title.position = 'top'))+ -->
+        <!--         xlab("Yards to Opponent End Zone")+ -->
+        <!--         ylab("Expected Points")+ -->
+        <!--         ggtitle("Expected Points by Offensive Field Position and Defense", -->
+                                     <!--                 subtitle = str_wrap("Expected points using probabilities from multinomial logistic regression with defense fixed effects. Displaying expected points for a portion of the training set using observed values approach, Model trained on regular season college football plays from 2007-2020. ", -->
+                                                                                      <!--                                     120))+ -->
+        <!--         geom_vline(xintercept = 50, -->
+                                        <!--                    linetype = 'dotted') -->
+        
+        <!-- ``` -->
+        
+        <!-- I interacted team effects with season, which means this effect will vary for each team by the season. -->
+        
+        ```{r rm objects from memory}
 
 rm(pred_settings,
    pred_settings_12,
@@ -1492,27 +1564,27 @@ preds_baseline = fit_baseline %>%
                   .) %>%
         mutate(method = 'baseline')
 
-# predict with defense adjusted
-preds_defense_adjusted = fit_defense_adjusted %>%
-        predict(new_data = plays_valid,
-                type = 'prob') %>%
-        bind_cols(., 
-                  fit_defense_adjusted %>%
-                          predict(new_data = plays_valid)) %>%
-        bind_cols(plays_valid,
-                  .) %>%
-        mutate(method = 'defense_adjusted')
-
-# predict with defense adjusted
-preds_offense_adjusted = fit_offense_adjusted %>%
-        predict(new_data = plays_valid,
-                type = 'prob') %>%
-        bind_cols(., 
-                  fit_offense_adjusted %>%
-                          predict(new_data = plays_valid)) %>%
-        bind_cols(plays_valid,
-                  .) %>%
-        mutate(method = 'offense_adjusted')
+# # predict with defense adjusted
+# preds_defense_adjusted = fit_defense_adjusted %>%
+#         predict(new_data = plays_valid,
+#                 type = 'prob') %>%
+#         bind_cols(., 
+#                   fit_defense_adjusted %>%
+#                           predict(new_data = plays_valid)) %>%
+#         bind_cols(plays_valid,
+#                   .) %>%
+#         mutate(method = 'defense_adjusted')
+# 
+# # predict with defense adjusted
+# preds_offense_adjusted = fit_offense_adjusted %>%
+#         predict(new_data = plays_valid,
+#                 type = 'prob') %>%
+#         bind_cols(., 
+#                   fit_offense_adjusted %>%
+#                           predict(new_data = plays_valid)) %>%
+#         bind_cols(plays_valid,
+#                   .) %>%
+#         mutate(method = 'offense_adjusted')
 
 ```
 
@@ -1533,12 +1605,12 @@ preds_null = train_rates %>%
         set_names(., paste(".pred_", names(.), sep="")) %>%
         mutate(.pred_class = factor('TD',
                                     levels = c("TD",
-                                      "FG",
-                                      "Safety",
-                                      "No_Score",
-                                      "Opp_Safety",
-                                      "Opp_FG",
-                                      "Opp_TD"))) %>%
+                                               "FG",
+                                               "Safety",
+                                               "No_Score",
+                                               "Opp_Safety",
+                                               "Opp_FG",
+                                               "Opp_TD"))) %>%
         bind_cols(plays_valid,
                   .)
 ```
@@ -1550,17 +1622,17 @@ preds_null = train_rates %>%
 bind_rows(preds_null %>%
                   mutate(method = 'null'),
           preds_baseline %>%
-                  mutate(method = 'baseline'),
-          preds_defense_adjusted %>%
-                  mutate(method = 'defense_adjusted'),
-          preds_offense_adjusted %>%
-                  mutate(method = 'offense_adjusted')) %>%
+                  mutate(method = 'baseline')) %>%
+        # preds_defense_adjusted %>%
+        #         mutate(method = 'defense_adjusted'),
+        # preds_offense_adjusted %>%
+        #         mutate(method = 'offense_adjusted')) %>%
         group_by(method) %>%
         yardstick::roc_auc(
-                   NEXT_SCORE_EVENT_OFFENSE,
-                   `.pred_No_Score`:`.pred_Opp_TD`,
-           #        estimator = 'macro_weighted'
-                   ) %>%
+                NEXT_SCORE_EVENT_OFFENSE,
+                `.pred_No_Score`:`.pred_Opp_TD`,
+                #        estimator = 'macro_weighted'
+        ) %>%
         mutate_if(is.numeric, round, 3) %>%
         arrange(desc(.estimate)) %>%
         flextable() %>%
@@ -1570,17 +1642,17 @@ bind_rows(preds_null %>%
 bind_rows(preds_null %>%
                   mutate(method = 'null'),
           preds_baseline %>%
-                  mutate(method = 'baseline'),
-          preds_defense_adjusted %>%
-                  mutate(method = 'defense_adjusted'),
-          preds_offense_adjusted %>%
-                  mutate(method = 'offense_adjusted')) %>%
+                  mutate(method = 'baseline')) %>%
+        # preds_defense_adjusted %>%
+        #         mutate(method = 'defense_adjusted'),
+        # preds_offense_adjusted %>%
+        #         mutate(method = 'offense_adjusted')) %>%
         group_by(method) %>%
         yardstick::mn_log_loss(
-                   NEXT_SCORE_EVENT_OFFENSE,
-                   `.pred_No_Score`:`.pred_Opp_TD`,
-           #        estimator = 'macro_weighted'
-                   ) %>%
+                NEXT_SCORE_EVENT_OFFENSE,
+                `.pred_No_Score`:`.pred_Opp_TD`,
+                #        estimator = 'macro_weighted'
+        ) %>%
         mutate_if(is.numeric, round, 3) %>%
         arrange(.estimate) %>%
         flextable() %>%
@@ -1588,33 +1660,6 @@ bind_rows(preds_null %>%
 
 ```
 
-What's the log loss for each outcome?
-
-```{r subpopulation log loss}
-
-# roc_auc
-bind_rows(preds_null %>%
-                  mutate(method = 'null'),
-          preds_baseline %>%
-                  mutate(method = 'baseline'),
-          preds_defense_adjusted %>%
-                  mutate(method = 'defense_adjusted'),
-          preds_offense_adjusted %>%
-                  mutate(method = 'offense_adjusted'))%>%
-        group_by(method, NEXT_SCORE_EVENT_OFFENSE) %>%
-        yardstick::mn_log_loss(
-                   NEXT_SCORE_EVENT_OFFENSE,
-                   `.pred_No_Score`:`.pred_Opp_TD`,
-                   na_rm=T,
-           #        estimator = 'macro_weighted'
-                   ) %>%
-        mutate_if(is.numeric, round, 3) %>%
-        spread(method, .estimate) %>%
-        select(NEXT_SCORE_EVENT_OFFENSE, .metric, null, baseline, defense_adjusted, offense_adjusted) %>%
-        flextable() %>%
-        autofit()
-
-```
 
 ```{r rm}
 
@@ -1625,11 +1670,35 @@ rm(splits,
 
 ```
 
+
 ## Score Plays
 
 I'll now start diving into the predictions for individual plays as a means to evaluate plays and teams.
 
 It's worth noting that we might see some season-level differences that make comparison across seasons difficult, since the predictions are all coming from slightly different models due to resampling.
+
+<!-- ## Last Fit -->
+        
+        <!-- ```{r get last fit on validation set} -->
+        
+        <!-- last_fit_baseline = baseline_wf %>% -->
+        <!--         last_fit(split = test_split, -->
+                                      <!--                  metrics = clsas_metrics, -->
+                                      <!--                  control = keep_pred) -->
+        
+        <!-- last_fit_defense_adjusted = defense_adjusted_wf %>% -->
+        <!--         last_fit(split = test_split, -->
+                                      <!--                  metrics = clsas_metrics, -->
+                                      <!--                  control = keep_pred) -->
+        
+        <!-- last_fit_offense_adjusted = offense_adjusted_wf %>% -->
+        <!--         last_fit(split = test_split, -->
+                                      <!--                  metrics = clsas_metrics, -->
+                                      <!--                  control = keep_pred) -->
+        
+        <!-- ``` -->
+        
+        It's worth noting that we might see some season-level differences that make comparison across seasons difficult, since the predictions are all coming from slightly different models due to resampling.
 
 ```{r combine resamples with validation predictions, eval=T}
 
@@ -1638,16 +1707,16 @@ predicted_plays =
         mutate(method = 'baseline') %>%
         bind_rows(.,
                   preds_baseline) %>%
-        bind_rows(., 
-                  augment(fit_defense_adjusted, new_data = plays_train) %>%
-                          mutate(method = 'defense_adjusted') %>%
-                          bind_rows(.,
-                                    preds_defense_adjusted)) %>%
-        bind_rows(., 
-                  augment(fit_offense_adjusted, new_data = plays_train) %>%
-                          mutate(method = 'offense_adjusted') %>%
-                          bind_rows(.,
-                                    preds_offense_adjusted)) %>%
+        # bind_rows(., 
+        #           augment(fit_defense_adjusted, new_data = plays_train) %>%
+        #                   mutate(method = 'defense_adjusted') %>%
+        #                   bind_rows(.,
+        #                             preds_defense_adjusted)) %>%
+        # bind_rows(., 
+        #           augment(fit_offense_adjusted, new_data = plays_train) %>%
+        #                   mutate(method = 'offense_adjusted') %>%
+        #                   bind_rows(.,
+        #                             preds_offense_adjusted)) %>%
         expected_points_func() # convert to expected points
 
 save(predicted_plays,
@@ -1667,65 +1736,7 @@ This means that if the ball is turned over, but not scored, the team on offense 
 
 ```{r define function for epa and pa}
 
-get_points_added_func = function(input_predicted_plays) {
-        
-        input_predicted_plays %>%
-                 select(method, SEASON, GAME_ID, DRIVE_ID, PLAY_ID, HALF, PERIOD, OFFENSE, DEFENSE, HOME, AWAY, OFFENSE_SCORE, DEFENSE_SCORE,SECONDS_IN_HALF, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP, PLAY_TYPE, NEXT_SCORE_EVENT_OFFENSE) %>%
-        # compute home and away score
-        mutate(HOME_SCORE = case_when(OFFENSE == HOME ~ OFFENSE_SCORE,
-                                      DEFENSE == HOME ~ DEFENSE_SCORE),
-               AWAY_SCORE = case_when(DEFENSE == HOME ~ OFFENSE_SCORE,
-                                      OFFENSE == HOME ~ DEFENSE_SCORE)) %>%
-        # make features to denote scoring plays
-        mutate(TOUCHDOWN = case_when(
-                (grepl("TOUCHDOWN", PLAY_TEXT) | PLAY_TYPE == 'TD' | grepl("td|touchdown", tolower(PLAY_TYPE))) ~ 1,
-                                     TRUE ~ 0)) %>%
-        mutate(FG = case_when(
-                (grepl("Field Goal", PLAY_TEXT) | PLAY_TYPE == 'FG' | grepl("fg|field goal", tolower(PLAY_TYPE))) ~ 1,
-                                     TRUE ~ 0)) %>%
-        mutate(SAFETY = case_when(
-                grepl("safety", tolower(PLAY_TEXT)) ~ 1,
-                 TRUE ~ 0)) %>%
-        # compute the actual points after scoring plays
-        mutate(Points_Post = case_when(TOUCHDOWN==1 & NEXT_SCORE_EVENT_OFFENSE == 'TD' ~ 7,
-                                        TOUCHDOWN==1 & NEXT_SCORE_EVENT_OFFENSE == 'Opp_TD' ~ -7,
-                                        FG==1 & NEXT_SCORE_EVENT_OFFENSE == 'FG' ~ 3,
-                                        FG==1 & NEXT_SCORE_EVENT_OFFENSE == 'Opp_FG' ~ -3,
-                                        SAFETY==1 & NEXT_SCORE_EVENT_OFFENSE == 'Safety' ~ 2,
-                                        SAFETY==1 & NEXT_SCORE_EVENT_OFFENSE == 'Opp Safety' ~ -2)) %>%
-        # rename expected points for play as EPA_Pre
-        rename(EP_Pre = EP)  %>%
-        # now, compute EPA_Pre, EPA_Post, EPA_Added for individual drives
-        # all of these calculations are keeping plays in the order in which they appear from the API
-         group_by(method, GAME_ID, OFFENSE, HALF, DRIVE_ID) %>%
-        # compute EP_Post, the expected points of the situation in the next play. 
-        # for scoring plays we'll be computing a slightly different quantity
-        mutate(EP_Post = case_when(
-                (TOUCHDOWN == 0 & FG ==0 & SAFETY==0)  ~ dplyr::lead(EP_Pre,1))
-               ) %>%
-        mutate(EP_Added = EP_Post-EP_Pre) %>%
-        # unfortunately, this doesn't catch what happens if possession changes before a scoring event
-        # define a sequence as plays within a half where the score remains the same
-        # add a sequence id
-        bind_cols(.,
-                  group_indices(., method, GAME_ID, HALF, HOME_SCORE, AWAY_SCORE) %>% # this creates a group index
-                          as_tibble() %>%
-                          rename(SEQUENCE = value)) %>%group_by(GAME_ID, HALF, SEQUENCE) %>%
-        # now, if EP_Post is NA, it is typically because a drive ended without a scoring event
-        # in the event that possession changed, flip the sign of the expected points for the next play (ie, what is the other teams EP now that they have the ball)
-        # the difference in this case will be the result of the turnover/change in possession
-        mutate(EP_Post = case_when(
-                (is.na(EP_Post) & (TOUCHDOWN == 0 & FG ==0 & SAFETY==0) & (OFFENSE!=dplyr::lead(OFFENSE,1))) ~ -1*(dplyr::lead(EP_Pre,1)),
-                 (is.na(EP_Post) & (TOUCHDOWN == 0 & FG ==0 & SAFETY==0) & (OFFENSE==dplyr::lead(OFFENSE,1))) ~ 1*(dplyr::lead(EP_Pre,1)),
-                                   TRUE ~ EP_Post)) %>%
-        mutate(EP_Added = case_when(
-                (is.na(EP_Added) & (TOUCHDOWN == 0 & FG ==0 & SAFETY==0)) ~ EP_Post-EP_Pre,
-                                   TRUE ~ EP_Added)) %>%
-        # Points added by scoring plays
-        mutate(Points_Added = Points_Post-EP_Pre) %>%
-        ungroup() 
-        
-}
+source(here::here("functions/get_points_added_func.R"))
 
 ```
 
@@ -1735,15 +1746,15 @@ get_points_added_func = function(input_predicted_plays) {
 # i'm going to do this using bind rows rather than group by as the latter has crashed my computer
 scored_plays = predicted_plays %>%
         filter(method == 'baseline') %>%
-        get_points_added_func() %>%
-        bind_rows(.,
-                  predicted_plays %>%
-                          filter(method == 'defense_adjusted') %>%
-                          get_points_added_func()) %>%
-        bind_rows(.,
-                  predicted_plays %>%
-                          filter(method == 'offense_adjusted') %>%
-                          get_points_added_func())
+        get_points_added_func()
+# bind_rows(.,
+#           predicted_plays %>%
+#                   filter(method == 'defense_adjusted') %>%
+#                   get_points_added_func()) %>%
+# bind_rows(.,
+#           predicted_plays %>%
+#                   filter(method == 'offense_adjusted') %>%
+#                   get_points_added_func())
 
 
 save(scored_plays, file = here::here("data/scored_plays.Rdata"))
