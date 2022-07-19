@@ -1,0 +1,2303 @@
+---
+title: "CFB Expected Points Added"
+author: "Phil Henrickson"
+date: "6/7/2022"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+    css: "styles.css"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+conflict_prefer("lag", "dplyr")
+
+library(flextable)
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r load functions}
+
+source(here::here("functions/theme_phil.R"))
+source(here::here("functions/clean_plays_func.R"))
+source(here::here("functions/make_time_features_func.R"))
+source(here::here("functions/expected_points_func.R"))
+source(here::here("functions/get_points_added_func.R"))
+source(here::here("functions/get_drive_score_events.R"))
+source(here::here("functions/assign_play_score_events.R"))
+rm(a)
+
+```
+
+```{r load in scored plays}
+
+load(here::here("data/predicted_plays.Rdata"))
+
+```
+
+# Expected Points for Individual Plays
+
+I've used the model to predict the probability of each scoring event for every play, so I'll now start using this to calculate expected points.
+
+```{r combine resamples with validation predictions}
+
+expected_points_plays = 
+        predicted_plays %>%
+        expected_points_func() # convert to expected points
+
+```
+
+I'll get Expected Points Added for all non scoring plays. This part can be a tricky, due to data quality issues in both the reported yards to goal and in defining sequences. The basic thought here is to say, at the start of a play, we know the expected points for a team in that situation, EP_Pre. We then look to the next play to see the expected points for the team after the result of the previous play, EP_Post. EP_Added is the difference between these two outcomes from the perspective of the offense. 
+
+```{r compute expected points for all plays}
+
+# i'm going to do this using bind rows rather than group by as the latter has crashed my computer
+scored_plays = expected_points_plays %>%
+        get_points_added_func() %>%
+        bind_cols(., expected_points_plays %>%
+                          select(SEASON_TYPE,
+                                 SCORING, YARD_LINE,
+                                 OFFENSE_CONFERENCE, DEFENSE_CONFERENCE,
+                                 OFFENSE_DIVISION, DEFENSE_DIVISION,
+                                 OFFENSE_ID, DEFENSE_ID))
+
+save(scored_plays, file = here::here("data/scored_plays.Rdata"))
+
+```
+
+```{r sample to show what this looks like}
+
+set.seed(6)
+scored_plays %>%
+        filter(SEASON < 2019) %>%
+        filter(is.na(Points_Added)) %>%
+        sample_n(10) %>%
+        select(SEASON, OFFENSE, DEFENSE, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        select(-PA, -PPA) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit()
+        
+```
+
+This means that if the ball is turned over, but not scored, the team on offense becomes the defense and the sign of the expected points on the next play flips for their calculation. For events that produce touchdowns, EP_Added is empty, but I create another feature simply called **Points Added** (PA) in which I take the difference between EP_Pre and the points scored on the play, 7 for touchdowns, 3 for FGs, 2 for safeties. I call the measure which looks at scoring and non scoring plays Predicted Points Added (PPA).
+
+```{r distribution of expected points added}
+
+set.seed(8)
+scored_plays %>%
+        filter(SEASON < 2019) %>%
+        filter(!is.na(Points_Added)) %>%
+        sample_n(10) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, Points_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        select(-EPA, -EP_Post, -PA) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+
+# Examining Expected Points Added
+
+In the previous notebook I trained models on individual plays and then scoring both the training set and the validation set. I'll now dive into the results of the model to get a sense of their output.
+
+## Games
+
+I'll look at a few games, play by play, to get a sense of what the model is producing. For these analyses use the baseline model and I'll pick one game completely at random, in no way influenced by my fandom: Texas A&M defeating Alabama in 2012.
+
+### Texas A&M vs Alabama, 2012
+
+What were the most impactful plays in this game in terms of Expected Points Added? I'll look at the 15 plays in this game with the largest absolute change in expected points.
+
+```{r look at a game from 2013}
+
+scored_plays %>%
+        filter(SEASON == 2012) %>%
+        filter(HOME == 'Alabama' & AWAY == 'Texas A&M') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        select(-PA, -PPA) %>%
+        arrange(desc(abs(EPA))) %>%
+        head(15) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ EPA > 0,
+           j = "EPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ EPA < 0,
+           j = "EPA",
+           color = 'red')
+
+```
+
+Kind of interesting - this game is remembered for a lot of plays by Johnny Manziel, but the most impactful plays in the game in terms of expected points changes were actually turnovers forced by the A&M defense.
+
+However, as I mentioned before, the metric **Expected Points Added** doesn't include scoring plays. In analyzing an offense, I've seen other folks working with these types of model make a theoretical distinction between plays that add points vs plays that only result in a shift in the expected points of situation. 
+
+**Predicted Points Added** uses both scoring plays and non scoring plays, taking into account both expected points and actual points added as a result of the play. Here are the scoring plays from that game in terms of predicted points added from each play.
+
+```{r top plays my expected points}
+
+scored_plays %>%
+        filter(SEASON == 2012) %>%
+        filter(HOME == 'Alabama' & AWAY == 'Texas A&M') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        select(-EP_Post, -EPA) %>%
+        arrange(desc(abs(PA))) %>%
+        filter(!is.na(PA)) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+The expected points of the situation to give us a measure of how many points the play added to the scoreline. In the case of Christine Michael's 1 yard TD run, the points added are pretty low, as you'd expect teams to score from that situation. By comparison, AJ McCarron's 54 yard pass on 3rd and 6 in the 4th quarter had a much higher points added, as they were in a third down situation at the midfield and made a huge play. For this reason, what I'm calling **Points Added** has been dubbed by others as a measure of a team's offensive explosiveness. For most of my analyses I'm condensing **Expected Points Added** (EPA) and **Points Added** (PA) into one metric that I'm calling **Predicted Points Added** (PPA).
+
+### Texas A&M vs Alabama, 2013
+
+Continuing the theme of randomly selecting games, let's look at the A&M vs Bama game in the following year, which Alabama won in a shootout at Kyle Field.
+
+```{r tamu vs bama 2013 top ppa}
+
+scored_plays %>%
+        filter(SEASON == 2013) %>%
+        filter(HOME == 'Texas A&M' & AWAY == 'Alabama') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(PPA))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+In terms of the most points added/lost on scoring plays, I probably would have expected the Evans 95 yard TD to rank at the top, but interestingly it's actually a pick six that Manziel threw on 2nd and 1 in Bama's territory - makes sense, given that they were putting together a scoring drive and pick sixes are pretty disastrous.
+
+### Wisconsin vs Ohio State, 2010
+
+```{r wisconsin ohio state 2010 top ppa}
+
+scored_plays %>%
+        filter(SEASON == 2010) %>%
+        filter(HOME == 'Wisconsin' & AWAY == 'Ohio State') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(PPA))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+### Auburn vs Georgia, 2013 
+
+```{r auburn georgia 2013 top ppa}
+
+scored_plays %>%
+        filter(SEASON == 2013) %>%
+        filter(HOME == 'Auburn' & AWAY == 'Georgia') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(PPA))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+
+### Alabama vs LSU, 2011 (Part 1)
+
+```{r bama vs lsu 2011 top ppa}
+
+scored_plays %>%
+        filter(SEASON == 2011) %>%
+        filter(HOME == 'Alabama' & AWAY == 'LSU') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(PPA))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+### Michigan State vs Michigan, 2015 (WOAH)
+
+```{r michigan vs msu 2014}
+
+scored_plays %>%
+        filter(SEASON == 2015) %>%
+        filter(HOME == 'Michigan' & AWAY == 'Michigan State') %>%
+        mutate(Points_Post = case_when(PLAY_ID == 400763542104999936 ~ -7,
+                                       TRUE ~ Points_Post)) %>%
+        mutate(Points_Added = Points_Post-EP_Pre) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(PPA))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+## Auburn vs Oregon, 2010
+
+```{r auburn oregon national championship}
+
+scored_plays %>%
+        filter(SEASON == 2010) %>%
+        filter(HOME == 'Oregon' & AWAY == 'Auburn') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        arrange(desc(abs(PPA))) %>%
+        head(10) %>%
+        mutate_if(is.numeric, round, 2) %>%
+ #       arrange(desc(EP_Added)) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA> 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+## Individual Plays
+
+What's really cool is that we can do this type of analysis for any play from any game from 2007-2020. For instance, we can look at a team and ask, what were its highest predicted points added plays in each season? I'll look at a selection of teams: Texas A&M, Wisconsin, Notre Dame, and Ohio State.
+
+### Texas A&M
+
+```{r look at tamu game play by play}
+
+scored_plays %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Texas A&M') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+### Wisconsin
+
+```{r look at a wisconsin game play by play}
+
+scored_plays %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Wisconsin') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+
+### Ohio State
+
+```{r look at osu game play by play}
+
+scored_plays %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Ohio State') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+### Notre Dame
+
+```{r notre dame play by play}
+
+scored_plays %>%
+                filter(SEASON_TYPE == 'regular') %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(OFFENSE == 'Notre Dame') %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+
+### Highest Predicted Points Added Plays by Year
+
+What were the highest predicted points added plays (including scoring plays)?
+
+```{r top ppa plays by seaso positiven}
+
+scored_plays %>%
+                filter(SEASON_TYPE == 'regular') %>%
+        filter(SEASON > 2010) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        filter(GAME_ID != 401282217 & GAME_ID != 401301056 & GAME_ID != 401309888) %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+### Lowest Predicted Points Added Plays by Year
+
+```{r top ppa plays by season}
+
+scored_plays %>%
+                filter(SEASON_TYPE == 'regular') %>%
+        filter(SEASON > 2010) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        group_by(SEASON) %>%
+        slice_min(., order_by = PPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ PPA > 0,
+           j = "PPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ PPA < 0,
+           j = "PPA",
+           color = 'red')
+
+```
+
+
+### Highlighting Data Quality Issues
+
+ESPN's play by play data has a surprising number of issues, and these issues come up more and more the further we go back.
+
+```{r look for issues}
+
+scored_plays %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD, DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        group_by(SEASON) %>%
+        slice_max(., order_by = EPA,
+                  n=1) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ EPA > 0,
+           j = "EPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ EPA < 0,
+           j = "EPA",
+           color = 'red')
+
+```
+
+For that 2011 play, it's 4th and 58 with 93 yards to go and the pass is complete for a loss of seven yards, and yet the model considers this a play worthy of 9 expected points? The heck? Turns out this, and most of these, are actually just issues of data quality with ESPNs play by play data.
+
+```{r look at example of a problem}
+
+scored_plays %>%
+        filter(SEASON == 2011 & OFFENSE == 'Troy' & DEFENSE == 'Clemson' & PERIOD ==3) %>%
+        select(SEASON, GAME_ID, DRIVE_ID, PLAY_ID, PERIOD, OFFENSE, DEFENSE, PERIOD,  DOWN, DISTANCE, YARDS_TO_GOAL, PLAY_TEXT, EP_Pre, EP_Post, EP_Added, Points_Added) %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        mutate_at(c("SEASON",
+                    "GAME_ID",
+                    "DRIVE_ID",
+                    "PLAY_ID"),
+                  ~ as.character(.)) %>%
+        rename(YTG = YARDS_TO_GOAL,
+               PLAY = PLAY_TEXT) %>%
+        filter(PLAY_ID %in% c(312460228140,
+                              312460228160,
+                              312460228163)) %>%
+        select(-DRIVE_ID, -GAME_ID, -PLAY_ID) %>%
+        ungroup() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit() %>%
+        color(., i = ~ EPA > 0,
+           j = "EPA",
+           color = 'deepskyblue1') %>%
+        color(., i = ~ EPA < 0,
+           j = "EPA",
+           color = 'red')
+
+```
+
+In this case, the play by play data has a bizarre sequence in which Troy is listed as punting, then completing a loss on 4th and 58, while still having possession on the next play with a 1st and 10. Since the expected points added calculation is based on the difference between plays, that phantom 4th and 58 play throws off the value of the next play. This is unfortunately quite common in ESPNs play by play data, especially as we go further back.
+
+How do data quality issues like this affect the overall results? I would expect that these errors are fairly random across games and are unlikely to systematically affect teams one way or the other.
+
+
+<!-- ## Team Offenses by Season -->
+
+<!-- Having scored all individual plays, we can now roll this up to whatever level of analysis we're interested in. We can, for instance, look at a team's offense for each season over this time period. For this analysis, I'll use the defense-adjusted model to account for the quality of the opponent faced by the team's offense. -->
+
+<!-- Continuing to select a team at random, we'll look at Texas A&M's offense in terms of predicted/expected points game by game over this time period. The line in navy, EPA_Average, looks at a team's expected points added per play without including scoring plays. The line in light blue, PPA_Average, looks at all plays, including scoring.  -->
+
+<!-- ```{r plot tamu offense distribution} -->
+
+<!-- int_breaks <- function(x, n = 5) { -->
+<!--   l <- pretty(x, n) -->
+<!--   l[abs(l %% 1) < .Machine$double.eps ^ 0.5]  -->
+<!-- } -->
+
+<!-- scored_plays %>% -->
+<!--         filter(method=='defense_adjusted') %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         filter(OFFENSE == 'Texas A&M') %>% -->
+<!--         group_by(method, SEASON, OFFENSE) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--              #     PA_Average = mean(PA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         rename(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         select(method, -->
+<!--                SEASON,  -->
+<!--                TEAM, -->
+<!--                TYPE, -->
+<!--                EPA_Average,  -->
+<!--            #    PA_Average,  -->
+<!--                PPA_Average, -->
+<!--            plays) %>% -->
+<!--         mutate_if(is.numeric, round, 3) %>% -->
+<!--         gather("variable","value", -->
+<!--               -method,  -SEASON, -TEAM, -TYPE, -plays) %>% -->
+<!--         mutate(SEASON = as.integer(SEASON)) -->
+
+<!-- ``` -->
+
+
+
+<!-- ```{r take a look at a team by season} -->
+
+<!-- library(jcolors) -->
+
+<!-- int_breaks <- function(x, n = 5) { -->
+<!--   l <- pretty(x, n) -->
+<!--   l[abs(l %% 1) < .Machine$double.eps ^ 0.5]  -->
+<!-- } -->
+
+<!-- p = scored_plays %>% -->
+<!--         filter(method=='defense_adjusted') %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         filter(OFFENSE == 'Baylor') %>% -->
+<!--         mutate(PLAY = case_when( -->
+<!--                 grepl("pass|completion|sack|intercept", tolower(PLAY_TYPE)) ~ 'Pass', -->
+<!--                 grepl("run|rush", tolower(PLAY_TYPE)) ~ 'Run', -->
+<!--                 TRUE ~ 'Special')) %>% -->
+<!--         filter(PLAY %in% c("Pass", "Run")) %>% -->
+<!--         mutate(SEASON = factor(SEASON)) %>% -->
+<!--         ggplot(., aes(x=PPA, -->
+<!--                       fill = PLAY, -->
+<!--                       y = fct_rev(SEASON)))+ -->
+<!--         facet_wrap(OFFENSE + PLAY~., -->
+<!--                    ncol=2)+ -->
+<!--         stat_density_ridges(quantile_lines = F, -->
+<!--                             alpha = 0.6)+ -->
+<!--                           #  quantile_fun = mean)+ -->
+<!--         theme_phil()+ -->
+<!--         geom_vline(xintercept = 0, -->
+<!--                    linetype = 'dashed')+ -->
+<!--         scale_fill_jcolors("pal2")+ -->
+<!--         coord_cartesian(xlim = c(-8, 8)) -->
+
+<!-- suppressMessages(print(p)) -->
+
+<!-- ``` -->
+
+<!-- If we use these as general measures of the efficiency of an offense in a season/game, where does A&M place compared to all teams? What is good? I'll plot the distribution of all teams with at least 400 plays in a season, then overlay where A&M ranks. -->
+
+<!-- ```{r make function for displaying offense with overlay} -->
+
+<!-- plot_offense_func = function(input_scored_plays, -->
+<!--                              input_team, -->
+<!--                              input_method) { -->
+
+<!--         require(ggforce) -->
+
+<!-- temp = input_scored_plays %>% -->
+<!--         filter(method == input_method) %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         group_by(SEASON, OFFENSE) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--              #     PA_Average = mean(PA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         rename(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         select(SEASON,  -->
+<!--                TEAM, -->
+<!--                TYPE, -->
+<!--                EPA_Average,  -->
+<!--            #    PA_Average,  -->
+<!--                PPA_Average, -->
+<!--            plays) %>% -->
+<!--         mutate_if(is.numeric, round, 3) %>% -->
+<!--         filter(plays > 400) %>% -->
+<!--         gather("variable","value", -->
+<!--                -SEASON, -TEAM, -TYPE, -plays) %>% -->
+<!--         mutate(SEASON = as.integer(SEASON)) -->
+
+
+<!-- p1 = temp %>% -->
+<!--         ggplot(., aes(x=SEASON, -->
+<!--                       label = TEAM, -->
+<!--                       color = variable, -->
+<!--                   #    size = plays, -->
+<!--                       y = value))+ -->
+<!--         facet_wrap(variable~., -->
+<!--                            ncol =1)+ -->
+<!--         geom_point(position = ggforce::position_jitternormal(sd_x = 0.1, -->
+<!--                                                              sd_y = 0), -->
+<!--                    alpha = 0.2)+ -->
+<!--         # geom_line(lwd = 0.8, -->
+<!--         #           alpha = 0.8, -->
+<!--         #           stat = 'smooth', -->
+<!--         #           method = 'loess', -->
+<!--         #           span = 0.3, -->
+<!--         #           se = F, -->
+<!--         #           formula = 'y ~ x')+ -->
+<!--         theme_phil()+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dashed') -->
+
+<!-- p1 + -->
+<!--         geom_point(data = temp %>% -->
+<!--                            filter(TEAM == input_team), -->
+<!--                    aes(x=SEASON, -->
+<!--                        label = SEASON, -->
+<!--                       color = variable, -->
+<!--                   #    size = plays, -->
+<!--                       y = value))+ -->
+<!--         geom_line(data = temp %>% -->
+<!--                            filter(TEAM == input_team), -->
+<!--                   lwd = 0.8, -->
+<!--                   alpha = 0.8, -->
+<!--                   stat = 'smooth', -->
+<!--                   method = 'loess', -->
+<!--                   span = 0.35, -->
+<!--                   se = F, -->
+<!--                   formula = 'y ~ x')+ -->
+<!--         theme_phil()+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dashed')+ -->
+<!--         scale_color_manual(values = c("navy", "deepskyblue1"))+ -->
+<!--         ylab("Points per Play")+ -->
+<!--         facet_wrap(variable~., -->
+<!--                    ncol = 1)+ -->
+<!--         ggtitle(paste(input_team, "Offensive Metrics by Season"), -->
+<!--                 str_wrap("Average expected points added and predicted points added for a team's offense over the course of a season. Model estimates from multinomial logistic regression.", 120))+ -->
+<!--         scale_x_continuous(breaks = int_breaks) -->
+
+<!-- } -->
+
+
+<!-- ``` -->
+
+
+<!-- ```{r plot where tamu offense falls, fig.height=8} -->
+
+<!-- plot_offense_func(scored_plays, -->
+<!--                   'Texas A&M', -->
+<!--                   'defense_adjusted' -->
+<!--                   ) -->
+
+<!-- ``` -->
+
+<!-- Based on either metric, we can see that A&M's offense in 2012 and 2013 were among the best in college football at the time. It also looks like A&M's 2018 and 2020 offense were pretty darn good as well. -->
+
+<!-- Let's look at another team that we would expect to be really strong this entire time period: Ohio State. -->
+
+<!-- ```{r look at osu offense, fig.height=8} -->
+
+<!-- plot_offense_func(scored_plays, -->
+<!--                   'Ohio State', -->
+<!--                   'defense_adjusted' -->
+<!--                   ) -->
+
+
+<!-- ``` -->
+
+<!-- What about a team that's been up and down during this time period? Some lowly team, like Texas. Everytime I look at their offensive metrics I wonder why they fired Tom Herman -->
+
+<!-- ```{r look at texas offense, fig.height=8} -->
+
+<!-- plot_offense_func(scored_plays, -->
+<!--                   'Texas', -->
+<!--                   'defense_adjusted' -->
+<!--                   ) -->
+
+<!-- ``` -->
+
+<!-- What about Florida State? We would expect them to be towards the top in the Jimbo/Jameis era and then fall back to Earth during the Taggart era. -->
+
+<!-- ```{r look at fsu offense, fig.height=8} -->
+
+<!-- plot_offense_func(scored_plays, -->
+<!--                   'Florida State', -->
+<!--                   'defense_adjusted' -->
+<!--                   ) -->
+
+
+<!-- ``` -->
+
+<!-- Hmm. That's kind of interesting - I've heard people discuss Jimbo's offense as lacking in explosiveness, which some argue is the difference between the expected points and the predicted points. This definitely wasn't the case in 2013, but generally FSU had a pretty efficient and explosive offense until their collapse in 2017. -->
+
+<!-- ## Team Offense and Defense by Game -->
+
+<!-- But this is only looking at one side of the ball at the season level. We can look at team's defense in the same way in terms of the average expected/predicted points allowed by the offenses they face. In this case, you want your defense to have a negative value - this indicates that offenses weren't able to generate points against your defense. I'll look at a team's offense and defense side by side in terms of Predicted Points Added - meaning I am including scoring plays. We would expect a good team to be one whose offense (in blue) generates more points per play than they allow on defense (in red). -->
+
+<!-- ```{r look at tamu offense and defense by season by game, fig.height=8} -->
+
+<!-- team = 'Texas A&M' -->
+
+<!-- scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         filter(OFFENSE == team) %>% -->
+<!--         group_by(SEASON, OFFENSE, GAME_ID) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         left_join(., games_data_raw %>% -->
+<!--                           select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                   by = c("GAME_ID")) %>% -->
+<!--         mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                     AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--         select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         mutate(game = row_number()) %>% -->
+<!--         mutate(SEASON = factor(SEASON)) %>% -->
+<!--         bind_rows(., -->
+<!--                   scored_plays %>% -->
+<!--                 rename(EPA = EP_Added, -->
+<!--                        PA = Points_Added) %>% -->
+<!--                 mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                        !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--                 # exclude kickoffs from this -->
+<!--                 filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--                 # also field goals, not that interested in kicking performance at the minute -->
+<!--                 filter(FG == 0) %>% # remove FGs -->
+<!--                 filter(DEFENSE == team) %>% -->
+<!--                 group_by(SEASON, DEFENSE, GAME_ID) %>% -->
+<!--                 summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                           PPA_Average = mean(PPA, na.rm=T), -->
+<!--                           plays = n(), -->
+<!--                           .groups = 'drop') %>% -->
+<!--                 mutate(TEAM = DEFENSE) %>% -->
+<!--                 mutate(TYPE = "DEFENSE") %>% -->
+<!--                 left_join(., games_data_raw %>% -->
+<!--                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                           by = c("GAME_ID")) %>% -->
+<!--                 mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                             AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--                 select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--                         group_by(SEASON) %>% -->
+<!--                 mutate(game = row_number()) %>% -->
+<!--                 mutate(SEASON = factor(SEASON))) %>% -->
+<!--         mutate(TYPE = paste(TYPE, "PPA_Average")) %>% -->
+<!--         ggplot(., aes(x=game, -->
+<!--                       color = TYPE, -->
+<!--                   #    size = plays, -->
+<!--                       label = OPPONENT, -->
+<!--                       y = PPA_Average))+ -->
+<!--         geom_point()+ -->
+<!--         geom_line(lwd = 0.8, -->
+<!--                   alpha = 0.8, -->
+<!--                   stat = 'smooth', -->
+<!--                   method = 'loess', -->
+<!--                   span = 0.25, -->
+<!--                   se = F, -->
+<!--                   formula = 'y ~ x')+ -->
+<!--         geom_text(check_overlap=T, -->
+<!--                   vjust=-1, -->
+<!--                   size = 2.5)+ -->
+<!--         theme_phil()+ -->
+<!--         facet_wrap(TEAM ~ SEASON, -->
+<!--                    ncol = 3)+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dashed')+ -->
+<!--         scale_color_manual(values = c("red", "deepskyblue1"))+ -->
+<!--         coord_cartesian(ylim = c(-.8, .8))+ -->
+<!--         ggtitle(paste(team, "Offense/Defense Efficency by Game"), -->
+<!--                 subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120)) -->
+
+
+<!-- ``` -->
+
+<!-- I'll look at a team like Wisconsin. They seem to generally have a pretty good defense, but struggle in terms of their ability to generate points on offense. -->
+
+<!-- ```{r look at wisconson offense and defense by season by game, fig.height=8} -->
+
+<!-- team = 'Wisconsin' -->
+
+<!-- scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         filter(OFFENSE == team) %>% -->
+<!--         group_by(SEASON, OFFENSE, GAME_ID) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         left_join(., games_data_raw %>% -->
+<!--                           select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                   by = c("GAME_ID")) %>% -->
+<!--         mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                     AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--         select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         mutate(game = row_number()) %>% -->
+<!--         mutate(SEASON = factor(SEASON)) %>% -->
+<!--         bind_rows(., -->
+<!--                   scored_plays %>% -->
+<!--                 rename(EPA = EP_Added, -->
+<!--                        PA = Points_Added) %>% -->
+<!--                 mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                        !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--                 # exclude kickoffs from this -->
+<!--                 filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--                 # also field goals, not that interested in kicking performance at the minute -->
+<!--                 filter(FG == 0) %>% # remove FGs -->
+<!--                 filter(DEFENSE == team) %>% -->
+<!--                 group_by(SEASON, DEFENSE, GAME_ID) %>% -->
+<!--                 summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                           PPA_Average = mean(PPA, na.rm=T), -->
+<!--                           plays = n(), -->
+<!--                           .groups = 'drop') %>% -->
+<!--                 mutate(TEAM = DEFENSE) %>% -->
+<!--                 mutate(TYPE = "DEFENSE") %>% -->
+<!--                 left_join(., games_data_raw %>% -->
+<!--                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                           by = c("GAME_ID")) %>% -->
+<!--                 mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                             AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--                 select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--                         group_by(SEASON) %>% -->
+<!--                 mutate(game = row_number()) %>% -->
+<!--                 mutate(SEASON = factor(SEASON))) %>% -->
+<!--         mutate(TYPE = paste(TYPE, "PPA_Average")) %>% -->
+<!--         ggplot(., aes(x=game, -->
+<!--                       color = TYPE, -->
+<!--                   #    size = plays, -->
+<!--                       label = OPPONENT, -->
+<!--                       y = PPA_Average))+ -->
+<!--         geom_point()+ -->
+<!--         geom_line(lwd = 0.8, -->
+<!--                   alpha = 0.8, -->
+<!--                   stat = 'smooth', -->
+<!--                   method = 'loess', -->
+<!--                   span = 0.25, -->
+<!--                   se = F, -->
+<!--                   formula = 'y ~ x')+ -->
+<!--         geom_text(check_overlap=T, -->
+<!--                   vjust=-1, -->
+<!--                   size = 2.5)+ -->
+<!--         theme_phil()+ -->
+<!--         facet_wrap(TEAM ~ SEASON, -->
+<!--                    ncol = 3)+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dashed')+ -->
+<!--         scale_color_manual(values = c("red", "deepskyblue1"))+ -->
+<!--         coord_cartesian(ylim = c(-.8, .8))+ -->
+<!--         ggtitle(paste(team, "Offense/Defense Efficency by Game"), -->
+<!--                 subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120)) -->
+
+
+<!-- ``` -->
+
+<!-- For a dominant team like Alabama, under Saban we should see their offensive efficiency be high and their defensive efficiency be high as well - the blue should almost always be well above the red. -->
+
+<!-- ```{r look at alabama offense and defense by season by game, fig.height=8} -->
+
+<!-- team = 'Alabama' -->
+
+<!-- scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         filter(OFFENSE == team) %>% -->
+<!--         group_by(SEASON, OFFENSE, GAME_ID) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         left_join(., games_data_raw %>% -->
+<!--                           select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                   by = c("GAME_ID")) %>% -->
+<!--         mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                     AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--         select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         mutate(game = row_number()) %>% -->
+<!--         mutate(SEASON = factor(SEASON)) %>% -->
+<!--         bind_rows(., -->
+<!--                   scored_plays %>% -->
+<!--                 rename(EPA = EP_Added, -->
+<!--                        PA = Points_Added) %>% -->
+<!--                 mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                        !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--                 # exclude kickoffs from this -->
+<!--                 filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--                 # also field goals, not that interested in kicking performance at the minute -->
+<!--                 filter(FG == 0) %>% # remove FGs -->
+<!--                 filter(DEFENSE == team) %>% -->
+<!--                 group_by(SEASON, DEFENSE, GAME_ID) %>% -->
+<!--                 summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                           PPA_Average = mean(PPA, na.rm=T), -->
+<!--                           plays = n(), -->
+<!--                           .groups = 'drop') %>% -->
+<!--                 mutate(TEAM = DEFENSE) %>% -->
+<!--                 mutate(TYPE = "DEFENSE") %>% -->
+<!--                 left_join(., games_data_raw %>% -->
+<!--                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                           by = c("GAME_ID")) %>% -->
+<!--                 mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                             AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--                 select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--                         group_by(SEASON) %>% -->
+<!--                 mutate(game = row_number()) %>% -->
+<!--                 mutate(SEASON = factor(SEASON))) %>% -->
+<!--         mutate(TYPE = paste(TYPE, "PPA_Average")) %>% -->
+<!--         ggplot(., aes(x=game, -->
+<!--                       color = TYPE, -->
+<!--                   #    size = plays, -->
+<!--                       label = OPPONENT, -->
+<!--                       y = PPA_Average))+ -->
+<!--         geom_point()+ -->
+<!--         geom_line(lwd = 0.8, -->
+<!--                   alpha = 0.8, -->
+<!--                   stat = 'smooth', -->
+<!--                   method = 'loess', -->
+<!--                   span = 0.25, -->
+<!--                   se = F, -->
+<!--                   formula = 'y ~ x')+ -->
+<!--         geom_text(check_overlap=T, -->
+<!--                   vjust=-1, -->
+<!--                   size = 2.5)+ -->
+<!--         theme_phil()+ -->
+<!--         facet_wrap(TEAM ~ SEASON, -->
+<!--                    ncol = 3)+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dashed')+ -->
+<!--         scale_color_manual(values = c("red", "deepskyblue1"))+ -->
+<!--         coord_cartesian(ylim = c(-.8, .8))+ -->
+<!--         ggtitle(paste(team, "Offense/Defense Efficency by Game"), -->
+<!--                 subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120)) -->
+
+
+
+<!-- ``` -->
+
+<!-- Evidently they were so good at stopping Tennesee in 2011 that it breaks my axis. -->
+
+<!-- For a team like Kansas that has been mediocre for the last decade, we should see the opposite type of graph here (except for 2007!). -->
+
+<!-- ```{r look at kansas offense and defense by season by game, fig.height=8} -->
+
+<!-- team = 'Kansas' -->
+
+<!-- scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         # exclude kickoffs from this -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         # also field goals, not that interested in kicking performance at the minute -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         filter(OFFENSE == team) %>% -->
+<!--         group_by(SEASON, OFFENSE, GAME_ID) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         left_join(., games_data_raw %>% -->
+<!--                           select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                   by = c("GAME_ID")) %>% -->
+<!--         mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                     AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--         select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         mutate(game = row_number()) %>% -->
+<!--         mutate(SEASON = factor(SEASON)) %>% -->
+<!--         bind_rows(., -->
+<!--                   scored_plays %>% -->
+<!--                 rename(EPA = EP_Added, -->
+<!--                        PA = Points_Added) %>% -->
+<!--                 mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                        !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--                 # exclude kickoffs from this -->
+<!--                 filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--                 # also field goals, not that interested in kicking performance at the minute -->
+<!--                 filter(FG == 0) %>% # remove FGs -->
+<!--                 filter(DEFENSE == team) %>% -->
+<!--                 group_by(SEASON, DEFENSE, GAME_ID) %>% -->
+<!--                 summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                           PPA_Average = mean(PPA, na.rm=T), -->
+<!--                           plays = n(), -->
+<!--                           .groups = 'drop') %>% -->
+<!--                 mutate(TEAM = DEFENSE) %>% -->
+<!--                 mutate(TYPE = "DEFENSE") %>% -->
+<!--                 left_join(., games_data_raw %>% -->
+<!--                                   select(GAME_ID, HOME_TEAM, AWAY_TEAM), -->
+<!--                           by = c("GAME_ID")) %>% -->
+<!--                 mutate(OPPONENT = case_when(HOME_TEAM == TEAM ~ AWAY_TEAM, -->
+<!--                                             AWAY_TEAM == TEAM ~ HOME_TEAM)) %>% -->
+<!--                 select(SEASON, GAME_ID, TEAM, OPPONENT, TYPE, EPA_Average, PPA_Average, plays) %>% -->
+<!--                         group_by(SEASON) %>% -->
+<!--                 mutate(game = row_number()) %>% -->
+<!--                 mutate(SEASON = factor(SEASON))) %>% -->
+<!--         mutate(TYPE = paste(TYPE, "PPA_Average")) %>% -->
+<!--         ggplot(., aes(x=game, -->
+<!--                       color = TYPE, -->
+<!--                   #    size = plays, -->
+<!--                       label = OPPONENT, -->
+<!--                       y = PPA_Average))+ -->
+<!--         geom_point()+ -->
+<!--         geom_line(lwd = 0.8, -->
+<!--                   alpha = 0.8, -->
+<!--                   stat = 'smooth', -->
+<!--                   method = 'loess', -->
+<!--                   span = 0.25, -->
+<!--                   se = F, -->
+<!--                   formula = 'y ~ x')+ -->
+<!--         geom_text(check_overlap=T, -->
+<!--                   vjust=-1, -->
+<!--                   size = 2.5)+ -->
+<!--         theme_phil()+ -->
+<!--         facet_wrap(TEAM ~ SEASON, -->
+<!--                    ncol = 3)+ -->
+<!--         geom_hline(yintercept =0, -->
+<!--                    linetype = 'dashed')+ -->
+<!--         scale_color_manual(values = c("red", "deepskyblue1"))+ -->
+<!--         coord_cartesian(ylim = c(-.8, .8))+ -->
+<!--         ggtitle(paste(team, "Offense/Defense Efficency by Game"), -->
+<!--                 subtitle = str_wrap("Measuring offensive and defensive efficiency via predicted points added. Model estimates from multinomial logistic regression.",120)) -->
+
+
+
+<!-- ``` -->
+
+<!-- # Season Results -->
+
+<!-- We can aggregate to a team's offensive performance within a full year to rate their overall offensive/defensive efficiency. We can also break this down by passing vs rushing plays on both sides of the ball. -->
+
+<!-- For the purpose of evaluating a team's defense in this analysis, I'll flip the sign of a defense's points, which are currently scored from the perspective of the offense, so that positive is always good for a team. -->
+
+<!-- ```{r look at expected points at the season level} -->
+
+<!-- # offense -->
+<!-- yearly_offense_epa = scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         group_by(method, SEASON, OFFENSE) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   PA_Average = mean(PA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         select(method, SEASON, TEAM, TYPE, EPA_Average, PPA_Average, PA_Average, plays) -->
+
+<!-- # offense by play type -->
+<!-- yearly_offense_epa_by_play = scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         mutate(PLAY = case_when( -->
+<!--                 grepl("pass|completion|sack|intercept", tolower(PLAY_TYPE)) ~ 'Pass', -->
+<!--                 grepl("run|rush", tolower(PLAY_TYPE)) ~ 'Run', -->
+<!--                 TRUE ~ 'Special')) %>% -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         group_by(method, SEASON, OFFENSE, PLAY) %>% -->
+<!--         summarize(EPA_Average = mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = mean(PPA, na.rm=T), -->
+<!--                   PA_Average = mean(PA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = OFFENSE) %>% -->
+<!--         mutate(TYPE = "OFFENSE") %>% -->
+<!--         select(method, SEASON, TEAM, TYPE, PLAY, EPA_Average, PPA_Average, PA_Average, plays) -->
+
+<!-- # defense -->
+<!-- yearly_defense_epa = scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         group_by(method, SEASON, DEFENSE) %>% -->
+<!--         summarize(EPA_Average = -1*mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = -1*mean(PPA, na.rm=T), -->
+<!--                   PA_Average = -1*mean(PA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = DEFENSE) %>% -->
+<!--         mutate(TYPE = "DEFENSE") %>% -->
+<!--         select(method, SEASON, TEAM, TYPE, EPA_Average, PPA_Average, PA_Average, plays) -->
+
+<!-- # defense by play type -->
+<!-- yearly_defense_epa_by_play = scored_plays %>% -->
+<!--         rename(EPA = EP_Added, -->
+<!--                PA = Points_Added) %>% -->
+<!--         mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA, -->
+<!--                                !is.na(EPA) & is.na(PA) ~ EPA)) %>% -->
+<!--         filter(!grepl("kickoff", tolower(PLAY_TYPE))) %>% -->
+<!--         mutate(PLAY = case_when( -->
+<!--                 grepl("pass|completion|sack|intercept", tolower(PLAY_TYPE)) ~ 'Pass', -->
+<!--                 grepl("run|rush", tolower(PLAY_TYPE)) ~ 'Run', -->
+<!--                 TRUE ~ 'Special')) %>% -->
+<!--         filter(FG == 0) %>% # remove FGs -->
+<!--         group_by(method, SEASON, DEFENSE, PLAY) %>% -->
+<!--         summarize(EPA_Average = -1*mean(EPA, na.rm=T), -->
+<!--                   PPA_Average = -1*mean(PPA, na.rm=T), -->
+<!--                   PA_Average = -1*mean(PA, na.rm=T), -->
+<!--                   plays = n(), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         mutate(TEAM = DEFENSE) %>% -->
+<!--         mutate(TYPE = "DEFENSE") %>% -->
+<!--         select(method, SEASON, TEAM, TYPE, PLAY, EPA_Average, PPA_Average, PA_Average, plays) -->
+
+<!-- ``` -->
+
+<!-- ### Overall Offensive Efficiency -->
+
+<!-- I can rate each team's season by their average pointed points added per play (EPA), which does not include scoring plays, as well as what I'll dub predicted points added, which does include scoring plays. -->
+
+<!-- ```{r rate teams by offensive efficiency with adjusted method} -->
+
+<!-- yearly_offense_epa %>% -->
+<!--         filter(method == 'defense_adjusted') %>% -->
+<!--         filter(plays > 400) %>% -->
+<!--         rename(OFFENSE_EPA = EPA_Average, -->
+<!--                OFFENSE_PPA = PPA_Average, -->
+<!--                OFFENSE_PA = PA_Average) %>% -->
+<!--         select(SEASON, TEAM, OFFENSE_EPA, OFFENSE_PPA) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         arrange(desc(OFFENSE_PPA)) %>% -->
+<!--         mutate(SEASON_RANK = row_number()) %>% -->
+<!--         ungroup() %>% -->
+<!--         mutate(SEASON = as.factor(SEASON)) %>% -->
+<!--         select(SEASON, TEAM, OFFENSE_EPA, OFFENSE_PPA,  SEASON_RANK) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         arrange(desc(OFFENSE_PPA)) %>% -->
+<!--         datatable(escape=F, -->
+<!--                   filter = 'top', -->
+<!--                   options = list(pageLength = 25, -->
+<!--                                  scrollX=F, -->
+<!--                                  autowidth=T, -->
+<!--                                  columnDefs = list(list(className = 'dt-center', targets =  c("SEASON","SEASON_RANK", "OFFENSE_EPA", "OFFENSE_PPA")))), -->
+<!--                              #    columnDefs=list(list(width = '30px', targets = c(which(names(prob_table)!='Name')-1)))), -->
+<!--                                                 # list(width = '400px', targets = c(which(names(prob_table)=='Name')-1)))), -->
+<!--                                        #  targets = seq(3, ncol(prob_table)-1))), -->
+<!--                   rownames = T) -->
+<!-- ``` -->
+
+<!-- ### Overall Defensive Efficiency -->
+
+<!-- Now do the same thing, but flipping it around to look at the defense. -->
+
+<!-- ```{r rating overall defensive efficiency} -->
+
+<!-- yearly_defense_epa %>% -->
+<!--         filter(method == 'offense_adjusted') %>% -->
+<!--         filter(plays > 400) %>% -->
+<!--         rename(DEFENSE_EPA = EPA_Average, -->
+<!--                DEFENSE_PPA = PPA_Average, -->
+<!--                DEFENSE_PA = PA_Average) %>% -->
+<!--         select(SEASON, TEAM, DEFENSE_EPA, DEFENSE_PPA) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         arrange(desc(DEFENSE_PPA)) %>% -->
+<!--         mutate(SEASON_RANK = row_number()) %>% -->
+<!--         ungroup() %>% -->
+<!--         mutate(SEASON = as.factor(SEASON)) %>% -->
+<!--         select(SEASON, TEAM, DEFENSE_EPA, DEFENSE_PPA,  SEASON_RANK) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         arrange(desc(DEFENSE_PPA)) %>% -->
+<!--         datatable(escape=F, -->
+<!--                   filter = 'top', -->
+<!--                   options = list(pageLength = 25, -->
+<!--                                  scrollX=F, -->
+<!--                                  autowidth=T, -->
+<!--                                  columnDefs = list(list(className = 'dt-center', targets =  c("SEASON","SEASON_RANK", "DEFENSE_EPA", "DEFENSE_PPA")))), -->
+<!--                              #    columnDefs=list(list(width = '30px', targets = c(which(names(prob_table)!='Name')-1)))), -->
+<!--                                                 # list(width = '400px', targets = c(which(names(prob_table)=='Name')-1)))), -->
+<!--                                        #  targets = seq(3, ncol(prob_table)-1))), -->
+<!--                   rownames = F) -->
+
+<!-- ``` -->
+
+
+<!-- ### Overall Offensive and Defensive Efficiency -->
+
+<!-- Putting this all together, I can rank a teams offense/defense by year and then sort to see where the top teams of all time tend to rank. Here are the top 50 teams using a composite score of both, including only offenses and defenses with at least 400 plays in a season.  -->
+
+<!-- ```{r look at overall offense defense per team season} -->
+
+<!-- yearly_teams = bind_rows(yearly_offense_epa %>% -->
+<!--                                  filter(method == 'defense_adjusted'), -->
+<!--                          yearly_defense_epa %>% -->
+<!--                                  filter(method == 'offense_adjusted')) %>% -->
+<!--         mutate(method = 'opponent adjusted') %>% -->
+<!--         pivot_wider(id_cols = c("SEASON",  -->
+<!--                                 "TEAM", -->
+<!--                                 "method"), -->
+<!--                     values_from = c("EPA_Average", "PPA_Average", "plays"), -->
+<!--                     names_from = c("TYPE")) %>% -->
+<!--         filter(plays_OFFENSE & plays_DEFENSE > 400) %>% -->
+<!--         rename(OFFENSE_PPA = PPA_Average_OFFENSE, -->
+<!--                DEFENSE_PPA = PPA_Average_DEFENSE) %>% -->
+<!--         select(method, SEASON, TEAM, OFFENSE_PPA, DEFENSE_PPA) %>% -->
+<!--         mutate(OVERALL = OFFENSE_PPA + DEFENSE_PPA) -->
+
+<!-- yearly_teams %>% -->
+<!--         select(SEASON, TEAM, OFFENSE_PPA, DEFENSE_PPA, OVERALL) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         arrange(desc(OVERALL)) %>% -->
+<!--         mutate(SEASON_RANK = row_number()) %>% -->
+<!--         ungroup() %>% -->
+<!--         mutate(SEASON = as.factor(SEASON)) %>% -->
+<!--         select(SEASON, TEAM, OFFENSE_PPA, DEFENSE_PPA,  OVERALL, SEASON_RANK) %>% -->
+<!--                 arrange(desc(OVERALL)) %>% -->
+
+<!--         mutate_if(is.numeric, round, 3) %>% -->
+<!--         datatable(escape=F, -->
+<!--                   filter = 'top', -->
+<!--                   options = list(pageLength = 25, -->
+<!--                                  scrollX=F, -->
+<!--                                  autowidth=T, -->
+<!--                                  columnDefs = list(list(className = 'dt-center', targets =  c("OVERALL", "SEASON_RANK", "OFFENSE_PPA", "DEFENSE_PPA")))), -->
+<!--                              #    columnDefs=list(list(width = '30px', targets = c(which(names(prob_table)!='Name')-1)))), -->
+<!--                                                 # list(width = '400px', targets = c(which(names(prob_table)=='Name')-1)))), -->
+<!--                                        #  targets = seq(3, ncol(prob_table)-1))), -->
+<!--                   rownames = T) -->
+
+<!-- ``` -->
+
+<!-- And here are the 25 worst teams using the same criterion. -->
+
+<!-- ```{r bottom overall by season} -->
+
+<!-- yearly_teams %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         arrange(desc(OVERALL)) %>% -->
+<!--         mutate(Rank = row_number()) %>% -->
+<!--         select(Rank, everything()) %>% -->
+<!--         arrange(OVERALL) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- ``` -->
+
+<!-- We can visualize all of this by placing every team based on its overall offensive/defensive efficiency. -->
+
+<!-- ```{r make plot for overall, fig.height=8} -->
+
+<!-- yearly_teams %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         ggplot(., aes(x=OFFENSE_PPA, -->
+<!--                       color = OVERALL, -->
+<!--                       label = paste(TEAM, SEASON, sep=" "), -->
+<!--                       y=DEFENSE_PPA))+ -->
+<!--         geom_vline(xintercept = 0, -->
+<!--                    linetype = 'dashed', -->
+<!--                    color = 'black')+ -->
+<!--         geom_hline(yintercept = 0, -->
+<!--                    linetype = 'dashed', -->
+<!--                    color = 'black')+ -->
+<!--         geom_point(alpha = 0.5)+ -->
+<!--                    #color = 'grey60')+ -->
+<!--         geom_text(check_overlap = T, -->
+<!--                   size = 2.5, -->
+<!--                   hjust=0.5, -->
+<!--                   vjust = -1)+ -->
+<!--         theme_phil()+ -->
+<!--         coord_cartesian(xlim= c(-0.45, 0.45), -->
+<!--                         ylim = c(-0.45, 0.45))+ -->
+<!--         annotate("label", -->
+<!--                  x=-0.25, -->
+<!--                  y=0.3, -->
+<!--                  label = "Bad Offense \n Good Defense")+ -->
+<!--         annotate("label", -->
+<!--                  x=0.3, -->
+<!--                  y=-0.3, -->
+<!--                  label = "Good Offense \n Bad Defense")+ -->
+<!--         annotate("label", -->
+<!--                  x=0.3, -->
+<!--                  y=0.3, -->
+<!--                  label = "Good Offense \n Good Defense")+ -->
+<!--         annotate("label", -->
+<!--                  x=-0.25, -->
+<!--                  y=-0.3, -->
+<!--                  label = "Bad Offense \n Bad Defense")+ -->
+<!--         ggtitle("College Football Teams by Offense/Defense Efficiency, 2010-2020", -->
+<!--                 subtitle = "Teams placed based on regular season offense and defense predicted points added per play.")+ -->
+<!--         scale_color_gradient(low = "red", high = "deepskyblue1", -->
+<!--                              limits = c(-0.25, 0.25), -->
+<!--                              oob = scales::squish)+ -->
+<!--         theme(legend.title = element_text())+ -->
+<!--         guides(color = guide_colorbar(barheight = 0.5, -->
+<!--                                       title = 'Team PPA Overall', -->
+<!--                                       title.position = 'top', -->
+<!--                                      barwidth = 10)) -->
+
+<!-- ``` -->
+
+<!-- We can also break this down by conference year over year. For instance, where do we place SEC teams in each of these seasons? -->
+
+<!-- ```{r SEC overall score, fig.height=8} -->
+
+<!-- yearly_teams %>% -->
+<!--         left_join(., -->
+<!--                   games_data_raw %>%  -->
+<!--                           select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>%  -->
+<!--                           rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>%  -->
+<!--                           bind_rows(., -->
+<!--                                     games_data_raw %>% -->
+<!--                                             select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>%  -->
+<!--                                             rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>% -->
+<!--                           select(SEASON, TEAM, CONFERENCE) %>% -->
+<!--                           unique(), -->
+<!--                   by = c("SEASON", "TEAM")) %>% -->
+<!--         filter(CONFERENCE == 'SEC') %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         ggplot(., aes(x=OFFENSE_PPA, -->
+<!--                       color = OVERALL, -->
+<!--                       label = paste(TEAM, SEASON, sep=" "), -->
+<!--                       y=DEFENSE_PPA))+ -->
+<!--         geom_vline(xintercept = 0, -->
+<!--                    linetype = 'dashed', -->
+<!--                    alpha = 0.8, -->
+<!--                    color = 'black')+ -->
+<!--         geom_hline(yintercept = 0, -->
+<!--                    linetype = 'dashed', -->
+<!--                    alpha = 0.8, -->
+<!--                    color = 'black')+ -->
+<!--         geom_point(alpha = 0.5)+ -->
+<!--         geom_text_repel(size=3)+ -->
+<!--                    #color = 'grey60')+ -->
+<!--         # geom_text(check_overlap = T, -->
+<!--         #           size = 2.5, -->
+<!--         #           hjust=0.5, -->
+<!--         #           vjust = -1)+ -->
+<!--         theme_phil()+ -->
+<!--         coord_cartesian(xlim= c(-0.45, 0.45), -->
+<!--                         ylim = c(-0.45, 0.45))+ -->
+<!--         facet_wrap(CONFERENCE + SEASON ~., -->
+<!--                    ncol =4)+ -->
+<!--         # annotate("label", -->
+<!--         #          x=-0.25, -->
+<!--         #          y=0.3, -->
+<!--         #          label = "Bad Offense \n Good Defense")+ -->
+<!--         # annotate("label", -->
+<!--         #          x=0.3, -->
+<!--         #          y=-0.3, -->
+<!--         #          label = "Good Offense \n Bad Defense")+ -->
+<!--         # annotate("label", -->
+<!--         #          x=0.3, -->
+<!--         #          y=0.3, -->
+<!--         #          label = "Good Offense \n Good Defense")+ -->
+<!--         # annotate("label", -->
+<!--         #          x=-0.25, -->
+<!--         #          y=-0.3, -->
+<!--         #          label = "Bad Offense \n Bad Defense")+ -->
+<!--         ggtitle("College Football Teams by Offense/Defense Efficiency, 2010-2020", -->
+<!--                 subtitle = "Teams placed based on regular season offense and defense predicted points added per play.")+ -->
+<!--         scale_color_gradient(low = "red", high = "deepskyblue1", -->
+<!--                              limits = c(-0.25, 0.25), -->
+<!--                              oob = scales::squish)+ -->
+<!--         theme(legend.title = element_text())+ -->
+<!--         guides(color = guide_colorbar(barheight = 0.5, -->
+<!--                                       title = 'Team PPA Overall', -->
+<!--                                       title.position = 'top', -->
+<!--                                      barwidth = 10)) -->
+
+<!-- ``` -->
+
+<!-- What about the Big Ten? -->
+
+<!-- ```{r big ten overall score, fig.height=8} -->
+
+<!-- yearly_teams %>% -->
+<!--         left_join(., -->
+<!--                   games_data_raw %>%  -->
+<!--                           select(SEASON, HOME_TEAM, HOME_CONFERENCE) %>%  -->
+<!--                           rename(TEAM = HOME_TEAM, CONFERENCE = HOME_CONFERENCE) %>%  -->
+<!--                           bind_rows(., -->
+<!--                                     games_data_raw %>% -->
+<!--                                             select(SEASON, AWAY_TEAM, AWAY_CONFERENCE) %>%  -->
+<!--                                             rename(TEAM = AWAY_TEAM, CONFERENCE = AWAY_CONFERENCE)) %>% -->
+<!--                           select(SEASON, TEAM, CONFERENCE) %>% -->
+<!--                           unique(), -->
+<!--                   by = c("SEASON", "TEAM")) %>% -->
+<!--         filter(CONFERENCE == 'Big Ten') %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         ggplot(., aes(x=OFFENSE_PPA, -->
+<!--                       color = OVERALL, -->
+<!--                       label = paste(TEAM, SEASON, sep=" "), -->
+<!--                       y=DEFENSE_PPA))+ -->
+<!--         geom_vline(xintercept = 0, -->
+<!--                    linetype = 'dashed', -->
+<!--                    alpha = 0.8, -->
+<!--                    color = 'black')+ -->
+<!--         geom_hline(yintercept = 0, -->
+<!--                    linetype = 'dashed', -->
+<!--                    alpha = 0.8, -->
+<!--                    color = 'black')+ -->
+<!--         geom_point(alpha = 0.5)+ -->
+<!--         geom_text_repel(size=3, -->
+<!--                         max.overlaps = 20)+ -->
+<!--                    #color = 'grey60')+ -->
+<!--         # geom_text(check_overlap = T, -->
+<!--         #           size = 2.5, -->
+<!--         #           hjust=0.5, -->
+<!--         #           vjust = -1)+ -->
+<!--         theme_phil()+ -->
+<!--         coord_cartesian(xlim= c(-0.45, 0.45), -->
+<!--                         ylim = c(-0.45, 0.45))+ -->
+<!--         facet_wrap(CONFERENCE + SEASON ~., -->
+<!--                    ncol =3)+ -->
+<!--         # annotate("label", -->
+<!--         #          x=-0.25, -->
+<!--         #          y=0.3, -->
+<!--         #          label = "Bad Offense \n Good Defense")+ -->
+<!--         # annotate("label", -->
+<!--         #          x=0.3, -->
+<!--         #          y=-0.3, -->
+<!--         #          label = "Good Offense \n Bad Defense")+ -->
+<!--         # annotate("label", -->
+<!--         #          x=0.3, -->
+<!--         #          y=0.3, -->
+<!--         #          label = "Good Offense \n Good Defense")+ -->
+<!--         # annotate("label", -->
+<!--         #          x=-0.25, -->
+<!--         #          y=-0.3, -->
+<!--         #          label = "Bad Offense \n Bad Defense")+ -->
+<!--         ggtitle("College Football Teams by Offense/Defense Efficiency, 2010-2020", -->
+<!--                 subtitle = "Teams placed based on regular season offense and defense predicted points added per play.")+ -->
+<!--         scale_color_gradient(low = "red", high = "deepskyblue1", -->
+<!--                              limits = c(-0.25, 0.25), -->
+<!--                              oob = scales::squish)+ -->
+<!--         theme(legend.title = element_text())+ -->
+<!--         guides(color = guide_colorbar(barheight = 0.5, -->
+<!--                                       title = 'Team PPA Overall', -->
+<!--                                       title.position = 'top', -->
+<!--                                      barwidth = 10)) -->
+
+<!-- ``` -->
+
+<!-- ## Ranking Teams by Pass/Run Efficiency -->
+
+<!-- We can break this down further to examine a team's expected points based on pass/run.  -->
+
+<!-- ```{r look at offense defense efficiency vs run} -->
+
+<!-- yearly_teams_type = bind_rows(yearly_offense_epa_by_play %>% -->
+<!--                                       filter(method == 'defense_adjusted'), -->
+<!--           yearly_defense_epa_by_play %>% -->
+<!--                   filter(method == 'offense_adjusted')) %>% -->
+<!--         pivot_wider(id_cols = c("SEASON",  -->
+<!--                                 "TEAM"), -->
+<!--                     values_from = c("EPA_Average", "PPA_Average", "plays"), -->
+<!--                     names_from = c("TYPE", "PLAY")) %>% -->
+<!--         filter(plays_OFFENSE_Pass + plays_OFFENSE_Run + plays_OFFENSE_Special  > 400) %>% -->
+<!--         rename(OFFENSE_PPA_Pass = PPA_Average_OFFENSE_Pass, -->
+<!--                DEFENSE_PPA_Pass = PPA_Average_DEFENSE_Pass, -->
+<!--                OFFENSE_PPA_Run = PPA_Average_OFFENSE_Run, -->
+<!--                DEFENSE_PPA_Run = PPA_Average_DEFENSE_Run, -->
+<!--                OFFENSE_Plays_Pass = plays_OFFENSE_Pass, -->
+<!--                DEFENSE_Plays_Pass = plays_DEFENSE_Pass, -->
+<!--                OFFENSE_Plays_Run = plays_OFFENSE_Run, -->
+<!--                DEFENSE_Plays_Run = plays_DEFENSE_Run) %>% -->
+<!--         select(SEASON, TEAM, starts_with("OFFENSE_PPA"), starts_with("DEFENSE_PPA"), starts_with("OFFENSE_Plays"), starts_with("DEFENSE_Plays")) -->
+
+<!-- ``` -->
+
+<!-- Filtering to teams with at least 200 such plays in a season, which teams had the most efficient passing offense in terms of predicted points added? -->
+
+<!-- ```{r pass efficiency by teams} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(OFFENSE_Plays_Pass > 200) %>% -->
+<!--         arrange(desc(OFFENSE_PPA_Pass)) %>% -->
+<!--         select(SEASON, TEAM, OFFENSE_PPA_Pass, OFFENSE_Plays_Pass) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- ``` -->
+
+<!-- What about run offense? -->
+
+<!-- ```{r run efficiency by teams} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(OFFENSE_Plays_Run > 200) %>% -->
+<!--         arrange(desc(OFFENSE_PPA_Run)) %>% -->
+<!--         select(SEASON, TEAM, OFFENSE_PPA_Run, OFFENSE_Plays_Run) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- ``` -->
+
+<!-- Flipping this around, which defenses yielded the most points to passing/run? -->
+
+<!-- ```{r worst defenses} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(DEFENSE_Plays_Pass > 200) %>% -->
+<!--         arrange(DEFENSE_PPA_Pass) %>% -->
+<!--         select(SEASON, TEAM, DEFENSE_PPA_Pass, DEFENSE_Plays_Pass) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(DEFENSE_Plays_Run > 200) %>% -->
+<!--         arrange(DEFENSE_PPA_Run) %>% -->
+<!--         select(SEASON, TEAM, DEFENSE_PPA_Run, DEFENSE_Plays_Run) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- ``` -->
+
+<!-- What about the best defenses? Rutgers in 2012 with the best run defense? Really? Keep in mind that these ratings are unconditional based on opponent strength, though evidently Rutgers did have a bunch of defenders drafted in 2013, so..? -->
+
+<!-- ```{r best defenses} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(DEFENSE_Plays_Pass > 200) %>% -->
+<!--         arrange(desc(DEFENSE_PPA_Pass)) %>% -->
+<!--         select(SEASON, TEAM, DEFENSE_PPA_Pass, DEFENSE_Plays_Pass) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(DEFENSE_Plays_Run > 200) %>% -->
+<!--         arrange(desc(DEFENSE_PPA_Run)) %>% -->
+<!--         select(SEASON, TEAM, DEFENSE_PPA_Run, DEFENSE_Plays_Run) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>% -->
+<!--         autofit() -->
+
+<!-- ``` -->
+
+<!-- ## Ranking Teams by Overall Pass/Run Efficiency -->
+
+<!-- Putting this all together we can break down teams overall as before, only now explicitly looking at teams based on their pass and run offense/defense efficiency. Florida State 2013 still jumps to the top, evidently their passing defense that year was fantastic in addition to their passing offense. The picture is mostly unchanged from looking at just the overall numbers, but breaking it down can reveal which teams were more balanced while others were pass/run heavy. -->
+
+<!-- ```{r look at A&M by pass run efficiency} -->
+
+<!-- ppa_col_func =  -->
+<!-- function(x) { -->
+
+<!--         breaks = seq(-1, 1, -->
+<!--                      by = .1) -->
+
+<!--         colorRamp=colorRampPalette(c("red", "white", "deepskyblue1")) -->
+<!--         col_palette <- colorRamp(length(breaks)) -->
+<!--         mycut <- cut(x,  -->
+<!--                      breaks = breaks, -->
+<!--                      include.lowest = TRUE,  -->
+<!--                      right=T, -->
+<!--                      label = FALSE) -->
+<!--         col_palette[mycut] -->
+
+<!-- } -->
+
+<!-- overall_col_func =  -->
+<!-- function(x) { -->
+
+<!--         breaks = seq(-1.6, 1.6, -->
+<!--                      by = .2) -->
+
+<!--         colorRamp=colorRampPalette(c("red", "white", "deepskyblue1")) -->
+<!--         col_palette <- colorRamp(length(breaks)) -->
+<!--         mycut <- cut(x,  -->
+<!--                      breaks = breaks, -->
+<!--                      include.lowest = TRUE,  -->
+<!--                      right=T, -->
+<!--                      label = FALSE) -->
+<!--         col_palette[mycut] -->
+
+<!-- } -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--                        OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+
+<!-- ``` -->
+
+<!-- ## Examining Teams Year over Year -->
+
+<!-- We can also look at individual teams year over year to see how their offense/defense run/pass efficiency changed. -->
+
+<!-- ### Oregon  -->
+
+<!-- For instance, Oregon was great in the early 2010s then had a few years in which they were down. -->
+
+<!-- ```{r look at individual teams oregon} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Oregon') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Florida State -->
+
+<!-- Florida State had that amazing year, but has really fallen back after Jimbo's bad year and eventual departure. -->
+
+<!-- ```{r look at teams florida state} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Florida State') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Wisconsin -->
+
+<!-- Wisconsin has generally been pretty good but not quite elite during this time period, people usually hound them for their passing game lately, how do they compare year over year? -->
+
+<!-- ```{r look at individual teams wisconsin} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Wisconsin') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Iowa State -->
+
+<!-- What about a historically weaker team that has been on the rise lately? Iowa State? -->
+
+<!-- ```{r iowa state year over year} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Iowa State') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+
+<!-- ``` -->
+
+<!-- ### Alabama -->
+
+<!-- Looking at Alabama's 2007 season earlier made me wonder how much we'll see Bama's teams change/rate over the seasons. -->
+
+<!-- ```{r look at individual teams bama} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Alabama') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Ohio State -->
+
+<!-- I don't really know anything about Ohio State but I'll include them here. -->
+
+<!-- ```{r look at individual teams ohio state} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Ohio State') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Notre Dame -->
+
+<!-- What has been Notre Dame's top team during this time period? -->
+
+<!-- ```{r notre dame top team} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Notre Dame') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Texas Tech -->
+
+<!-- How has Texas Tech's pass efficiency rated over the years? I'm expecting them to have really strong passing offenses and terrible defenses. -->
+
+<!-- ```{r look at individual teams texas tech} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Texas Tech') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Baylor -->
+
+<!-- How good was Baylor under RGIII?  -->
+
+<!-- ```{r look at individual teams baylor} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Baylor') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ### Texas A&M -->
+
+<!-- And of course the team I keep randomly selecting, Texas A&M. -->
+
+<!-- ```{r look at individual teams tamu} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(TEAM == 'Texas A&M') %>% -->
+<!--         # filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--         #                OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--    #     filter(TEAM == 'Texas')  %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         head(25) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+<!-- ``` -->
+
+<!-- ## Top Pass/Rush Offense/Defense Efficiency by Year -->
+
+<!-- Finally, I'll look at this by year. -->
+
+<!-- ```{r look at by year} -->
+
+<!-- yearly_teams_type %>% -->
+<!--         filter(OFFENSE_Plays_Pass > 200 & DEFENSE_Plays_Pass > 200 & -->
+<!--                   OFFENSE_Plays_Run > 200 & DEFENSE_Plays_Run > 200) %>% -->
+<!--         mutate_if(is.numeric, round, 2) %>% -->
+<!--         select(-contains("Plays")) %>% -->
+<!--         mutate(Overall_PPA = OFFENSE_PPA_Pass + OFFENSE_PPA_Run + DEFENSE_PPA_Pass + DEFENSE_PPA_Run) %>% -->
+<!--         mutate(SEASON = as.character(SEASON)) %>% -->
+<!--         group_by(SEASON) %>% -->
+<!--         slice_max(., Overall_PPA, -->
+<!--                   n=1) %>% -->
+<!--      #   arrange(desc(Overall_PPA)) %>% -->
+<!--         flextable() %>%   -->
+<!--         autofit() %>% -->
+<!--         bg(., j=c("OFFENSE_PPA_Pass",  -->
+<!--                   "OFFENSE_PPA_Run", -->
+<!--                   "DEFENSE_PPA_Pass", -->
+<!--                   "DEFENSE_PPA_Run"), -->
+<!--            bg = ppa_col_func) %>% -->
+<!--                 bg(., j=c("Overall_PPA"), -->
+<!--            bg = overall_col_func)  -->
+
+
+<!-- ``` -->
+

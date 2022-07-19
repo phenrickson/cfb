@@ -1,0 +1,378 @@
+---
+title: "CFB Opponent Adjusted Team Efficiency"
+author: "Phil Henrickson"
+date: "6/7/2022"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+    css: "styles.css"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+conflict_prefer("lag", "dplyr")
+
+library(flextable)
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+```
+
+```{r get games}
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        arrange(START_DATE)
+
+```
+
+```{r load functions}
+
+source(here::here("functions/theme_phil.R"))
+source(here::here("functions/clean_plays_func.R"))
+source(here::here("functions/make_time_features_func.R"))
+source(here::here("functions/expected_points_func.R"))
+source(here::here("functions/get_points_added_func.R"))
+source(here::here("functions/get_drive_score_events.R"))
+source(here::here("functions/assign_play_score_events.R"))
+rm(a)
+
+```
+
+# Opponent Adjusted Team Efficiency
+
+```{r load in previously scored}
+
+load(here::here("data/scored_plays.Rdata"))
+
+scored_regular = scored_plays %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(OFFENSE_DIVISION == 'fbs' & DEFENSE_DIVISION == 'fbs') %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # get neutral site
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE) %>%
+                          mutate(NEUTRAL_SITE = case_when(NEUTRAL_SITE == T ~ 1,
+                                                           TRUE ~ 0)),
+                  by = c("GAME_ID")) %>%
+        # define home field advantage
+        mutate(HOME_FIELD_ADVANTAGE = case_when(NEUTRAL_SITE == 1 ~ 0,
+                                                HOME == OFFENSE ~ 1,
+                                                HOME == DEFENSE ~ -1)) %>%
+        select(SEASON, GAME_ID, NEUTRAL_SITE, HOME, AWAY, OFFENSE, DEFENSE, HOME_FIELD_ADVANTAGE, OFFENSE_ID, DEFENSE_ID, OFFENSE_CONFERENCE, DEFENSE_CONFERENCE, OFFENSE_DIVISION, DEFENSE_DIVISION, PLAY_TYPE, PLAY_TEXT, EPA, PPA)
+
+# training set
+scored_train = scored_regular %>%
+        select(SEASON, OFFENSE_ID, DEFENSE_ID, HOME_FIELD_ADVANTAGE, EPA, PPA) %>%
+        mutate(OFFENSE_ID = factor(OFFENSE_ID),
+               DEFENSE_ID = factor(DEFENSE_ID)) %>%
+        # mutate_at(c("OFFENSE_ID", "DEFENSE_ID"),
+        #           ~ relevel(., "fcs")) %>%
+        filter(SEASON < 2016)
+
+# validation set
+scored_valid = scored_regular %>%
+        select(SEASON, OFFENSE_ID, DEFENSE_ID, HOME_FIELD_ADVANTAGE, EPA, PPA) %>%
+        mutate(OFFENSE_ID = factor(OFFENSE_ID),
+               DEFENSE_ID = factor(DEFENSE_ID)) %>%
+               # mutate_at(c("OFFENSE_ID", "DEFENSE_ID"),
+               #    ~ relevel(., "fcs")) %>%
+        filter(SEASON >= 2016 & SEASON < 2020) 
+
+# test set
+scored_test = scored_regular %>%
+        select(SEASON, OFFENSE_ID, DEFENSE_ID, HOME_FIELD_ADVANTAGE, EPA, PPA) %>%
+        mutate(OFFENSE_ID = factor(OFFENSE_ID),
+               DEFENSE_ID = factor(DEFENSE_ID)) %>%
+        # mutate_at(c("OFFENSE_ID", "DEFENSE_ID"),
+        #           ~ relevel(., "fcs")) %>%
+        filter(SEASON >=2020)
+
+```
+
+```{r set up for modeling}
+
+# penalized linear regression
+glmnet_reg_mod<- 
+        linear_reg(penalty =
+                           #0.00106,
+                           tune::tune(),
+                     mixture = 0.5) %>%
+        set_engine("glmnet")
+
+# specify grid for tuning
+glmnet_grid <- tibble(penalty = 10^seq(-4, -0.75, 
+                                       length.out = 20))
+
+# specify regression metrics
+reg_metrics<-metric_set(yardstick::rmse,
+                        yardstick::rsq,
+                        yardstick::mae,
+                        yardstick::mape)
+
+# control for resamples
+keep_pred <- control_resamples(save_pred = TRUE, 
+                               save_workflow = TRUE)
+
+```
+
+
+```{r now set up recipe}
+
+adjusted_recipe = recipe(x = scored_train) %>%
+        update_role(all_numeric(),
+                    all_nominal(),
+                    new_role = "ID") %>%
+        update_role(c("OFFENSE_ID",
+                      "DEFENSE_ID",
+                      "HOME_FIELD_ADVANTAGE"),
+                    new_role = "predictor") %>%
+        step_novel(c("OFFENSE_ID",
+                     "DEFENSE_ID"),
+                   new_level = "new_team") %>%
+        step_dummy(c("OFFENSE_ID",
+                     "DEFENSE_ID"))
+
+```
+
+```{r make recipe}
+
+# set epa as the outcome
+epa_recipe = adjusted_recipe %>%
+        update_role(EPA,
+                    new_role = "outcome") %>%
+        step_filter(!is.na(EPA)) %>%
+        check_missing(all_predictors())
+
+# set ppa as the outcome
+ppa_recipe = adjusted_recipe %>%
+        update_role(EPA,
+                    new_role = "outcome") %>%
+        step_filter(!is.na(PPA)) %>%
+        check_missing(all_predictors())
+
+```
+
+
+```{r create workflows}
+
+# create workflows
+epa_wf = workflow() %>%
+        add_recipe(epa_recipe) %>%
+        add_model(glmnet_reg_mod)
+
+ppa_wf = workflow() %>%
+        add_recipe(ppa_recipe) %>%
+        add_model(glmnet_reg_mod)
+
+```
+
+Estimate lambda penalty
+
+```{r estimate}
+
+# now estimate lambda
+folds = vfold_cv(scored_train %>%
+        filter(SEASON == 2012),
+        v = 5)
+
+# 
+tune_resamples = epa_wf %>%
+        tune_grid(resamples = folds,
+                  grid = glmnet_grid,
+                  metrics = reg_metrics)
+
+```
+
+Now fit
+
+```{r fit model to a season}
+
+epa_fits = scored_train %>%
+        filter(SEASON >=2007 & SEASON <= 2015) %>%
+        mutate(YEAR = SEASON) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(fit = map(data,
+                       ~ epa_wf %>%
+                               fit(.x) %>%
+                               extract_fit_parsnip)) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(POWER = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted')))
+
+```
+
+```{r now look}
+
+adjusted_team_rankings = epa_fits %>%
+        select(SEASON, adjusted) %>%
+        unnest(adjusted) %>%
+        mutate(TEAM = gsub(" ", "\\.", TEAM)) %>%
+        mutate(POWER_MARGIN = POWER * 60) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(POWER_MARGIN))
+        
+raw_team_rankings = scored_train %>%
+        filter(SEASON >=2007 & SEASON <= 2015) %>%
+        group_by(SEASON, OFFENSE_ID) %>%
+        summarize(OFFENSE = mean(EPA, na.rm=T),
+                  .groups = 'drop') %>%
+        mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", OFFENSE_ID))) %>%
+        mutate(TYPE = 'raw') %>%
+        select(SEASON, TEAM, TYPE, OFFENSE) %>%
+        left_join(.,
+                  scored_train %>%
+                        filter(SEASON >=2007 & SEASON <= 2015) %>%
+                        group_by(SEASON, DEFENSE_ID) %>%
+                        summarize(DEFENSE = mean(EPA, na.rm=T),
+                                  .groups = 'drop') %>%
+                          mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", DEFENSE_ID))) %>%
+                        mutate(TYPE = 'raw') %>%
+                        select(SEASON, TEAM, TYPE, DEFENSE) %>%
+                          mutate(DEFENSE = -DEFENSE),
+                  by = c("SEASON", "TEAM", "TYPE")) %>%
+        mutate(POWER = OFFENSE + DEFENSE) %>%
+        mutate(POWER_MARGIN = POWER * 60) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(POWER_MARGIN))
+
+
+team_rankings = bind_rows(adjusted_team_rankings,
+                          raw_team_rankings) %>%
+        pivot_wider(id_cols = c("SEASON", "TEAM"),
+                    values_from = c("OFFENSE",
+                                    "DEFENSE",
+                                    "POWER",
+                                    "POWER_MARGIN"),
+                    names_from = c("TYPE"))
+
+team_rankings %>%
+        ggplot(., aes(x=OFFENSE_adjusted,
+                      color = POWER_adjusted,
+                      label = TEAM,
+                      y=DEFENSE_adjusted))+
+        geom_vline(xintercept = 0,
+                   alpha = 0.8,
+                   linetype = 'dashed')+
+        geom_hline(yintercept = 0,
+                   alpha = 0.8,
+                   linetype = 'dashed')+
+        geom_point()+
+        geom_text(check_overlap=T,
+                  vjust = -1)+
+        facet_wrap(SEASON ~.)+
+        theme_phil()+
+        scale_color_gradient2(low = "red",
+                              mid = "grey60",
+                              high = "deepskyblue1",
+                              limits = c(-0.2, 0.2),
+                              oob = scales::squish)+
+        theme(legend.title = element_text())+
+        guides(color = guide_colorbar(barheight = 0.5,
+                                      barwidth = 10,
+                                      title = 'Team Total EPA per play',
+                                      title.position = 'top'))
+        
+```
+
+```{r plot rankings}
+
+
+
+```
+
+
+coefs = foo %>%
+        extract_fit_parsnip() %>%
+        tidy()
+
+intercept = coefs %>% 
+        filter(term == '(Intercept)') %>%
+        pull(estimate)
+
+coefs %>%
+        mutate(intercept = intercept) %>%
+        filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+        mutate(adjusted = estimate + intercept) %>%
+        mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+        mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+        select(TEAM, type, adjusted) %>%
+        spread(type, adjusted) %>%
+        mutate(POWER = OFFENSE - DEFENSE) %>%
+        arrange(de)
+        select(TYPE, TEAM, adjusted)
+        pivot_wider(id_cols = c("TEAM"),
+                    values_from = c("adjusted"),
+                    names_from = c("TYPE"))
+        spread(adjusted, TYPE)
+
+```
+
