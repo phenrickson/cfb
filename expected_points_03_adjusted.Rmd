@@ -1,5 +1,5 @@
 ---
-title: "CFB Team Offense/Defense Efficiency"
+title: "Measuring CFB Team Offense/Defense Efficiency"
 author: "Phil Henrickson"
 date: "6/7/2022"
 output: 
@@ -87,18 +87,20 @@ team_conference_season = DBI::dbGetQuery(myconn,
 # make mapping for color
 team_mapping = teams_raw %>%
         mutate(TEAM_ABBR = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", TEAM))) %>%
-        select(TEAM, TEAM_ABBR, ABBREVIATION, COLOR, ALT_COLOR)
+        select(TEAM, TEAM_ABBR, ABBREVIATION, COLOR, ALT_COLOR) %>%
+        mutate(COLOR = case_when(TEAM == 'Toledo' ~ '#003E7E',
+                                 TRUE ~ COLOR))
 
-teamcolors <- team_mapping %>%
+team_colors <- team_mapping %>%
         filter(!is.na(COLOR)) %>%
         pull(COLOR)
 
-names(teamcolors) = team_mapping %>%
+names(team_colors) = team_mapping %>%
         filter(!is.na(COLOR)) %>%
         pull(TEAM)
 
-custom_color_teams <- scale_colour_manual(name = "TEAM", values = teamcolors)
-custom_fill_teams <- scale_fill_manual(name = "TEAM", values = teamcolors)
+custom_color_teams <- scale_colour_manual(name = "TEAM", values = team_colors)
+custom_fill_teams <- scale_fill_manual(name = "TEAM", values = team_colors)
 
 
 ```
@@ -266,7 +268,7 @@ raw_team_rankings = scored_train %>%
         filter(SEASON >=2007 & SEASON <= 2015) %>%
         filter(GARBAGE_TIME == 0) %>%
         group_by(SEASON, OFFENSE_ID) %>%
-        summarize(OFFENSE = mean(EPA, na.rm=T),
+        summarize(OFFENSE = mean(PPA, na.rm=T),
                   .groups = 'drop') %>%
         mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", OFFENSE_ID))) %>%
         mutate(TYPE = 'raw') %>%
@@ -276,7 +278,7 @@ raw_team_rankings = scored_train %>%
                         filter(SEASON >=2007 & SEASON <= 2015) %>%
                           filter(GARBAGE_TIME == 0) %>%
                         group_by(SEASON, DEFENSE_ID) %>%
-                        summarize(DEFENSE = mean(EPA, na.rm=T),
+                        summarize(DEFENSE = mean(PPA, na.rm=T),
                                   .groups = 'drop') %>%
                           mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", DEFENSE_ID))) %>%
                         mutate(TYPE = 'raw') %>%
@@ -308,7 +310,7 @@ raw_team_rankings %>%
 
 ```
 
-Based purely on their on field play, this measure highlights some teams that we would expect (2012 Alabama, 2013 Florida State), but it also rates certain teams very highly that we wouldn't expect (2013 East Carolina, 2014 Marsall, 2015 Western Kentucky).
+Based purely on their on field play, this measure highlights some teams that we would expect (2012 Alabama, 2013 Florida State), but it also rates certain teams very highly that we wouldn't expect (2014 Marsall, 2015 Western Kentucky).
 
 ```{r raw offenses}
 
@@ -338,7 +340,7 @@ raw_team_rankings %>%
 
 Why is that happening? The issue is that these estimates are simply the average predicted points per play for each team over the course of the season. They don't take into account the relative strength of the opposition faced - a 10 yard pass against UMass is considered the same as a 10 yard pass against Ohio State. 
 
-As an example, this means that in 2015, from a raw offense/defense efficiency perspective, Western Kentucky is rated slightly better than Alabama. This is mainly because Alabama's raw offense is rated poorly in that year, a year in which they went 14-1 and had Derrick Henry win the Heisman with over 2200 yards rushing.
+As an example, this means that in 2015, from a raw offense/defense efficiency perspective, Western Kentucky is rated pretty closely to Alabama. This is mainly because Alabama's raw offense is rated much more poorly in that year, a year in which they went 14-1 and had Derrick Henry win the Heisman with over 2200 yards rushing.
 
 ```{r show example}
 
@@ -360,16 +362,16 @@ temp = scored_train %>%
         filter(SEASON == 2015) %>%
      #   filter(HOME == 'Alabama' | AWAY == 'Alabama' | HOME == 'Western Kentucky' | AWAY == 'Western Kentucky') %>%
         group_by(SEASON, OFFENSE_ID) %>%
-        summarize(OFFENSE = mean(EPA, na.rm=T),
+        summarize(OFFENSE = mean(PPA, na.rm=T),
                   .groups = 'drop') %>%
         mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", OFFENSE_ID))) %>%
         mutate(TYPE = 'raw') %>%
         select(SEASON, TEAM, TYPE, OFFENSE) %>%
         left_join(.,
                   scored_train %>%
-                        filter(SEASON >=2007 & SEASON <= 2015) %>%
-                        group_by(SEASON, DEFENSE_ID) %>%
-                        summarize(DEFENSE = mean(EPA, na.rm=T),
+                          filter(SEASON == 2015) %>%
+                                  group_by(SEASON, DEFENSE_ID) %>%
+                        summarize(DEFENSE = mean(PPA, na.rm=T),
                                   .groups = 'drop') %>%
                           mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", DEFENSE_ID))) %>%
                         mutate(TYPE = 'raw') %>%
@@ -454,6 +456,7 @@ keep_pred <- control_resamples(save_pred = TRUE,
 This means regressing the predicted points per play on each team as well as home field advantage.
 
 $$PPA  = Offense_i + Defense_j + HomeFieldAdvantage$$
+
 ## Recipes
 
 ```{r now set up recipe}
@@ -509,18 +512,7 @@ ppa_wf = workflow() %>%
 
 ```
 
-Now fit at the season level
-
-```{r show what the prepped data looks like}
-
-ppa_recipe %>%
-        prep(scored_train %>%
-                     filter(SEASON == 2012)) %>%
-        bake(scored_train %>%
-                     filter(SEASON == 2012))
-
-```
-
+If I 
 
 <!-- ```{r look at a game in 2011} -->
 
@@ -590,11 +582,15 @@ team_fit %>%
         mutate_if(is.numeric, round, 3) %>%
         arrange(desc(OVERALL)) %>%
         mutate(MARGIN = OVERALL * 65) %>%
-        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, MARGIN)
+        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, MARGIN) %>%
+        select(-MARGIN) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
         
 ```
 
-Now fit to season as a whole.
+Now fit to each season in the training set.
 
 ```{r fit model to a season}
 
@@ -714,13 +710,16 @@ team_rankings = bind_rows(adjusted_team_rankings,
 ## look at 
 ```
 
-Western Kentucky is mostly unaffected - their offense gets an adjustment up while their defense gets lowered, but they stay mostly the same. Alabama's offense receives a big boost based on their opponents, and their overall score becomes dramatically higher than Western Kentucky's as a result.
+Western Kentucky gets penalized due to the quality of the competition they faced - their offense gets an adjustment down while their defense gets a slight improvement. Alabama's offense receives a slight increase based on their opponents, but their defense is the most affected as they played a lot of strong offenses. With the adjustments, Bama moves from the #2 team to the #1, while Western Kentucky falls from #3 to a still respectable #16 - evidently the AP had them at #24 to finish the season, so this feels pretty reasonable.
 
 ```{r look at team rankings}
 
 bind_rows(adjusted_team_rankings,
                           raw_team_rankings) %>%
         filter(SEASON == 2015) %>%
+        group_by(TYPE, SEASON) %>%
+        arrange(desc(OVERALL)) %>%
+        mutate(RANK = row_number()) %>%
         filter(TEAM == 'Alabama' | TEAM == 'Western Kentucky') %>%
         arrange(TEAM) %>%
         mutate(SEASON = factor(SEASON)) %>%
@@ -738,7 +737,9 @@ bind_rows(adjusted_team_rankings,
 
 ```
 
-I trained the model on the years 2007 to 2015, so I have plays for each of these seasons that we can use to rank teams overall for each of these seasons.
+# Measuring Efficiency by Season
+
+I trained the original expected points model on the years 2007 to 2015, so I can place every team in these seasons based on their offense and defense efficiency. The best teams are in the upper right quadrant, with strong offenses and defenses.
 
 ```{r overall}
 
@@ -773,49 +774,1936 @@ team_rankings %>%
 
 ```
 
+We can rank teams according to each of these dimensions and take a look at the overall distributions. Here are the top teams by each metric (overall, offense, defense) in 2012.
+
 ```{r look 2012 ratings}
 
+# overall 
 adjusted_team_rankings %>%
-        filter(SEASON == 2012)
+        filter(SEASON == 2007) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OVERALL') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = ABBREVIATION,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                                  jitter.width = 0.5,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play (opponent adjusted)")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# offense
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2012) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OFFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# defense
+
+adjusted_team_rankings %>%
+        filter(SEASON == 2012) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'DEFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+        
+```
+
+## All Years
+
+I trained the original expected points model on 2007-2015, but then I predicted the next four seaasons (then retrained, then predicted the remaining seaons). I'll add all seasons from 2007 to 2021 in here to get season level opponent adjusted metrics for all teams from 07 to 21.
+
+```{r run through 2021}
+
+# remove original
+rm(ppa_fits,
+   team_rankings,
+   adjusted_team_rankings)
+
+ppa_data = bind_rows(scored_train %>%
+                filter(SEASON >=2007),
+                scored_valid,
+                scored_test)
+
+ppa_fits = ppa_data %>%
+        mutate(YEAR = SEASON) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(augmented = map2(workflow, data,
+                           ~ augment(.x, .y))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted')))
+
+# get adjusted
+adjusted_team_rankings = ppa_fits %>%
+        select(SEASON, adjusted) %>%
+        unnest(adjusted) %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", TEAM)) %>%
+        select(-TEAM) %>%
+        mutate(MARGIN = OVERALL * 65) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(MARGIN)) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM_ABBR")) %>%
+        select(-TEAM_ABBR) %>%
+        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, MARGIN)
+        
+## pivot and then grab
+team_rankings = bind_rows(adjusted_team_rankings,
+                          raw_team_rankings) %>%
+        pivot_wider(id_cols = c("SEASON", "TEAM"),
+                    values_from = c("OFFENSE",
+                                    "DEFENSE",
+                                    "OVERALL",
+                                    "MARGIN"),
+                    names_from = c("TYPE")) %>%
+        select(SEASON, TEAM, everything())
+
+```
+
+As before, can look at individual seasons to see where teams stacked up in terms offensive/defensive efficiency at the end of the year.
+
+```{r look 2018 ratings}
+
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2018) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OVERALL') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# offense
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2018) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OFFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# defense
+
+adjusted_team_rankings %>%
+        filter(SEASON == 2018) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'DEFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+        
+```
+
+
+```{r look 2019 ratings}
+
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2019) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OVERALL') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = ABBREVIATION,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                                  jitter.width = 0.5,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# offense
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2019) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OFFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = ABBREVIATION,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                                  jitter.width = 0.5,
+                                            scale =T),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# defense
+
+adjusted_team_rankings %>%
+        filter(SEASON == 2019) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'DEFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = ABBREVIATION,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                            scale =T,
+                                            jitter.width = 0.5),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+        
+```
+
+
+```{r look 2021 ratings}
+
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2021) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OVERALL') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                                  jitter.width=0.5,
+                                            scale =F),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# offense
+# overall 
+adjusted_team_rankings %>%
+        filter(SEASON == 2021) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'OFFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                                  jitter.width=0.5,
+                                            scale =F),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+
+# defense
+
+adjusted_team_rankings %>%
+        filter(SEASON == 2021) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        filter(metric == 'DEFENSE') %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(!is.na(CONFERENCE)) %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM,
+                      fill = TEAM,
+                      y = value))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 2,
+                                                  jitter.width=0.5,
+                                            scale =F),
+                   color = 'white',
+                   size = 5,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(SEASON + metric ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Net Predicted Points Added per play")+
+        geom_hline(yintercept = 0,
+                   color = 'grey60')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 16,
+                                                  hjust = 0.5))
+        
+```
+
+## Tracking Team Performance
+
+We can look at this to see changes within team overall strength year over year. For instance, how has Texas A&M been during this time period?
+
+### Texas A&M
+
+```{r look at tamu offense defense over time period}
+
+team = 'Texas A&M'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        ggtitle(paste("Team Efficiency Metrics by Season - ", team))+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 90))
 
 ```
 
 
-We can look at this to see changes within team overall strength year over year.
+### Texas
 
-```{r plot over time, warning=F}
+```{r look at ftexas offense defense over time period}
 
-int_breaks <- function(x, n = 5) {
+team = 'Texas'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))
+```
+
+
+### Alabama
+
+If we look at Alabama, we should see them basically be near the top this whole damn era.
+
+```{r look at bama offense defense over time period}
+
+team = 'Alabama'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))
+```
+
+### Georgia
+
+Georgia should take off in the last few years.
+
+```{r look at bama offense defense over time period}
+
+team = 'Georgia'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))
+```
+
+
+### Ohio State
+
+```{r look at osu offense defense over time period}
+
+team = 'Ohio State'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))
+```
+
+### Baylor
+
+```{r look at baylor offense defense over time period}
+
+team = 'Baylor'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))
+```
+
+
+### Iowa State
+
+```{r look at iowa state offense defense over time period}
+
+team = 'Iowa State'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE"))) %>%
+        group_by(SEASON, TYPE, metric) %>%
+        arrange(desc(value)) %>%
+        mutate(RANK = row_number()) %>%
+        ungroup() %>%
+        group_by(metric) %>%
+        mutate(min = min(value)) %>%
+        ungroup()
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_text(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      x = SEASON,
+                      label = RANK,
+                      y = min))+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              axis.text.x = element_text(size = 12),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))+
+        xlab("")
+
+```
+
+### Florida State
+
+```{r look at florida state offense defense over time period}
+
+team = 'Florida State'
+
+plot_dat = adjusted_team_rankings %>%
+        select(-MARGIN) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM, -TYPE) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE")))
+
+all_teams = plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      y=value))+
+        geom_point(position = position_auto(scale=F,
+                                            seed = 1),
+                           #position_jitternormal(sd_x= 0.12,
+                            #                        sd_y = 0),
+            #       fill = 'grey60',
+             #      color = 'white',
+            color = 'grey60',
+            alpha = 0.4)+
+        facet_wrap(metric ~.,
+                   scales = "free_y",
+                   ncol = 1)+
+        theme_phil()+
+        geom_hline(yintercept =0)+
+        guides(color = 'none')+
+        ylab("Team Net Predicted Points per Play")
+
+all_teams + 
+        geom_point(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        geom_line(data = plot_dat %>%
+                          filter(TEAM == team),
+                  aes(color = TEAM,
+                      group = TEAM),
+                  lwd = 1.2)+
+        custom_color_teams+
+        guides(color = 'none')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
+                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. Line indicates selected team's rating by season."), 120))
+```
+
+### Conferences
+
+What about each conference? I'll look at each team's rankings in their conference over this time period, filtering to the P5 conferences.
+
+```{r conferecnes}
+
+int_breaks <- function(x, n = 10) {
   l <- pretty(x, n)
   l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
 }
 
-adjusted_team_rankings %>%
+plot_dat = adjusted_team_rankings %>%
         arrange(SEASON) %>%
         left_join(., team_conference_season,
                   by = c("SEASON", "TEAM")) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
         filter(!is.na(TEAM)) %>%
         mutate(CONFERENCE = case_when(CONFERENCE == 'Pac-10' | CONFERENCE == 'Pac-12' ~ 'Pac-10/Pac-12',
                                       TRUE ~ CONFERENCE)) %>%
-        filter(CONFERENCE %in% c('SEC', 'Big Ten', 'Big 12', 'Pac-10/Pac-12', 'ACC')) %>%
+        group_by(SEASON, CONFERENCE)  %>%
+        arrange(desc(OVERALL)) %>%
+        mutate(RANK = row_number()) %>%
+        ungroup() %>%
+        filter(CONFERENCE %in% c('ACC', 'SEC', 'Big 12', 'Big Ten', 'Pac-10/Pac-12')) %>%
         group_by(TEAM, CONFERENCE) %>%
         mutate(TEAM_LABEL = case_when(SEASON == max(SEASON) ~ TEAM)) %>%
-        ungroup() %>%
+        ungroup()
+
+max_rank = max(plot_dat$RANK)
+
+plot_dat %>%
         ggplot(., aes(x=SEASON,
+                      label = ABBREVIATION,
+                      fill = TEAM,
+                      y=RANK,
+                      )) +
+        geom_tile(color = 'white',
+                  lwd = 1.06)+
+        geom_text(color = 'white',
+                  size = 3)+
+        custom_fill_teams+
+        guides(fill = "none")+
+        theme_phil()+
+        facet_wrap(CONFERENCE ~.)+
+        theme(panel.grid.major = element_blank())+
+        xlab("Season")+
+        ylab("Confernce Ranking by Team Efficiency")+
+      #  coord_cartesian(ylim = c(0.5, 15))+
+        scale_y_reverse(breaks = seq(1, max_rank, 1))+
+        scale_x_continuous(breaks = int_breaks) +
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle("Ranking Conference Members by Team Overall Efficiency, 2007-2021")
+
+ 
+```
+
+
+```{r plot top 25s by end of seasonover time, warning=F}
+
+int_breaks <- function(x, n = 10) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+plot_dat = adjusted_team_rankings %>%
+        arrange(SEASON) %>%
+        left_join(., team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        filter(!is.na(TEAM)) %>%
+        group_by(SEASON)  %>%
+        arrange(desc(OVERALL)) %>%
+        mutate(RANK = row_number()) %>%
+        ungroup() %>%
+        filter(RANK <=25) %>%
+        group_by(TEAM, CONFERENCE) %>%
+        mutate(TEAM_LABEL = case_when(SEASON == max(SEASON) ~ TEAM)) %>%
+        ungroup()
+
+max_rank = max(plot_dat$RANK)
+
+plot_dat %>%
+        ggplot(., aes(x=SEASON,
+                      label = ABBREVIATION,
+                      fill = TEAM,
+                      y=RANK,
+                      )) +
+        geom_tile(color = 'white',
+                  lwd = 1.06)+
+        geom_text(color = 'white',
+                  size = 4)+
+        custom_fill_teams+
+        guides(fill = "none")+
+        theme_phil()+
+        theme(panel.grid.major = element_blank())+
+        xlab("Season")+
+        ylab("Ranking by Team Efficiency")+
+      #  coord_cartesian(ylim = c(0.5, 15))+
+        scale_y_reverse(breaks = seq(1, max_rank, 1))+
+        scale_x_continuous(breaks = int_breaks) +
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 18),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle("Top 25 Teams by Team Overall Efficiency, 2007-2021")
+
+```
+
+```{r rm from section 1}
+
+rm(temp,
+   raw_team_rankings,
+   plot_dat,
+   p,
+   adjusted_recipe,
+   max_rank)
+
+```
+
+
+# Measuring Efficiency in Season
+
+So far, everything we've computed has been retrospective, evaluating teams on an entire season's worth of plays to measure their offense and defense strength. But suppose we are now going into the 2016 season. How do we rate teams? Before any games have been played, we can rely on previous seasons' efficiency data for every team, that's easy enough. This is the lineup of Week 1 games using each team's power rating at the end of the previous season.
+
+```{r show teams and their rankings going into week one}
+
+col_power_func =  
+                function(x) {
+                        
+                        breaks = c(-0.8, -.5, -.4, -.3, -.2, -.1, -0.05, -0.03, -0.01, -0.001,
+                                   0, 0.001, 0.01,0.03, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8)*100
+                        colorRamp=colorRampPalette(c("red", "white", "deepskyblue"))
+                        col_palette <- colorRamp(length(breaks))
+                        mycut <- cut(x, 
+                                     breaks = breaks,
+                                     include.lowest = TRUE, 
+                                     right=T,
+                                     label = FALSE)
+                        col_palette[mycut]
+                        
+                }
+        
+ppa_data %>%
+        filter(SEASON == 2016) %>%
+        filter(WEEK ==1) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE),
+                  by = c("GAME_ID")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == 2016-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "HOME")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == 2016-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "AWAY")) %>%
+        mutate(HOME_DIFF = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                     NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+        select(SEASON, WEEK, HOME, AWAY, HOME_POWER, AWAY_POWER) %>%
+        mutate_if(is.numeric, round, 1) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j = c("HOME_POWER", "AWAY_POWER"),
+           bg = col_power_func) %>%
+        flextable::align(., j = c("HOME_POWER", "AWAY_POWER"),
+              align = 'center')
+
+```
+
+We can use the difference in each team's power to predict week 1 - the power ratings themselves are the expected margin of victory for each team against an average team on a neutral field. So, we simply take the difference and add an adjustment based on home field advantage to predict the score of the game (this is a crude mapping of team ratings to predicting the score, I'll use a model for this later). How does this do in predicting week 1?
+
+```{r show going into week 1}
+
+week_one_preds = ppa_data %>%
+        filter(SEASON == 2016) %>%
+        filter(WEEK ==1) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("GAME_ID")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == 2016-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "HOME")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == 2016-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "AWAY")) %>%
+        mutate(PRED_MARGIN = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                     NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS)
+
+week_one_preds %>%
+        select(SEASON, WEEK, HOME, AWAY, PRED_MARGIN, HOME_MARGIN) %>%
+        mutate_if(is.numeric, round, 1) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit() %>%
+        bg(., j = c("HOME_MARGIN", "PRED_MARGIN"),
+           bg = col_power_func) %>%
+        flextable::align(., j = c("HOME_MARGIN", "PRED_MARGIN"),
+              align = 'center')
+
+```
+
+How well do last year's rankings do in predicting games in terms of accuracy and the spread?
+
+```{r how did week one do}
+
+week_one_preds %>%
+        mutate(PRED_CORRECT = case_when(PRED_MARGIN > 0 & HOME_MARGIN > 0 ~ 'yes',
+                                        PRED_MARGIN < 0 & HOME_MARGIN < 0 ~ 'yes',
+               TRUE ~ 'no')) %>%
+        ggplot(., aes(x= PRED_MARGIN,
+                      color = PRED_CORRECT,
+                      label = paste(HOME, AWAY),
+                      y= HOME_MARGIN))+
+        geom_point()+
+        geom_text_repel(show.legend=F)+
+        theme_phil()+
+        scale_color_manual(values = c("red", "deepskyblue1"))+
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        guides(label = "none")
+
+week_one_preds %>%
+        group_by(SEASON, WEEK) %>%
+        yardstick::rmse(truth = HOME_MARGIN,
+                        estimate = PRED_MARGIN) %>%
+        mutate_if(is.numeric, round, 2)
+
+week_one_preds %>%
+        mutate(HOME_PRED = factor(case_when(PRED_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'),
+                                  levels = c('no', 'yes'))) %>%
+        mutate(HOME_WIN= factor(case_when(HOME_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'),
+                                  levels = c('no', 'yes'))) %>%
+        group_by(SEASON, WEEK) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3)
+        
+```
+
+Not so great on the margin of victory, but about 70% of the games correct. Not too great, but it's a start.
+
+## Updatng Week by Week
+
+But now let's say we've seen a week's worth of games. How do we predict *next* week's games? We could keep on using the power ratings from last season to predict week 2 (and it turns out that when we do, we get close to 90% accuracy - Week 1 in 2016 had a bunch more upsets), but we want our power ratings to update based on new information. 
+
+```{r week two eval}
+
+previous_season_accuracy = ppa_data %>%
+        filter(SEASON == 2016) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("GAME_ID")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == 2016-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "HOME")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == 2016-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "AWAY")) %>%
+        mutate(PRED_MARGIN = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                     NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+        mutate(HOME_PRED = factor(case_when(PRED_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'),
+                                  levels = c('no', 'yes'))) %>%
+        mutate(HOME_WIN= factor(case_when(HOME_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'),
+                                  levels = c('no', 'yes'))) %>%
+        group_by(SEASON, WEEK) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3)
+
+# previous_season_accuracy %>%
+#         flextable() %>%
+#         autofit()
+
+```
+
+I can calculate the raw ratings for Week 1 based on play by play data: here are the top 5 and bottom 5 teams based on Week 1 raw efficiency for 2016.
+
+```{r get in one week}
+
+one_week_raw = ppa_data %>%
+        filter(SEASON == 2016 & WEEK ==1) %>%
+        filter(GARBAGE_TIME == 0) %>%
+        group_by(SEASON, OFFENSE_ID) %>%
+        summarize(OFFENSE = mean(PPA, na.rm=T),
+                  .groups = 'drop') %>%
+        mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", OFFENSE_ID))) %>%
+        mutate(TYPE = 'raw') %>%
+        select(SEASON, TEAM, TYPE, OFFENSE) %>%
+        left_join(.,
+                  ppa_data %>%
+                          filter(SEASON ==2016 & WEEK ==1) %>%
+                          filter(GARBAGE_TIME == 0) %>%
+                          group_by(SEASON, DEFENSE_ID) %>%
+                          summarize(DEFENSE = mean(PPA, na.rm=T),
+                                  .groups = 'drop') %>%
+                          mutate(TEAM = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", DEFENSE_ID))) %>%
+                          mutate(TYPE = 'raw') %>%
+                          select(SEASON, TEAM, TYPE, DEFENSE) %>%
+                          mutate(DEFENSE = -DEFENSE),
+                  by = c("SEASON", "TEAM", "TYPE")) %>%
+        mutate(OVERALL = OFFENSE + DEFENSE) %>%
+        mutate(MARGIN = OVERALL * 65) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(MARGIN)) %>%
+        rename(TEAM_ABBR = TEAM) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM_ABBR")) %>%
+        select(-TEAM_ABBR) %>%
+        mutate(TYPE = 'raw') %>%
+        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, MARGIN)
+
+one_week_raw %>%
+        slice_max(., order_by = OVERALL, n= 5) %>%
+        bind_rows(.,
+                  one_week_raw %>%
+                          slice_min(., order_by = OVERALL, n = 5)) %>%
+        arrange(desc(OVERALL)) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Because we're looking only at raw data, the best teams are simply the ones that won big in Week 1 (and the worst ones are the teams they beat) - Louisville beat Charlotte 70-14, Michigan beat Hawaii 63-3, Boise State beat Loisiana 45-10...
+
+One week can only tell us so much about a team, but the bigger problem is the same as before: raw expected points per play doesn't take into account the quality of the opponent. The method I've used for adjusting based on opponent quality so far has been at the season level, and it relies on taking into account all games that have been playing to partial out how strong or weak each team's offense/defense is. 
+
+## Adjusting After Each Week
+
+I can take the coefficients from the model trained on previous seasons and predict how teams performed relative to their expectations in week one.
+
+```{r look at coefficients for each from the model}
+
+week_one_adjusted = ppa_data %>%
+        filter(SEASON == 2015) %>%
+        mutate(YEAR = 2016) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted'))) %>%
+        mutate(preds = map(workflow,
+                           ~ .x %>% augment(ppa_data %>%
+                                                    filter(SEASON == 2016 & WEEK ==1))))
+
+# get coefficients
+week_one_adjusted %>%
+        select(adjusted) %>%
+        unnest() %>% 
+        rename(TEAM_ABBR = TEAM) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM_ABBR")) %>%
+        filter(TEAM %in% c("Texas", "Notre Dame")) %>%
+        select(TEAM, TYPE, OFFENSE, DEFENSE, OVERALL) %>%
+        mutate_if(is.numeric, round, 3)
+
+
+```
+
+For instance, going into the week one 2016 game between Notre Dame and Texas, if we predict the net points per play for each team based on last season, we can see that after taking into account home field advantage and each other's offense/defense, Notre Dame's offense was expected to outperform Texas to the tune of an 11-12 point win. 
+
+```{r show week one predicted efficiency notre dame texas}
+
+# get pred plays
+preds = week_one_adjusted %>%
+        mutate(pred_matchup = map(workflow,
+                                  ~ augment(.,
+                                            bind_rows(ppa_data[0,],
+                                                      ppa_data %>%
+                                                              filter(SEASON == 2016) %>%
+                                                              filter(WEEK == 1) %>%
+                                                              filter(OFFENSE_ID %in% c("Texas", "Notre Dame")) %>%
+                                                              select(SEASON, GAME_ID, WEEK,
+                                                                     HOME, AWAY,
+                                                                     OFFENSE_ID, 
+                                                                     DEFENSE_ID,HOME_FIELD_ADVANTAGE) %>%
+                                                              distinct())))) %>%
+        select(pred_matchup) %>%
+        unnest() %>%
+        select(GAME_ID, SEASON, WEEK, HOME, AWAY, OFFENSE_ID, DEFENSE_ID, .pred) %>%
+        select(GAME_ID, SEASON, WEEK, HOME, AWAY, OFFENSE_ID, DEFENSE_ID, .pred) %>%
+        rename(OFFENSE = OFFENSE_ID,
+               DEFENSE = DEFENSE_ID)
+        
+preds %>%
+        select(-HOME, -AWAY) %>%
+        mutate_if(is.numeric, round, 3)
+
+preds %>%
+        mutate(.pred = case_when(HOME == DEFENSE ~ -.pred,
+                                 HOME == OFFENSE ~ .pred)) %>%
+        group_by(GAME_ID, SEASON, WEEK, HOME, AWAY) %>%
+        summarize(diff = sum(.pred),
+                  .groups = 'drop') %>%
+        mutate(margin = diff * 65) %>%
+        mutate_if(is.numeric, round, 2)
+        
+
+```
+
+If we see how well each team actually did in terms of predicted points per play, in the case of this game, Notre Dame's offense didn't fare as well as expected against Texas' defense, but it was Texas' offense that really outperformed expectations against Notre Dame's defense.
+
+```{r compare preds to actual}
+
+week_one_preds = bind_rows(week_one_adjusted %>%
+                select(preds) %>%
+                unnest(preds) %>%
+                mutate(.resid = PPA - .pred) %>% 
+                select(SEASON, WEEK, GAME_ID, GAME_DATE, OFFENSE_ID, DEFENSE_ID, PPA, .pred, .resid) %>%
+                group_by(SEASON, WEEK, OFFENSE_ID) %>%
+                summarize(raw = mean(PPA, na.rm=T),
+                          resid = mean(.resid, na.rm=T),
+                          .groups = 'drop') %>%
+                  rename(TEAM = OFFENSE_ID) %>%
+                  mutate(TYPE = 'OFFENSE'),
+          week_one_adjusted %>%
+                select(preds) %>%
+                unnest(preds) %>%
+                mutate(.resid = PPA - .pred) %>% 
+                select(SEASON, WEEK, GAME_ID, GAME_DATE, OFFENSE_ID, DEFENSE_ID, PPA, .pred, .resid) %>%
+                group_by(SEASON, WEEK, DEFENSE_ID) %>%
+                summarize(raw = -mean(PPA, na.rm=T),
+                          resid = -mean(.resid, na.rm=T),
+                          .groups = 'drop') %>%
+                  rename(TEAM = DEFENSE_ID) %>%
+                  mutate(TYPE = 'DEFENSE'))
+
+week_one_preds %>%
+        mutate_if(is.numeric, round, 3)  %>%
+        filter(TEAM %in% c("Texas", "Notre Dame"))  %>%
+        select(-resid) %>%
+        filter(TYPE == 'OFFENSE') %>%
+        spread(TYPE, TEAM) %>%
+        select(SEASON, WEEK, OFFENSE, raw) %>%
+        left_join(.,
+                  week_one_adjusted %>%
+                          mutate(pred_matchup = map(workflow,
+                                  ~ augment(.,
+                                            bind_rows(ppa_data[0,],
+                                                      ppa_data %>%
+                                                              filter(SEASON == 2016) %>%
+                                                              filter(WEEK == 1) %>%
+                                                              filter(OFFENSE_ID %in% c("Texas", "Notre Dame")) %>%
+                                                              select(SEASON, GAME_ID, WEEK,
+                                                                     HOME, AWAY,
+                                                                     OFFENSE_ID, 
+                                                                     DEFENSE_ID,HOME_FIELD_ADVANTAGE) %>%
+                                                              distinct())))) %>%
+                          select(pred_matchup) %>%
+                          unnest() %>%
+                          select(GAME_ID, SEASON, WEEK, OFFENSE_ID, DEFENSE_ID, .pred) %>%
+                          rename(OFFENSE = OFFENSE_ID,
+                                 DEFENSE = DEFENSE_ID) %>%
+                          mutate_if(is.numeric, round, 3),
+                  by = c("SEASON", "WEEK", "OFFENSE")) %>%
+        rename(actual = raw) %>%
+        select(GAME_ID, SEASON, WEEK, OFFENSE, DEFENSE, .pred, actual) %>%
+        mutate(resid = actual - .pred)
+
+# sum the residual
+week_one_preds %>%
+        mutate_if(is.numeric, round, 3)  %>%
+        filter(TEAM %in% c("Texas", "Notre Dame"))  %>%
+        select(-resid) %>%
+        filter(TYPE == 'OFFENSE') %>%
+        spread(TYPE, TEAM) %>%
+        select(SEASON, WEEK, OFFENSE, raw) %>%
+        left_join(.,
+                  week_one_adjusted %>%
+                          mutate(pred_matchup = map(workflow,
+                                  ~ augment(.,
+                                            bind_rows(ppa_data[0,],
+                                                      ppa_data %>%
+                                                              filter(SEASON == 2016) %>%
+                                                              filter(WEEK == 1) %>%
+                                                              filter(OFFENSE_ID %in% c("Texas", "Notre Dame")) %>%
+                                                              select(SEASON, GAME_ID, WEEK,
+                                                                     HOME, AWAY,
+                                                                     OFFENSE_ID, 
+                                                                     DEFENSE_ID,HOME_FIELD_ADVANTAGE) %>%
+                                                              distinct())))) %>%
+                          select(pred_matchup) %>%
+                          unnest() %>%
+                          select(GAME_ID, SEASON, HOME, AWAY, WEEK, OFFENSE_ID, DEFENSE_ID, .pred) %>%
+                          rename(OFFENSE = OFFENSE_ID,
+                                 DEFENSE = DEFENSE_ID) %>%
+                          mutate_if(is.numeric, round, 3),
+                  by = c("SEASON", "WEEK", "OFFENSE")) %>%
+        select(GAME_ID, SEASON, WEEK, HOME, AWAY, OFFENSE, DEFENSE, .pred, raw) %>%
+        mutate(resid = raw - .pred) %>%
+        mutate(raw = case_when(HOME == DEFENSE ~ -raw,
+                                 HOME == OFFENSE ~ raw)) %>%
+        rename(actual = raw) %>%
+        group_by(GAME_ID, SEASON, WEEK, HOME, AWAY) %>%
+        summarize(diff = sum(actual),
+                  .groups = 'drop') %>%
+        mutate(margin = diff * 65) %>%
+        mutate_if(is.numeric, round, 2)
+
+```
+
+```{r week one adjusted}
+
+week_one_adjusted %>%
+        select(coefs) %>%
+        unnest()
+
+```
+
+As a result, Notre Dame was expected to win by about 12, but ultimately lost by 3 (in OT), though in terms of expected points Texas barely edged them out through 4 quarters.
+
+What should Texas and Notre Dame then look like for week 2? I can update their ratings as a function of how well they played in week one *compared to their expected performance*. This means taking the team's
+
+```{r updated rankings after week one}
+
+week_one_preds %>%
+        mutate_if(is.numeric, round, 3)  %>%
+        select(-resid) %>%
+        left_join(.,
+                  week_one_adjusted %>%
+                          mutate(pred_matchup = map(workflow,
+                                  ~ augment(.,
+                                            bind_rows(ppa_data[0,],
+                                                      ppa_data %>%
+                                                              filter(SEASON == 2016) %>%
+                                                              filter(WEEK == 1) %>%
+                                                              select(SEASON, GAME_ID, WEEK,
+                                                                     HOME, AWAY,
+                                                                     OFFENSE_ID, 
+                                                                     DEFENSE_ID,HOME_FIELD_ADVANTAGE) %>%
+                                                              distinct())))) %>%
+                          select(pred_matchup) %>%
+                          unnest() %>%
+                          select(GAME_ID, SEASON, WEEK, OFFENSE_ID, DEFENSE_ID, .pred) %>%
+                          rename(OFFENSE = OFFENSE_ID,
+                                 DEFENSE = DEFENSE_ID) %>%
+                          gather("TYPE", "TEAM", 
+                                 -GAME_ID, -SEASON, -WEEK, -.pred) %>%
+                          mutate(.pred = case_when(TYPE == 'OFFENSE' ~ .pred,
+                                                   TYPE == 'DEFENSE' ~ -.pred)),
+                  by = c("SEASON", "WEEK", "TYPE", "TEAM")) %>%
+        select(GAME_ID, SEASON, WEEK, TEAM, TYPE, .pred, raw) %>%
+     #   filter(TYPE == 'DEFENSE') %>%
+        mutate(.resid = raw - .pred) %>%
+        arrange(TEAM) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        arrange(desc(.resid)) %>%
+        filter(TEAM %in% c("Louisville", "Clemson", "Auburn", "Texas", "Notre Dame")) %>%
+    #    mutate(pct = (raw-.pred)/raw) %>%
+      #  mutate_if(is.numeric, round, 2)
+     #   arrange(desc(pct))
+        mutate(updated = (.pred + .pred+.resid)/2) %>%
+   #     mutate(updated = (.pred * 0.9) + (.pred + resid)*0.1) %>%
+        arrange(desc(updated))
+        
+```
+
+```{r get predicted vs expected}
+
+ppa_data %>%
+        filter((SEASON == 2015 & WEEK >=1) |
+                             (SEASON == 2016 & WEEK <= 1)) %>%
+        filter(GARBAGE_TIME==0) %>%
+                mutate(YEAR = season) %>%
+                nest(-YEAR) %>%
+                rename(SEASON = YEAR) %>%
+                mutate(workflow = map(data,
+                                      ~ ppa_wf %>%
+                                              fit(.x))) %>%
+                mutate(fit = map(workflow, 
+                                 ~ extract_fit_parsnip(.x))) %>%
+                mutate(coefs = map(fit,
+                                   ~ tidy(.x))) %>%
+                mutate(intercept = map(coefs,
+                                       ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+                mutate(adjusted = map2(coefs, intercept,
+                                       ~ .x %>% 
+                                               filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                               mutate(intercept = .y) %>%
+                                               mutate(adjusted = estimate + intercept) %>%
+                                               mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                                       grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                               mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                               select(TEAM, type, adjusted) %>%
+                                               spread(type, adjusted) %>%
+                                               mutate(DEFENSE = -DEFENSE) %>%
+                                               mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                               mutate(TYPE = 'adjusted'))) %>%
+        select(adjusted) %>%
+        unnest() %>%
+        rename(TEAM_ABBR = TEAM) %>%
+        left_join(.,
+                  team_mapping,
+                  by = c("TEAM_ABBR")) %>%
+        select(-TEAM_ABBR) %>%
+        select(TEAM, OFFENSE, DEFENSE, OVERALL) %>%
+        filter(TEAM %in% c('Louisville', 'Texas', 
+                           'Notre Dame', 'Florida', 
+                           'Michigan', 'Wisconsin',
+                           'Florida State'))
+
+```
+
+
+```{r get predicted vs expected}
+
+adjusted_team_rankings %>%
+        filter(SEASON == 2015) %>%
+        filter(TEAM %in% c("Texas", "Notre Dame")) %>%
+        select(-TYPE) %>%
+        gather("metric", "value",
+               -SEASON, -TEAM)
+
+# week_one_preds %>%
+#         mutate_if(is.numeric, round, 3)  %>%
+#         filter(TEAM %in% c("Texas", "Notre Dame")) %>%
+#         select(SEASON, WEEK, TEAM, TYPE, everything()) %>%
+#         select(-raw, -resid) %>%
+#         spread(TYPE, predict) %>%
+#         select(SEASON, WEEK, TEAM, OFFENSE, DEFENSE)
+#         pivot_wider(id_cols = c("SEASON",
+#                                 "WEEK", 
+#                                 "TEAM"),
+#                     names_from = c("TYPE"),
+#                     values_from = c("predict", "raw", "resid"))
+# 
+# week_one_preds %>%
+#         mutate_if(is.numeric, round, 3)  %>%
+#         filter(TEAM %in% c("Texas", "Notre Dame")) %>%
+#         select(-resid, -raw) %>% 
+#         spread(TYPE, predict) %>%
+#         mutate(OVERALL = DEFENSE + OFFENSE) %>%
+#         mutate(MARGIN = OVERALL * 65)
+
+```
+
+Okay, so now that I've seen how teams fared compared to their expected, how do I update their overall ratings? 
+
+The Week 0 ratings are our prior, which should be pretty strong, as they're based on the last season's worth of data (and we can include even more previous seasons.
+
+Our updated ratings we can compute based on the results of week 1.
+
+I can run the ridge regression on each week of data to get the coefficient for each team based on a week's worth of results.
+
+```{r look at how team changed}
+
+# season to run
+season = 2016
+
+# set up grid of games by week
+week_grid = ppa_data %>%
+        filter(SEASON == season) %>%
+        select(SEASON, WEEK) %>%
+        distinct() %>%
+        arrange(WEEK)
+
+# make an empty grid for all fbs teams for each week of the season
+team_week_grid = expand.grid(SEASON = season,
+                             WEEK = c(0,
+                                      ppa_data %>%
+                                     filter(SEASON == season) %>%
+                                     select(WEEK) %>%
+                                     distinct %>%
+                                     pull),
+                             TEAM = ppa_data %>%
+                                     filter(SEASON == season) %>%
+                                     select(HOME, AWAY) %>%
+                                     gather() %>%
+                                     select(value) %>%
+                                     distinct %>%
+                                     pull) %>%
+        arrange(SEASON, WEEK, TEAM)
+
+# for each week, get coefficients using all data from that season through each week
+weekly_updates = foreach(i = 1:nrow(week_grid),
+        .combine = bind_rows) %do% {
+                
+                ppa_data %>%
+                        filter(SEASON == season & WEEK <= week_grid[i,]$WEEK) %>%
+                        filter(GARBAGE_TIME==0) %>%
+                        mutate(YEAR = season) %>%
+                        nest(-YEAR) %>%
+                        rename(SEASON = YEAR) %>%
+                        mutate(workflow = map(data,
+                                              ~ ppa_wf %>%
+                                                      fit(.x))) %>%
+                        mutate(fit = map(workflow, 
+                                         ~ extract_fit_parsnip(.x))) %>%
+                        mutate(coefs = map(fit,
+                                           ~ tidy(.x))) %>%
+                        mutate(intercept = map(coefs,
+                                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+                        mutate(adjusted = map2(coefs, intercept,
+                                               ~ .x %>% 
+                                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                                       mutate(intercept = .y) %>%
+                                                       mutate(adjusted = estimate + intercept) %>%
+                                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                                       select(TEAM, type, adjusted) %>%
+                                                       spread(type, adjusted) %>%
+                                                       mutate(DEFENSE = -DEFENSE) %>%
+                                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                                       mutate(TYPE = 'adjusted'))) %>%
+                        mutate(WEEK = week_grid[i,]$WEEK)
+
+        }
+
+# now join these up with our grid
+weekly_team_rankings = team_week_grid %>%
+        left_join(.,
+                  adjusted_team_rankings %>%
+                        filter(SEASON == 2015) %>%
+                        mutate(SEASON = 2016,
+                               WEEK = 0) %>%
+                        bind_rows(.,
+                                weekly_updates %>%
+                                        select(SEASON, WEEK, adjusted) %>%
+                                        unnest(adjusted) %>%
+                                        rename(TEAM_ABBR = TEAM) %>%
+                                        left_join(., team_mapping,
+                                                  by = c("TEAM_ABBR")) %>%
+                                        select(-TEAM_ABBR) %>%
+                                        select(SEASON, WEEK, TEAM, TYPE, OFFENSE, DEFENSE) %>%
+                                        mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                        mutate_if(is.numeric, round, 3) %>%
+                                        arrange(desc(OVERALL)) %>%
+                                        arrange(SEASON, WEEK)
+                        ) %>%
+                select(SEASON, WEEK, TEAM, OFFENSE, DEFENSE, OVERALL),
+                by = c("SEASON", "WEEK", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(MARGIN = OVERALL * 65)
+
+rm(weekly_updates)
+        
+```
+
+Each team's rating for Week zero is based on previous seasons. Week 1 is based *only* on a week's worth of games. Here are where Notre Dame and Texas end up after their matchup: Texas gets a big jump and Notre Dame drops a bunch.
+
+```{r show texas and notre dame after week 1}
+
+weekly_team_rankings  %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ ABBREVIATION)) %>%
+        filter(TEAM %in% c("Texas", "Notre Dame")) %>%
+        ungroup() %>%
+        filter(WEEK < 2) %>%
+        ggplot(., aes(x=WEEK,
                       label = TEAM_LABEL,
                       color = TEAM,
-                      y=OVERALL))+
-        geom_line(lwd = 1.04)+
-      # geom_line(stat = 'smooth',
-      #               formula = 'y ~ x',
-      #               method = 'loess',
-      #           span = 1.1,
-      #               alpha =0.85,
-      #               lwd = 1.04)+
-        facet_wrap(CONFERENCE ~.)+
-        custom_color_teams+
+                      y= OVERALL))+
+        facet_wrap(SEASON  ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        geom_point()+
         guides(color = 'none')+
-        theme_phil()+
+        geom_line(lwd = 1.04)+
+        # geom_line(stat = 'smooth',
+        #               formula = 'y ~ x',
+        #               method = 'loess',
+        #               alpha =0.85,
+        #               span = 0.25,
+        #               lwd = 1.04)+
         geom_text_repel(fontface = "bold",
                         size = 4,
                         direction = "y",
@@ -826,13 +2714,1098 @@ adjusted_team_rankings %>%
                         box.padding = .4,
                         segment.curvature = -0.1,
                         segment.ncp = 3,
-                        segment.angle = 20) +
-        coord_cartesian(xlim = c(NA, 2015 + 2))+
-        scale_x_continuous(breaks = int_breaks)
-        
+                        segment.angle = 20)+
+        coord_cartesian(xlim = c(-0.5, 18))+
+        custom_color_teams+
+        theme_phil()+
+        ylab("Net Team Efficiency per play")+
+        coord_cartesian(ylim = c(-0.5, 0.5))
+
 ```
 
-# In Season Efficiency
+But then after week 2, both Notre Dame and Texas beat their (fairly weak) opponents of Nevada and UTEP pretty handily, so both get an increase, so much so for Notre Dame that they bounce above where they were after losing to Texas (quality loss?).
+
+```{r notre dame bounces back}
+
+weekly_team_rankings  %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ ABBREVIATION)) %>%
+        filter(TEAM %in% c("Texas", "Notre Dame", "UMass")) %>%
+        ungroup() %>%
+        filter(WEEK < 4) %>%
+        ggplot(., aes(x=WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y= OVERALL))+
+        facet_wrap(SEASON  ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        geom_point()+
+        guides(color = 'none')+
+      #  geom_line(lwd = 1.04)+
+        geom_line(stat = 'smooth',
+                      formula = 'y ~ x',
+                      method = 'loess',
+                      alpha =0.85,
+                      span = 0.8,
+                      lwd = 1.04)+
+        geom_text_repel(fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.5,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+        coord_cartesian(xlim = c(-0.5, 18))+
+        custom_color_teams+
+        theme_phil()+
+        ylab("Net Team Efficiency per play")
+
+```
+
+Roll forward a few more weeks and we can see how both teams start to crash around midseason.
+
+```{r both crash}
+
+weekly_team_rankings  %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ ABBREVIATION)) %>%
+        filter(TEAM %in% c("Texas", "Notre Dame", "Auburn", "Louisville")) %>%
+        ungroup() %>%
+     #   filter(WEEK < 12) %>%
+        ggplot(., aes(x=WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y= OVERALL))+
+        facet_wrap(SEASON  ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        geom_point()+
+        guides(color = 'none')+
+        geom_line(stat = 'smooth',
+                      formula = 'y ~ x',
+                      method = 'loess',
+                      alpha =0.85,
+                      span = 0.5,
+                      lwd = 1.04)+
+        geom_text_repel(fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.5,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+        coord_cartesian(xlim = c(-0.5, 18))+
+        custom_color_teams+
+        theme_phil()+
+        ylab("Net Team Efficiency per play")
+
+```
+
+
+
+```{r weighted average}
+
+ppa_data %>%
+        filter(SEASON == 2016) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("GAME_ID")) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "HOME")) %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "AWAY")) %>%
+        mutate(PRED_MARGIN = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                     NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(HOME_PRED = factor(case_when(PRED_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'))) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_MARGIN > 0 ~ 'yes',
+                                    TRUE ~ 'no'))) %>%
+        group_by(SEASON, WEEK) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(type = 'in_season') %>%
+        bind_rows(.,
+                  previous_season_accuracy %>%
+                          mutate(type = 'previous_season')) %>%
+        spread(type, .estimate) %>%
+        select(-.estimator) %>%
+        mutate(winner = case_when(in_season > previous_season ~ 'in_season',
+                                  in_season < previous_season ~ 'previous_season',
+                                  TRUE ~ 'tie')) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Create a weighted average that increasingly gives less weight to previous season.
+
+```{r create weighted average}
+
+weekly_weighting_func = function(input_rankings) {
+        
+        gather_teams = input_rankings %>%
+                gather("metric", "value",
+               -SEASON, -WEEK, -TEAM)
+        
+        team_priors = gather_teams %>%
+                group_by(TEAM) %>%
+                filter(WEEK ==0) %>%
+                rename(prior = value) %>%
+                select(SEASON, TEAM, metric, prior) %>%
+                ungroup()
+        
+        out = gather_teams %>%
+                left_join(.,
+                          team_priors,
+                          by = c("SEASON", "TEAM", "metric")) %>%
+                mutate(weight = case_when(WEEK < 3 ~ .8,
+                                          WEEK < 4 ~ .7,
+                                          WEEK < 5 ~ .6,
+                                          WEEK < 6 ~ .4,
+                                          WEEK < 8 ~ .25,
+                                          WEEK < 10 ~ .15,
+                                          WEEK < 12 ~ .10,
+                                          TRUE ~ .05)) %>%
+                mutate(averaged = (value*(1-weight)) + (prior*weight)) %>%
+                select(SEASON, WEEK, TEAM, metric, averaged) %>%
+                spread(metric, averaged)
+        
+        return(out)
+        
+}
+                
+        
+```
+        
+```{r run through function}
+
+weekly_team_rankings %>%
+        ungroup() %>%
+     #  filter(WEEK < 6) %>%
+        weekly_weighting_func() %>%
+        select(SEASON, WEEK, TEAM, OVERALL) %>%
+        arrange(SEASON, WEEK) %>%
+        group_by(SEASON, WEEK) %>%
+        arrange(desc(OVERALL)) %>%
+        mutate(RANK = row_number()) %>%
+        arrange(SEASON, WEEK) %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(MAX_RANK = min(RANK)) %>%
+        mutate(EVER_RANKED = MAX_RANK <=25) %>%
+        ungroup() %>%
+      # filter(EVER_RANKED == T) %>%
+        left_join(., team_conference_season,
+                  by = c("TEAM", "SEASON")) %>%
+        filter(TEAM %in% c("Texas", "Notre Dame", "Louisville", 'South Alabama', 'UMass')) %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ TEAM))  %>%
+        ggplot(., aes(x=WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y=OVERALL))+
+        geom_point()+
+        geom_line(stat = 'smooth',
+                      formula = 'y ~ x',
+                      method = 'loess',
+                      alpha =0.85,
+                      span = 0.5,
+                      lwd = 1.04)+
+        geom_text_repel(fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.5,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+        custom_color_teams+
+        theme_phil()+
+        guides(color = 'none')+
+        coord_cartesian(xlim = c(0, 20))+
+        facet_wrap(CONFERENCE ~.)
+```
+        
+Run through the weighting function.
+
+```{r weighting function for 2016 plays}
+
+weekly_team_rankings  %>%
+        # use custom function
+        weekly_weighting_func() %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ ABBREVIATION)) %>%
+        filter(CONFERENCE %in% c("Big 12", "Big Ten", "ACC", "SEC")) %>%
+        ungroup() %>%
+        ggplot(., aes(x=WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y= DEFENSE))+
+        facet_wrap(SEASON + CONFERENCE ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        geom_point()+
+        guides(color = 'none')+
+        geom_line(stat = 'smooth',
+                      formula = 'y ~ x',
+                      method = 'loess',
+                      alpha =0.85,
+                      span = 0.5,
+                      lwd = 1.04)+
+        geom_text_repel(fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.5,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+        coord_cartesian(xlim = c(-0.5, 18))+
+        custom_color_teams+
+        theme_phil()+
+        ylab("Net Team Efficiency per play")
+
+```
+
+```{r now tune}
+
+ppa_data %>%
+        filter(SEASON == 2016) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("GAME_ID")) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "HOME")) %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "AWAY")) %>%
+        mutate(PRED_MARGIN = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                     NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(HOME_PRED = factor(case_when(PRED_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'))) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_MARGIN > 0 ~ 'yes',
+                                    TRUE ~ 'no'))) %>%
+        group_by(SEASON, WEEK) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(type = 'in_season') %>%
+        bind_rows(.,
+                  previous_season_accuracy %>%
+                          mutate(type = 'previous_season')) %>%
+        bind_rows(.,
+                  ppa_data %>%
+                filter(SEASON == 2016) %>%
+                select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+                distinct() %>%
+                arrange(SEASON, WEEK) %>%
+                left_join(., games_raw %>%
+                                  select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                          by = c("GAME_ID")) %>%
+                left_join(., weekly_team_rankings %>%
+                                  weekly_weighting_func() %>%
+                                  mutate(WEEK = WEEK +1) %>%
+                                  select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                                  rename(HOME = TEAM,
+                                         HOME_POWER = MARGIN,
+                                         HOME_OFF_POWER = OFFENSE,
+                                         HOME_DEF_POWER = DEFENSE),
+                          by = c("SEASON", "WEEK", "HOME")) %>%
+                arrange(SEASON, WEEK) %>%
+                left_join(., weekly_team_rankings %>%
+                                  weekly_weighting_func() %>%
+                                  mutate(WEEK = WEEK +1) %>%
+                                  select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                                  rename(AWAY = TEAM,
+                                         AWAY_POWER = MARGIN,
+                                         AWAY_OFF_POWER = OFFENSE,
+                                         AWAY_DEF_POWER = DEFENSE),
+                          by = c("SEASON", "WEEK", "AWAY")) %>%
+                mutate(PRED_MARGIN = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                             NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+                mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+                group_by(SEASON, WEEK) %>%
+                mutate(HOME_PRED = factor(case_when(PRED_MARGIN > 0 ~ 'yes',
+                                             TRUE ~ 'no'))) %>%
+                mutate(HOME_WIN = factor(case_when(HOME_MARGIN > 0 ~ 'yes',
+                                            TRUE ~ 'no'))) %>%
+                group_by(SEASON, WEEK) %>%
+                yardstick::accuracy(truth = HOME_WIN,
+                                    estimate = HOME_PRED) %>%
+                mutate_if(is.numeric, round, 3) %>%
+                mutate(type = 'weighted')) %>%
+                mutate(SEASON = factor(SEASON)) %>%
+                spread(type, .estimate) %>%
+                select(-.estimator) %>%
+                group_by(SEASON, WEEK) %>%
+                mutate(best= max(c_across(in_season:weighted))) %>%
+        # mutate(winner = case_when(in_season > previous_season ~ 'in_season',
+        #                           in_season < previous_season ~ 'previous_season',
+        #                           TRUE ~ 'tie')) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+## All Weekly Ratings
+
+I'll now apply this to all weeks from 2008 to 2016.
+
+```{r weekly ratings}
+
+# make a grid of all weeks in these seasons
+week_grid = ppa_data %>%
+        filter(SEASON > 2007 & SEASON < 2017) %>%
+        select(SEASON, WEEK) %>%
+        distinct() %>%
+        arrange(WEEK)
+
+# run through each week of each season to get rolling week by 
+weekly_updates = 
+        foreach(i = 1:nrow(week_grid),
+        .combine = bind_rows) %do% {
+                
+                ppa_data %>%
+                        filter(SEASON == week_grid[i,]$SEASON & WEEK <= week_grid[i,]$WEEK) %>%
+                        filter(GARBAGE_TIME==0) %>%
+                        mutate(YEAR = week_grid[i,]$SEASON) %>%
+                        nest(-YEAR) %>%
+                        rename(SEASON = YEAR) %>%
+                        mutate(workflow = map(data,
+                                              ~ ppa_wf %>%
+                                                      fit(.x))) %>%
+                        mutate(fit = map(workflow, 
+                                         ~ extract_fit_parsnip(.x))) %>%
+                        mutate(coefs = map(fit,
+                                           ~ tidy(.x))) %>%
+                        mutate(intercept = map(coefs,
+                                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+                        mutate(adjusted = map2(coefs, intercept,
+                                               ~ .x %>% 
+                                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                                       mutate(intercept = .y) %>%
+                                                       mutate(adjusted = estimate + intercept) %>%
+                                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                                       select(TEAM, type, adjusted) %>%
+                                                       spread(type, adjusted) %>%
+                                                       mutate(DEFENSE = -DEFENSE) %>%
+                                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                                       mutate(TYPE = 'adjusted'))) %>%
+                        mutate(WEEK = week_grid[i,]$WEEK)
+        }
+
+# make a grid of all seasons, weeks, and teams
+team_week_grid = expand.grid(SEASON = week_grid %>%
+                                     select(SEASON) %>%
+                                     distinct() %>%
+                                     pull(),
+                             WEEK = c(0,
+                                      ppa_data %>%
+                                     select(WEEK) %>%
+                                     distinct %>%
+                                     pull),
+                             TEAM = ppa_data %>%
+                                     filter(SEASON > 2007 & SEASON < 2017) %>%
+                                     select(HOME, AWAY) %>%
+                                     gather() %>%
+                                     select(value) %>%
+                                     distinct %>%
+                                     pull) %>%
+        arrange(SEASON, WEEK, TEAM)
+        
+# now join up                             
+weekly_team_rankings = team_week_grid %>%
+        left_join(.,
+                  adjusted_team_rankings %>%
+                          mutate(SEASON = SEASON+1,
+                                 WEEK = 0) %>%
+                        bind_rows(.,
+                                weekly_updates %>%
+                                        select(SEASON, WEEK, adjusted) %>%
+                                        unnest(adjusted) %>%
+                                        rename(TEAM_ABBR = TEAM) %>%
+                                        left_join(., team_mapping,
+                                                  by = c("TEAM_ABBR")) %>%
+                                        select(-TEAM_ABBR) %>%
+                                        select(SEASON, WEEK, TEAM, TYPE, OFFENSE, DEFENSE) %>%
+                                        mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                        mutate_if(is.numeric, round, 3) %>%
+                                        arrange(desc(OVERALL)) %>%
+                                        arrange(SEASON, WEEK)
+                        ) %>%
+                select(SEASON, WEEK, TEAM, OFFENSE, DEFENSE, OVERALL),
+                by = c("SEASON", "WEEK", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(MARGIN = OVERALL * 65) %>%
+        ungroup() %>%
+        weekly_weighting_func() 
+        # now address new teams 
+        
+weekly_team_rankings  %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        group_by(TEAM, SEASON) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ ABBREVIATION)) %>%
+        filter(TEAM %in% c("Texas", "Texas A&M")) %>%
+       # filter(CONFERENCE %in% c("Big 12", "Big Ten")) %>%
+        ungroup() %>%
+        ggplot(., aes(x=WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y= OFFENSE))+
+        facet_wrap(SEASON ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        geom_point()+
+        guides(color = 'none')+
+        geom_line(stat = 'smooth',
+                      formula = 'y ~ x',
+                      method = 'loess',
+                      alpha =0.85,
+                      span = 0.5,
+                      lwd = 1.04)+
+        geom_text_repel(fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.5,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+        coord_cartesian(xlim = c(-0.5, 18))+
+        custom_color_teams+
+        theme_phil()+
+        ylab("Net Team Efficiency per play")
+                
+```
+
+```{r now look}
+
+weekly_team_rankings  %>%
+        left_join(., team_mapping,
+                  by = c("TEAM")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        group_by(TEAM) %>%
+        fill(OFFENSE, DEFENSE, OVERALL, .direction = 'down') %>%
+        mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ ABBREVIATION)) %>%
+        filter(CONFERENCE %in% c("Big 12", "Big Ten")) %>%
+        ungroup() %>%
+        ggplot(., aes(x=WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y= OVERALL))+
+        facet_wrap(SEASON + CONFERENCE ~.)+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        geom_point()+
+        guides(color = 'none')+
+        geom_line(stat = 'smooth',
+                      formula = 'y ~ x',
+                      method = 'loess',
+                      alpha =0.85,
+                      span = 0.5,
+                      lwd = 1.04)+
+        geom_text_repel(fontface = "bold",
+                        size = 4,
+                        direction = "y",
+                        hjust = -1.5,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+        coord_cartesian(xlim = c(-0.5, 18))+
+        custom_color_teams+
+        theme_phil()+
+        ylab("Net Team Efficiency per play")
+
+```
+
+
+
+## Team Rankings and Predicting Games
+
+```{r fit a model}
+
+weekly_ratings_and_outcomes = ppa_data %>%
+        filter(SEASON > 2007 & SEASON < 2013) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("GAME_ID")) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "HOME")) %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "AWAY")) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS - AWAY_POINTS)
+
+
+score_models = weekly_ratings_and_outcomes %>%
+        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
+               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
+        filter(!is.na(HOME_OFF_POWER_DIFF)) %>%
+        nest(-SEASON) %>%
+        mutate(lm = map(data, 
+                        ~ lm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        mutate(augmented = map2(lm, data, 
+                                ~ augment(.x) %>%
+                                       bind_cols(., .y %>%
+                                                         select(-HOME_SCORE_DIFF,
+                                                                -NEUTRAL_SITE,
+                                                                -HOME_OFF_POWER_DIFF,
+                                                                -HOME_DEF_POWER_DIFF))))
+
+
+score_models %>%
+        select(SEASON, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        ggplot(., aes(x=SEASON,
+                      y=estimate,
+                      ymin = conf.low,
+                      ymax = conf.high))+
+        geom_pointrange()+
+        facet_wrap(term ~.,
+                   ncol = 1,
+                   scales = "free")+
+        geom_hline(yintercept = 0)
+
+score_models %>%
+        select(SEASON, glanced) %>%
+        unnest()
+
+score_models %>%
+        select(SEASON, augmented) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(SEASON, HOME, AWAY, HOME_SCORE_DIFF, .fitted) %>%
+        ggplot(., aes(x=.fitted,
+                      label = paste(HOME, AWAY, SEASON),
+                      y=HOME_SCORE_DIFF))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  vjust = -1,
+                  size = 3)+
+        theme_phil()+
+        geom_vline(xintercept=0,
+                   linetype = 'dashed')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        xlab("Predicted Home Margin")+
+        ylab("Actual Home Margin")
+
+```
+
+
+```{r get the one model}
+
+```
+
+
+
+
+        mutate(PRED_MARGIN = case_when(NEUTRAL_SITE == T ~ HOME_POWER - AWAY_POWER,
+                                     NEUTRAL_SITE == F ~ 3 +HOME_POWER - AWAY_POWER)) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+        group_by(SEASON, WEEK) %>%
+        mutate(HOME_PRED = factor(case_when(PRED_MARGIN > 0 ~ 'yes',
+                                     TRUE ~ 'no'))) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_MARGIN > 0 ~ 'yes',
+                                    TRUE ~ 'no'))) %>%
+        group_by(SEASON, WEEK) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        mutate(type = 'in_season') %>%
+        bind_rows(.,
+                  previous_season_accuracy %>%
+                          mutate(type = 'previous_season'))
+
+```
+
+
+
+```{r now refit}
+
+#team_prior = 
+
+ppa_data %>%
+        filter(SEASON == 2016 & WEEK <= 16) %>%
+        filter(GARBAGE_TIME==0) %>%
+        mutate(YEAR = 2016) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted'))) %>%
+        select(coefs) %>%
+        unnest(coefs) %>%
+        filter(term %in% c('OFFENSE_ID_Texas','DEFENSE_ID_Texas') |
+                       grepl("Intercept|HOME_FIELD|OFFENSE_ID_Notre.Dame|DEFENSE_ID_Notre.Dame", term)) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(term, estimate) %>%
+        mutate(type = 'after') %>%
+        bind_rows(.,
+                  week_one_adjusted %>%
+                          select(coefs) %>%
+                          unnest(coefs) %>%
+                          filter(term %in% c('OFFENSE_ID_Texas','DEFENSE_ID_Texas') |grepl("Intercept|HOME_FIELD|OFFENSE_ID_Notre.Dame|DEFENSE_ID_Notre.Dame", term)) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        select(term, estimate) %>%
+                mutate(type  = 'before')) %>%
+        spread(type, estimate) %>%
+        select(term, before, after)
+        
+        
+        
+        # select(SEASON, adjusted) %>%
+        # unnest(adjusted) %>%
+        # rename(TEAM_ABBR = TEAM) %>%
+        # left_join(., team_mapping,
+        #           by = c("TEAM_ABBR")) %>%
+        # select(-TEAM_ABBR) %>%
+        # select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE) %>%
+        # mutate(OVERALL = OFFENSE + DEFENSE) %>%
+        # mutate_if(is.numeric, round, 3) %>%
+        # filter(TEAM %in% c("Texas", "Notre Dame"))
+
+```
+
+```{r preeict week one points added}
+
+one_week_adjusted = ppa_data %>%
+        filter(SEASON == 2016 & WEEK == 1) %>%
+        mutate(YEAR = SEASON) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted')))
+
+one_week_adjusted %>%
+        select(preds) %>%
+        unnest(preds)
+
+
+```
+
+For one week of data, this adjustment won't work. We get basically the same result, slightly penalized, as each team has only played one other team.
+
+```{r look at one week adjustment}
+
+one_week_adjusted = ppa_data %>%
+        filter(SEASON == 2016 & WEEK == 1) %>%
+        mutate(YEAR = SEASON) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted')))
+
+one_week_adjusted %>%
+        select(SEASON, adjusted) %>%
+        unnest(adjusted) %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", TEAM)) %>%
+        select(-TEAM) %>%
+        mutate(MARGIN = OVERALL * 65) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(MARGIN)) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM_ABBR")) %>%
+        select(-TEAM_ABBR) %>%
+        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, MARGIN) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        head(10) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+```{r get to }
+
+```
+
+
+What do? I could include 2016 data in order to allow adjustments based on how strong last year's teams were. But this means we end up with a picture that is mostly just the same as last year.
+
+```{r get last years model}
+
+foo = ppa_data %>%
+        filter(SEASON == 2015) %>%
+        mutate(YEAR = 2016) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(preds = map(workflow,
+                           ~ .x %>% augment(ppa_data %>%
+                                                    filter(SEASON == 2016 & WEEK ==1)))) %>%
+        select(preds) %>%
+        unnest(preds) %>%
+        mutate(.resid = PPA - .pred) %>%
+        select(SEASON, WEEK, GAME_ID, GAME_DATE, OFFENSE_ID, DEFENSE_ID, PPA, .pred, .resid)
+
+foo %>%
+        filter(OFFENSE_ID)
+
+foo %>%
+        group_by(SEASON, WEEK, OFFENSE_ID) %>%
+        summarize(mean_ppa = mean(PPA, na.rm=T),
+                  mean_pred = mean(.pred, na.rm=T),
+                  mean_resid = mean(.resid, na.rm=T),
+                  .groups = 'drop') %>%
+        arrange(desc(mean_resid)) %>%
+        mutate(diff = mean_ppa - mean_pred)
+
+```
+
+
+```{r model relationship between end of season and week 1}
+
+season = 2013
+
+foo = ppa_data %>%
+        filter(SEASON == season) %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        arrange(WEEK) %>%
+        distinct() %>%
+        left_join(.,
+                  games_raw %>%
+                          select(SEASON, GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("SEASON", "GAME_ID")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == season-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "HOME")) %>%
+        left_join(., adjusted_team_rankings %>%
+                          filter(SEASON == season-1) %>%
+                          mutate(SEASON = SEASON + 1) %>%
+                          select(SEASON, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "AWAY")) %>%
+        filter(!is.na(HOME_POWER) & !is.na(AWAY_POWER)) %>%
+        mutate_at(c("HOME_OFF_POWER",
+                     "HOME_DEF_POWER",
+                     "AWAY_OFF_POWER",
+                     "AWAY_DEF_POWER"),
+                 ~  . * 100) %>%
+        mutate(HOME_POWER_DIFF = HOME_POWER - AWAY_POWER) %>%
+        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
+               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS - AWAY_POINTS) %>%
+        nest() %>%
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(augmented = map2(lm, data, ~ augment(.x) %>% bind_cols(., .y %>%
+                                                                       select(GAME_ID, WEEK, HOME, AWAY, HOME_POINTS, AWAY_POINTS, HOME_POWER, AWAY_POWER)))) %>%
+        mutate(glanced = map(lm, glance))
+
+foo %>%
+        select(glanced) %>%
+        unnest(glanced)  %>%
+        select(r.squared, sigma, nobs) 
+
+foo %>%
+        select(tidied) %>%
+        unnest(tidied)  %>%
+        mutate_if(is.numeric, round, 3)
+
+foo %>%
+        select(augmented) %>%
+        unnest() %>%
+        select(WEEK,
+               HOME,
+               AWAY,
+               HOME_SCORE_DIFF,
+               .fitted,
+               everything()) %>%
+               # HOME_OFF_POWER_DIFF,
+               # HOME_DEF_POWER_DIFF) %>%
+        mutate_if(is.numeric, round, 2)
+        mutate(HOME_PRED = factor(case_when(.fitted > 0 ~ 'yes',
+                                     TRUE ~ 'no'))) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_SCORE_DIFF > 0 ~ 'yes',
+                                    TRUE ~ 'no'))) %>%
+        group_by(WEEK) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED)
+                      
+```
+
+foo %>% 
+        select(tidied) %>%
+        unnest(tidied) %>%
+        mutate_if(is.numeric, round, 3)
+
+
+        ggplot(., aes(x=HOME_EFFICIENCY_DIFF,
+                      label = paste(HOME, AWAY),
+                      y = HOME_SCORE_DIFF))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  size = 2,
+                  vjust = -1)+
+        theme_phil()+
+        stat_cor()+
+        geom_smooth(method = 'lm',
+                    formula = 'y ~ x')+
+        geom_vline(xintercept = 0)+
+        geom_hline(yintercept=0)
+        
+
+
+
+```{r include previous season}
+
+# include previous seaeson in 
+ppa_data %>%
+        filter(SEASON == 2015 
+               | (SEASON == 2016 & WEEK == 1)) %>%
+        mutate(YEAR = 2016) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted'))) %>%
+        select(SEASON, adjusted) %>%
+        unnest(adjusted) %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", TEAM)) %>%
+        select(-TEAM) %>%
+        mutate(MARGIN = OVERALL * 65) %>%
+        mutate_if(is.numeric, round, 3) %>%
+        arrange(desc(MARGIN)) %>%
+        left_join(., team_mapping,
+                  by = c("TEAM_ABBR")) %>%
+        select(-TEAM_ABBR) %>%
+        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, MARGIN) 
+
+```
+
+
+```{r show example of fitting to one week}
+
+one_week_adjusted = ppa_data %>%
+        filter(SEASON == 2016 & WEEK == 1) %>%
+        filter(GARBAGE_TIME == 0) %>%
+        mutate(YEAR = SEASON) %>%
+        nest(-YEAR) %>%
+        rename(SEASON = YEAR) %>%
+        mutate(workflow = map(data,
+                              ~ ppa_wf %>%
+                                      fit(.x))) %>%
+        mutate(augmented = map2(workflow, data,
+                           ~ augment(.x, .y))) %>%
+        mutate(fit = map(workflow, 
+                         ~ extract_fit_parsnip(.x))) %>%
+        mutate(coefs = map(fit,
+                           ~ tidy(.x))) %>%
+        mutate(intercept = map(coefs,
+                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+        mutate(adjusted = map2(coefs, intercept,
+                               ~ .x %>% 
+                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                       mutate(intercept = .y) %>%
+                                       mutate(adjusted = estimate + intercept) %>%
+                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                       select(TEAM, type, adjusted) %>%
+                                       spread(type, adjusted) %>%
+                                       mutate(DEFENSE = -DEFENSE) %>%
+                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                       mutate(TYPE = 'adjusted')))
+
+one_week_adjusted
+
+
+```
+
 
 ```{r epa fits}
 
@@ -842,7 +3815,7 @@ rolling_efficiency = foreach(i = 1:length(weeks),
         .combine = bind_rows,
         .errorhandling = 'remove') %do% {
                 
-                ppa_valid = scored_test %>%
+                ppa_valid = scored_regular %>%
                         filter(SEASON == 2020 & WEEK <= weeks[i]) %>%
                         arrange(SEASON, WEEK) %>%
                         mutate(YEAR = SEASON) %>%
@@ -851,8 +3824,6 @@ rolling_efficiency = foreach(i = 1:length(weeks),
                         mutate(workflow = map(data,
                                               ~ ppa_wf %>%
                                                       fit(.x))) %>%
-                        mutate(augmented = map2(workflow, data,
-                                           ~ augment(.x, .y))) %>%
                         mutate(fit = map(workflow, 
                                          ~ extract_fit_parsnip(.x))) %>%
                         mutate(coefs = map(fit,
@@ -987,8 +3958,7 @@ rolling_efficiency %>%
 
 ```
 
-
-What if for the first few weeks of the season we also include last year's season?
+What if we always include last season?
 
 ```{r rolling effiency}
 
@@ -1004,48 +3974,37 @@ adjusted_team_rankings %>%
 
 ```
 
-Predict 
+Rolling efficiency including last season
 
-```{r include last year season in effiency}
+```{r always including last season}
 
-weeks = seq(1, 16)
-season = 2020
+ppa_data = bind_rows(scored_train,
+                     scored_valid,
+                     scored_test)
 
-rolling_efficiency_averaged = foreach(i = 1:length(weeks), 
+week_grid = ppa_data %>%
+        select(SEASON, WEEK) %>%
+        distinct %>%
+        arrange(SEASON, WEEK) %>%
+        mutate(.row = row_number())
+
+efficiency_averaged = foreach(i = 16:nrow(week_grid),
         .combine = bind_rows,
         .errorhandling = 'remove') %do% {
-                
-                
-                # # make grid of seasons and weeks
-                # season_week_grid = expand.grid(SEASON = seq(season -1, season),
-                #                           WEEK = weeks) %>%
-                #         arrange(SEASON, WEEK)
-                
-                        ppa_data = bind_rows(scored_valid %>%
-                                                     filter(SEASON == season-1 & WEEK >= weeks[i]),
-                                             scored_test %>%
-                                                     filter(SEASON == season & WEEK <= weeks[i]))
-
-                      # } else if (weeks[i] < 5) {
-                        #         ppa_data = bind_rows(scored_train %>%
-                        #                              filter(SEASON == season-1 & WEEK >4),
-                        #                      scored_valid %>%
-                        #                              filter(SEASON == season & WEEK < weeks[i]))
-                        #                 } else {
-                        #                         ppa_data = scored_valid %>%
-                        #                              filter(SEASON == season & WEEK < weeks[i])
-                        #                 }
-
-             ppa_valid = ppa_data %>%
+        
+                # do a left join to pull in data matching these time periods
+                ppa_weeks = bind_rows(ppa_data %>% 
+                                              filter(SEASON == week_grid[i,]$SEASON -1),
+                                      ppa_data %>%
+                                              filter(SEASON == week_grid[i,]$SEASON &
+                                                             WEEK <= week_grid[i,]$WEEK))
+                # now get coefficients on each 
+                ppa_fit = ppa_weeks %>%
                         arrange(SEASON, WEEK) %>%
-                     mutate(YEAR = season) %>%
-                     nest(-YEAR) %>%
-                     rename(SEASON = YEAR) %>%
+                        nest() %>%
                         mutate(workflow = map(data,
                                               ~ ppa_wf %>%
                                                       fit(.x))) %>%
-                        mutate(augmented = map2(workflow, data,
-                                           ~ augment(.x, .y))) %>%
                         mutate(fit = map(workflow, 
                                          ~ extract_fit_parsnip(.x))) %>%
                         mutate(coefs = map(fit,
@@ -1066,17 +4025,96 @@ rolling_efficiency_averaged = foreach(i = 1:length(weeks),
                                                        mutate(OVERALL = OFFENSE + DEFENSE) %>%
                                                        mutate(TYPE = 'adjusted')))
                 
-                ppa_valid %>% 
-                        select(SEASON, adjusted)  %>% 
-                        mutate(WEEK = weeks[i]) %>%
-                        arrange(SEASON) %>% 
+                # opponent adjusted
+                ppa_fit %>% 
+                        select(adjusted) %>% 
                         unnest(adjusted) %>%
+                        mutate(SEASON = week_grid[i,]$SEASON) %>%
+                        mutate(WEEK = week_grid[i,]$WEEK) %>%
+                        arrange(SEASON, WEEK) %>% 
                         arrange(desc(OVERALL)) %>%
-                        mutate_if(is.numeric, round, 3)
+                        mutate_if(is.numeric, round, 3) %>%
+                        mutate(WINDOW = 'last season + current season')
+        
+
+        }
+
+```
+
+Or, use a rolling window.
+
+```{r include last year season in effiency}
+
+lookback = c(16, 32)
+
+week_grid = ppa_data %>%
+        select(SEASON, WEEK) %>%
+        distinct %>%
+        arrange(SEASON, WEEK) %>%
+        mutate(.row = row_number())
+
+rolling_efficiency = foreach(i = 16:nrow(week_grid),
+        .combine = bind_rows,
+        .errorhandling = 'remove') %do% {
+                
+                # specify current week
+                current_row = week_grid %>% 
+                        mutate(.row = row_number()) %>%
+                        filter(SEASON == week_grid[i,]$SEASON & WEEK <= week_grid[i,]$WEEK) %>%
+                        pull(.row) %>%
+                        max()
+       
+                # from this row, lookback X weeks
+                all_rows = week_grid %>%
+                        filter(.row <= current_row & .row >= current_row - lookback[j])
+       
+                # do a left join to pull in data matching these time periods
+                ppa_weeks = all_rows %>%
+                        left_join(.,
+                                  ppa_data,
+                                  by = c("SEASON", "WEEK"))
+                
+                # now get coefficients on each 
+                ppa_fit = ppa_weeks %>%
+                        arrange(SEASON, WEEK) %>%
+                        nest() %>%
+                        mutate(workflow = map(data,
+                                              ~ ppa_wf %>%
+                                                      fit(.x))) %>%
+                        mutate(fit = map(workflow, 
+                                         ~ extract_fit_parsnip(.x))) %>%
+                        mutate(coefs = map(fit,
+                                           ~ tidy(.x))) %>%
+                        mutate(intercept = map(coefs,
+                                               ~ .x %>% filter(term == '(Intercept)') %>% pull())) %>%
+                        mutate(adjusted = map2(coefs, intercept,
+                                               ~ .x %>% 
+                                                       filter(term != '(Intercept)' & term != 'HOME_FIELD_ADVANTAGE') %>%
+                                                       mutate(intercept = .y) %>%
+                                                       mutate(adjusted = estimate + intercept) %>%
+                                                       mutate(type = case_when(grepl("OFFENSE", term) ~ 'OFFENSE',
+                                                                               grepl("DEFENSE", term) ~ 'DEFENSE')) %>%
+                                                       mutate(TEAM = gsub("DEFENSE_ID_", "", gsub("OFFENSE_ID_", "", term))) %>%
+                                                       select(TEAM, type, adjusted) %>%
+                                                       spread(type, adjusted) %>%
+                                                       mutate(DEFENSE = -DEFENSE) %>%
+                                                       mutate(OVERALL = OFFENSE + DEFENSE) %>%
+                                                       mutate(TYPE = 'adjusted')))
+                
+                # opponent adjusted
+                ppa_fit %>% 
+                        select(adjusted) %>% 
+                        unnest(adjusted) %>%
+                        mutate(SEASON = valid_grid[i,]$SEASON) %>%
+                        mutate(WEEK = valid_grid[i,]$WEEK) %>%
+                        arrange(SEASON, WEEK) %>% 
+                        arrange(desc(OVERALL)) %>%
+                        mutate_if(is.numeric, round, 3) %>%
+                        mutate(WINDOW = 'last 16 games')
         
         }
 
-rolling_efficiency_averaged %>%
+rolling_efficiency %>%
         rename(TEAM_ABBR = TEAM) %>%
         left_join(., team_mapping,
                   by = c("TEAM_ABBR")) %>%
@@ -1090,15 +4128,30 @@ rolling_efficiency_averaged %>%
         arrange(WEEK) %>%
         ungroup() %>%
         arrange(WEEK) %>%
-        filter(TEAM == 'Texas A&M') %>%
-        select(SEASON, WEEK, OFFENSE, DEFENSE, OVERALL, RANK)
+        select(SEASON,TEAM, WEEK, OFFENSE, DEFENSE, OVERALL, RANK) %>%
+        arrange(SEASON, WEEK) %>%
+        filter(WEEK == 16) %>%
+        filter(!is.na(TEAM))
+
+rolling_efficiency_averaged %>%
+        filter(SEASON == 2017) %>%
+        filter(WEEK == 16) %>%
+        arrange(desc(OVERALL))
+
+```
+
+Compare these two.
+
+```{r bind together and compare}
 
 ```
 
 
+Use rolling ratings to predict next week's games.
+
 ```{r look at the averaged}
 
-rolling_efficiency_averaged %>%
+efficiency_averaged %>%
         rename(TEAM_ABBR = TEAM) %>%
         left_join(., team_mapping,
                   by = c("TEAM_ABBR")) %>%
@@ -1111,10 +4164,12 @@ rolling_efficiency_averaged %>%
         mutate(RANK = row_number()) %>%
         ungroup() %>%
         arrange(WEEK) %>%
-        filter(CONFERENCE %in% c('SEC', 'Big 12', 'Big Ten', 'Pac-12')) %>%
+        filter(CONFERENCE %in% 'SEC') %>%
+      #  filter(CONFERENCE %in% c('SEC', 'Big 12', 'Big Ten', 'Pac-12')) %>%
         group_by(TEAM) %>%
         mutate(TEAM_LABEL = case_when(WEEK == max(WEEK) ~ TEAM)) %>%
         ungroup() %>%
+        filter(SEASON > 2015) %>%
         ggplot(., aes(x=WEEK,
                       label = TEAM_LABEL,
                       by = TEAM,
@@ -1137,7 +4192,7 @@ rolling_efficiency_averaged %>%
                       formula = 'y ~ x',
                       method = 'loess',
                       alpha =0.85,
-                      span = 0.35,
+                      span = 0.15,
                       lwd = 1.04)+
         facet_wrap(SEASON + CONFERENCE ~.,
                    ncol = 2)+
@@ -1151,6 +4206,15 @@ rolling_efficiency_averaged %>%
         coord_cartesian(xlim = c(NA, 16 + 2))
 
 ```
+
+```{r }
+
+rolling_efficiency_averaged %>%
+        filter(SEASON == 2021 & WEEK == 16)
+
+```
+
+
 
 
 ppa_valid = scored_valid %>%
@@ -1225,9 +4289,6 @@ scored_valid %>%
         mutate(POWER = OFFENSE + DEFENSE) %>% 
         arrange(desc(POWER)) %>%
         mutate_if(is.numeric, round, 2)
-
-```
-
 
 
 ```{r team rankings over time}
@@ -1318,8 +4379,6 @@ grid.newpage()
 grid.draw(g)
 
 ```
-
-
 
 Now fit to multiple seasons.
 
