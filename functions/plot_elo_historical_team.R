@@ -1,7 +1,8 @@
 plot_elo_historical_team <-
 function(elo_ratings,
-                                    min_year = 1970,
+                                    min_year = 1869,
                                     team,
+         smooth = F,
                                     input_teamcolors = teamcolors) {
         
         min_date = as.Date(paste(min_year, "01", "01", sep="-"))
@@ -20,7 +21,7 @@ function(elo_ratings,
                 ggplot(., aes(x=GAME_DATE,
                               by = TEAM,
                               y= POSTGAME_ELO))+
-                geom_point(alpha = 0.008)+
+                geom_point(alpha = 0.004)+
                 geom_hline(yintercept = all_teams_median,
                            linetype = 'dashed',
                            color = 'grey60')+
@@ -41,15 +42,18 @@ function(elo_ratings,
                 mutate(TEAM_LABEL = case_when(GAME_DATE == max(GAME_DATE) ~ TEAM)) %>%
                 ungroup()
         
+        
+        if(smooth == T ) {p = p + geom_line(data =team_data,
+                                  aes(color = name),
+                                  stat = 'smooth',
+                                  formula = 'y ~ x',
+                                  method = 'loess',
+                                  alpha =0.85,
+                                  span = 0.2,
+                                  lwd = 1.04)}
+        else {p = p}
+        
         p + 
-                # geom_line(data =team_data,
-                #       aes(color = name),
-                #       stat = 'smooth',
-                #       formula = 'y ~ x',
-                #       method = 'loess',
-                #       alpha =0.85,
-                #       span = 0.1,
-                #       lwd = 1.04)+
                 geom_text_repel(data =team_data,
                                 aes(label = TEAM_LABEL,
                                     color = name),
@@ -79,7 +83,7 @@ function(elo_ratings,
                 guides(color = 'none')+
                 xlab("Game Date")+
                 ylab("Postgame Elo Rating")+
-                scale_x_date(breaks = as.Date(paste(seq(min_year, 2020, 5), "01", "01", sep="-")),
+                scale_x_date(breaks = as.Date(paste(seq(min_year, 2020, 10), "01", "01", sep="-")),
                              #date_breaks = c("10 year"),
                              date_labels = c("%Y"))+
                 xlab("Season (Game Date)")
