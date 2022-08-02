@@ -1,0 +1,830 @@
+---
+title: "Predicting Games via Expected Points and Elo"
+author: "Phil Henrickson"
+date: "6/7/2022"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+    css: "styles.css"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+
+options(knitr.duplicate.label = "allow")
+
+options(scipen=999)
+
+```
+
+```{r packages, include=F} 
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+conflict_prefer("lag", "dplyr")
+
+library(flextable)
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=8,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r get games}
+
+# teams raw
+teams_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble() %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
+        ungroup() %>%
+        # logic for flagging conference championship games
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | 
+                                                                    is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome' |
+                                                                    HOME_CONFERENCE == 'Sun Belt' |
+                                                                    HOME_CONFERENCE == 'American Athletic') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    HOME_POINTS < AWAY_POINTS ~ 'no',
+                                    HOME_POINTS == AWAY_POINTS ~ 'no'),
+               levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# get team conference mapping
+team_conference_season = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_TEAM_CONFERENCE_SEASON')) %>%
+        as_tibble()
+
+# make mapping for color
+team_mapping = teams_raw %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", TEAM))) %>%
+        select(TEAM, TEAM_ABBR, TEAM_ABBREVIATION, COLOR, ALT_COLOR) %>%
+        mutate(COLOR = case_when(TEAM == 'Toledo' ~ '#003E7E',
+                                 TRUE ~ COLOR))
+
+# get colors
+team_colors <- team_mapping %>%
+        filter(!is.na(COLOR)) %>%
+        pull(COLOR)
+
+# set names
+names(team_colors) = team_mapping %>%
+        filter(!is.na(COLOR)) %>%
+        pull(TEAM)
+
+custom_color_teams <- scale_colour_manual(name = "TEAM", values = team_colors)
+custom_fill_teams <- scale_fill_manual(name = "TEAM", values = team_colors)
+
+```
+
+```{r recruiting}
+
+# recruiting
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+# expand
+library(TTR)
+recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
+             YEAR = seq(min(recruiting_teams_raw$YEAR),
+                        max(recruiting_teams_raw$YEAR))) %>%
+        left_join(., recruiting_teams_raw,
+                  by = c("YEAR", "TEAM")) %>%
+        mutate(RECRUITING_POINTS = replace_na(RECRUITING_POINTS, 0)) %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                                  TRUE ~ EMA)) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR)  %>%
+        mutate(SEASON = YEAR) %>%
+        ungroup() %>%
+        select(TEAM, SEASON, CONFERENCE, DIVISION, RANK, RECRUITING_POINTS, EMA)
+
+# get what we need
+recruiting = recruiting_teams %>%
+        select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
+        rename(RECRUITING_SCORE = EMA)
+
+```
+
+```{r load functions}
+
+# integer plotting function
+int_breaks <- function(x, n = 5) {
+  l <- pretty(x, n)
+  l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+}
+
+source(here::here("functions/theme_phil.R"))
+source(here::here("functions/clean_plays_func.R"))
+source(here::here("functions/make_time_features_func.R"))
+source(here::here("functions/expected_points_func.R"))
+source(here::here("functions/get_points_added_func.R"))
+source(here::here("functions/get_drive_score_events.R"))
+source(here::here("functions/assign_play_score_events.R"))
+
+
+source(here::here("functions/get_expected_score.R"))
+source(here::here("functions/get_new_elos.R"))
+source(here::here("functions/calc_elo_ratings.R"))
+source(here::here("functions", "simulateX.R"))
+source(here::here("functions", "sim_game_margin.R"))
+source(here::here("functions", "sim_elo_ratings.R"))
+
+# with recruiting
+source(here::here("functions", "calc_elo_ratings.R"))
+source(here::here("functions", "sim_elo_ratings.R"))
+source(here::here("functions", "sim_rest_of_season.R"))
+
+rm(a)
+
+```
+
+```{r load in scored and rankings}
+
+# play level
+load(here::here("data", "scored_plays.Rdata"))
+
+# season level
+load(here::here("data", "season_team_rankings.Rdata"))
+
+# week level
+load(here::here("data", "weekly_team_rankings.Rdata"))
+
+```
+
+# Team Efficiency Measures and Elo Ratings
+
+```{r join recruiting with games}
+
+# specify games to run function
+games = games_raw %>%
+        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ HOME_DIVISION)) %>%
+        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ AWAY_DIVISION)) %>%
+        mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
+        filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "AWAY_TEAM"))
+
+```
+
+
+```{r calc elo scores}
+
+# set pars
+selected_pars = tibble(k = 35,
+                       v = 400,
+                       reversion = 0.2,
+                       home_field_advantage = 75)
+
+# now get the elo ratings based on this training set
+elo_games= calc_elo_ratings(games %>%
+                                    filter(SEASON < 2022),
+                            home_field_advantage = selected_pars$home_field_advantage,
+                          reversion = selected_pars$reversion,
+                          k = selected_pars$k,
+                          v = selected_pars$v,
+                          verbose = T)
+
+# get fbs teams
+teams = elo_games$team_outcomes %>%
+        filter(SEASON == 2021) %>%
+        filter(DIVISION == 'fbs') %>%
+        distinct(TEAM) %>%
+        arrange(TEAM)
+
+# extract team elo ratings
+team_elo_ratings = elo_games$team_outcomes
+
+# game
+game_elo_ratings = elo_games$game_outcomes
+
+```
+
+
+```{r team elo ratings}
+
+# examine elo ratings accuracy
+game_elo_ratings %>%
+        filter(SEASON > 2005 & SEASON < 2022) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        group_by(SEASON) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED,
+                            event_level = 'second') %>%
+        mutate_if(is.numeric, round, 2)
+
+```
+
+How do season end Elo ratings compare to each team's end of season offensive/defensive efficiency?
+
+```{r join elo ratings with power ratings}
+
+# get adjusted team rankings
+adjusted_team_weekly_rankings = weekly_team_rankings %>%
+        filter(TYPE == 'adjusted') %>%
+        select(SEASON, WEEK, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL)
+
+# get end of season elo
+adjusted_team_weekly_rankings %>%
+        group_by(SEASON, TEAM) %>%
+        filter(WEEK == max(WEEK)) %>%
+        left_join(.,
+                  team_elo_ratings %>%
+                          group_by(SEASON, TEAM) %>%
+                          arrange(GAME_DATE) %>%
+                          mutate(WEEK = row_number()) %>%
+                          mutate(LAST_GAME = GAME_DATE == max(GAME_DATE)) %>%
+                          filter(LAST_GAME ==T) %>%
+                          select(SEASON, TEAM, POSTGAME_ELO),
+                  by = c("SEASON", "TEAM")) %>%
+        ggplot(., aes(x=OVERALL,
+                      label = paste(TEAM, SEASON),
+                      y=POSTGAME_ELO))+
+        geom_point()+
+        geom_text(check_overlap = T, vjust = -1)+
+        theme_phil()+
+        stat_cor(p.accuracy = 0.01)+
+        ylab("Season End Elo Rating")+
+        xlab("Team Overall Efficiency")
+                  
+# adjusted_team_rankings %>%
+#         left_join(.,
+#                   team_elo_ratings %>%
+#                           
+```
+
+As we would probably have expected (and hoped), team overall efficiency measures are highly correlated with season end Elo ratings.
+
+When do they disagree?
+
+```{r look at disagreements between the two}
+
+nested_lm = adjusted_team_weekly_rankings %>%
+        group_by(SEASON, TEAM) %>%
+        filter(WEEK == max(WEEK)) %>%
+        ungroup() %>%
+        left_join(.,
+                  team_elo_ratings %>%
+                          group_by(SEASON, TEAM) %>%
+                          arrange(GAME_DATE) %>%
+                          mutate(WEEK = row_number()) %>%
+                          mutate(LAST_GAME = GAME_DATE == max(GAME_DATE)) %>%
+                          filter(LAST_GAME ==T) %>%
+                          select(SEASON, TEAM, POSTGAME_ELO),
+                  by = c("SEASON", "TEAM")) %>%
+        filter(!is.na(OVERALL) & !is.na(POSTGAME_ELO)) %>%
+        mutate(OVERALL = OVERALL * 100) %>%
+   #     mutate(OVERALL = (OVERALL - mean(OVERALL) / sd(OVERALL)))
+        nest()  %>%
+        mutate(lm = map(data,
+                        ~ lm(POSTGAME_ELO ~ OVERALL,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(augmented = map(lm, ~ augment(.x) %>%
+                                       select(-OVERALL, -POSTGAME_ELO))) %>%
+        mutate(resid = map(lm, ~ resid(.x))) 
+
+nested_lm %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+        
+        
+nested_lm %>%
+        select(data, augmented, resid) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 1) %>%
+        arrange(desc(abs(.resid))) %>%
+        select(SEASON, WEEK, TEAM, POSTGAME_ELO, OVERALL, .fitted, .resid) %>%
+        head(25)
+
+```
+
+Given where a team was at the end of one season, what predicts a team's Elo for the next season?
+
+```{r predicting next season end elo}
+
+ nested_lags = adjusted_team_weekly_rankings %>%
+        mutate(OVERALL = OVERALL * 100) %>%
+        group_by(SEASON, TEAM) %>%
+        filter(WEEK == max(WEEK)) %>%
+        select(SEASON, WEEK, TEAM, OVERALL) %>%
+        group_by(TEAM) %>%
+        arrange(SEASON) %>%
+        mutate(PREVIOUS_OVERALL = dplyr::lag(OVERALL, 1)) %>%
+        ungroup() %>%
+        left_join(.,
+                  team_elo_ratings %>%
+                          group_by(SEASON, TEAM) %>%
+                          arrange(GAME_DATE) %>%
+                          mutate(WEEK = row_number()) %>%
+                          mutate(LAST_GAME = GAME_DATE == max(GAME_DATE)) %>%
+                          filter(LAST_GAME ==T) %>%
+                          select(SEASON, TEAM, POSTGAME_ELO) %>%
+                          rename(ELO = POSTGAME_ELO) %>%
+                          group_by(TEAM) %>%
+                          mutate(PREVIOUS_ELO = dplyr::lag(ELO, 1)),
+                  by = c("SEASON", "TEAM")) %>%
+        filter(!is.na(OVERALL) & !is.na(ELO)) %>%
+        filter(!is.na(PREVIOUS_ELO) & !is.na(PREVIOUS_OVERALL)) %>%
+        nest() 
+
+nested_lags_elo = nested_lags %>%
+        mutate(lm = map(data, ~ lm(ELO ~ PREVIOUS_ELO,
+                                         #  PREVIOUS_OVERALL,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(augmented = map(lm, ~ augment(.x))) %>%
+        mutate(glanced = map(lm, glance))
+
+nested_lags_elo %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+
+nested_lags_elo %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+
+nested_lags_elo %>%
+        select(data, augmented) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 1) %>%
+        arrange(desc(abs(.resid))) %>%
+        select(SEASON, TEAM, PREVIOUS_OVERALL, OVERALL, PREVIOUS_ELO, ELO, .fitted, .resid)
+
+```
+
+
+```{r nested lags with both}
+
+nested_lags_both = nested_lags %>%
+        mutate(lm = map(data, ~ lm(ELO ~ PREVIOUS_ELO + PREVIOUS_OVERALL,
+                                   data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(augmented = map(lm, ~ augment(.x))) %>%
+        mutate(glanced = map(lm, glance))
+
+nested_lags_both %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+
+nested_lags_both %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+
+nested_lags_both %>%
+        select(data, augmented) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 1) %>%
+        arrange(desc(abs(.resid))) %>%
+        select(SEASON, TEAM, PREVIOUS_OVERALL, OVERALL, PREVIOUS_ELO, ELO, .fitted, .resid)
+
+```
+
+
+Ultimately, the real test of these ratings is to figure out their efficacy in predicting games.
+
+## Predicting Games
+
+```{r combine to predict}
+
+games_elo_and_efficiency = elo_games$game_outcomes %>%
+        filter(SEASON > 2007) %>%
+        left_join(., weekly_team_rankings %>%
+                          filter(TYPE == 'adjusted') %>%
+                          mutate(WEEK = WEEK + 1) %>%
+                          select(-GAME_ID) %>%
+                          left_join(., weekly_team_rankings %>%
+                                            filter(TYPE == 'raw') %>%
+                                            select(SEASON, GAME_ID, WEEK, TEAM),
+                                    by = c("SEASON", "WEEK", "TEAM")) %>%
+                          select(SEASON, GAME_ID, TEAM, OFFENSE, DEFENSE, OVERALL) %>%
+                          filter(!is.na(GAME_ID)) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_OFFENSE = OFFENSE,
+                                 HOME_DEFENSE = DEFENSE,
+                                 HOME_OVERALL = OVERALL),
+                  by = c("SEASON", "GAME_ID", "HOME_TEAM")) %>%
+        left_join(., weekly_team_rankings %>%
+                          filter(TYPE == 'adjusted') %>%
+                          mutate(WEEK = WEEK + 1) %>%
+                          select(-GAME_ID) %>%
+                          left_join(., weekly_team_rankings %>%
+                                            filter(TYPE == 'raw') %>%
+                                            select(SEASON, GAME_ID, WEEK, TEAM),
+                                    by = c("SEASON", "WEEK", "TEAM")) %>%
+                          select(SEASON, GAME_ID, TEAM, OFFENSE, DEFENSE, OVERALL) %>%
+                          filter(!is.na(GAME_ID)) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_OFFENSE = OFFENSE,
+                                 AWAY_DEFENSE = DEFENSE,
+                                 AWAY_OVERALL = OVERALL),
+                  by = c("SEASON", "GAME_ID", "AWAY_TEAM")) %>%
+        filter(HOME_DIVISION == 'fbs' & AWAY_DIVISION == 'fbs')
+
+points_model = games_elo_and_efficiency %>%
+        filter(SEASON < 2019) %>%
+        filter(!is.na(HOME_OVERALL) & !is.na(AWAY_OVERALL)) %>%
+        mutate(HOME_OVERALL = HOME_OVERALL * 100,
+               AWAY_OVERALL = AWAY_OVERALL * 100) %>%
+        mutate(HOME_OVERALL_DIFF = HOME_OVERALL - AWAY_OVERALL,
+               HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
+        nest() %>%
+        mutate(lm = map(data,
+                        ~ lm(HOME_MARGIN ~ HOME_ELO_DIFF + HOME_OVERALL_DIFF,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(glanced = map(lm, glance))
+
+points_model %>%
+        select(glanced) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+
+points_model %>%
+        select(tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2)
+                        
+```
+
+Translate overall into Elo rating.
+
+```{r convert overall to elo rating}
+
+adjusted_team_weekly_rankings %>%
+        filter(WEEK == 0) %>%
+        mutate(OVERALL = OVERALL * 100) %>%
+        mutate(OVERALL_ELO = 1520 + 12 * OVERALL) %>%
+        arrange(desc(OVERALL_ELO))
+        group_by(SEASON, TEAM) %>%
+        filter(WEEK == max(WEEK)) %>%
+        left_join(.,
+                  team_elo_ratings %>%
+                          group_by(SEASON, TEAM) %>%
+                          arrange(GAME_DATE) %>%
+                          mutate(WEEK = row_number()) %>%
+                          mutate(LAST_GAME = GAME_DATE == max(GAME_DATE)) %>%
+                          filter(LAST_GAME ==T) %>%
+                          select(SEASON, TEAM, POSTGAME_ELO),
+                  by = c("SEASON", "TEAM")) 
+
+```
+
+## Team Rankings and Predicting Games
+
+Ultimately, the real test of these measures is to figure out their efficacy in predicting games.
+
+```{r fit a model}
+
+weekly_ratings_and_outcomes = ppa_data %>%
+        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
+        distinct() %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
+                  by = c("GAME_ID")) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(HOME = TEAM,
+                                 HOME_POWER = MARGIN,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "HOME")) %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., weekly_team_rankings %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
+                          rename(AWAY = TEAM,
+                                 AWAY_POWER = MARGIN,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "AWAY")) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS - AWAY_POINTS) %>%
+        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
+               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
+        filter(!is.na(HOME_OFF_POWER_DIFF))
+
+score_models = weekly_ratings_and_outcomes %>%
+        filter(SEASON > 2007 & SEASON < 2013) %>%
+        nest(-SEASON) %>%
+        mutate(lm = map(data, 
+                        ~ lm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
+                             data = .x))) %>%
+        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(glanced = map(lm, glance)) %>%
+        mutate(augmented = map2(lm, data, 
+                                ~ augment(.x) %>%
+                                       bind_cols(., .y %>%
+                                                         select(-HOME_SCORE_DIFF,
+                                                                -NEUTRAL_SITE,
+                                                                -HOME_OFF_POWER_DIFF,
+                                                                -HOME_DEF_POWER_DIFF))))
+
+score_models %>%
+        select(SEASON, tidied) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        ggplot(., aes(x=SEASON,
+                      y=estimate,
+                      ymin = conf.low,
+                      ymax = conf.high))+
+        geom_pointrange()+
+        facet_wrap(term ~.,
+                   ncol = 2,
+                   scales = "free")+
+        geom_hline(yintercept = 0)+
+        theme_bw()
+
+```
+
+
+```{r get the one model}
+
+score_models %>%
+        select(SEASON, glanced) %>%
+        unnest()
+
+score_models %>%
+        select(SEASON, augmented) %>%
+        unnest() %>%
+        mutate_if(is.numeric, round, 2) %>%
+        select(SEASON, HOME, AWAY, HOME_SCORE_DIFF, .fitted) %>%
+        ggplot(., aes(x=.fitted,
+                      label = paste(HOME, AWAY, SEASON),
+                      y=HOME_SCORE_DIFF))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  vjust = -1,
+                  size = 3)+
+        theme_phil()+
+        geom_vline(xintercept=0,
+                   linetype = 'dashed')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dashed')+
+        xlab("Predicted Home Margin")+
+        ylab("Actual Home Margin")
+
+```
+
+```{r fit lm and glm, include=F}
+
+library(broom.mixed)
+
+score_models =  weekly_ratings_and_outcomes %>%
+        filter(SEASON > 2007 & SEASON < 2013) %>%
+        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
+               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
+        filter(!is.na(HOME_OFF_POWER_DIFF)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        nest() %>%
+        mutate(lm = map(data, 
+                        ~ stan_glm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
+                             data = .x))) %>%
+        mutate(glm = map(data,
+                         ~ stan_glm(HOME_WIN ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
+                                    family = stats::binomial,
+                                    data = .x))) %>%
+        mutate(tidied_lm = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(tidied_glm = map(glm, tidy, se='robust', conf.int=T))
+
+```
+
+Now predict the remaining seasons.
+
+```{r predict 2014 and 2015}
+
+library(rstan)
+library(rstanarm)
+library(rstantools)
+library(tidybayes)
+
+score_preds = score_models %>%
+        mutate(preds = map(lm,
+                           ~ predict(.,
+                                               newdata = weekly_ratings_and_outcomes %>%
+                                                       filter(SEASON == 2014 | SEASON == 2015)) %>%
+                                   as_tibble() %>%
+                                   set_names(".pred") %>%
+                                   bind_cols(.,
+                                              weekly_ratings_and_outcomes %>%
+                                                       filter(SEASON == 2014 | SEASON == 2015))))
+
+```
+
+```{r evaluate preds}
+
+score_preds %>%
+        select(preds) %>%
+        unnest(preds) %>%
+        ggplot(., aes(x= .pred,
+                      label = paste(HOME, AWAY),
+                      y= HOME_SCORE_DIFF))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  vjust = -1,
+                  size = 3)+
+        theme_phil()+
+        facet_wrap(SEASON ~.) + 
+        stat_cor(p.accuracy = 0.01) +
+        geom_vline(xintercept = 0,
+                   linetype = 'dashed')+
+        geom_hline(yintercept =0,
+                   linetype = 'dashed')
+
+```
+
+```{r how well does this do in predicting national championships}
+
+score_preds %>%
+        select(preds) %>%
+        unnest(preds) %>%
+        left_join(.,
+                  games_raw %>%
+                          select(GAME_ID, SEASON_TYPE),
+                  by = c("GAME_ID")) %>%
+        filter(SEASON_TYPE == 'postseason') %>%
+        select(SEASON, HOME, AWAY, .pred, HOME_POWER, AWAY_POWER, HOME_SCORE_DIFF) %>%
+        mutate_if(is.numeric, round, 1)
+
+```
+
+```{r now retrain the model}
+
+score_models =  weekly_ratings_and_outcomes %>%
+        filter(SEASON > 2007 & SEASON < 2017) %>%
+        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
+               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
+        filter(!is.na(HOME_OFF_POWER_DIFF)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        nest() %>%
+        mutate(lm = map(data, 
+                        ~ stan_glm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
+                             data = .x))) %>%
+        mutate(glm = map(data,
+                         ~ stan_glm(HOME_WIN ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
+                                    family = stats::binomial,
+                                    data = .x))) %>%
+        mutate(tidied_lm = map(lm, tidy, se='robust', conf.int=T)) %>%
+        mutate(tidied_glm = map(glm, tidy, se='robust', conf.int=T))
+
+```
+
+```{r predict new years}
+
+score_preds = score_models %>%
+        mutate(preds = map(lm,
+                           ~ predict(.,
+                                               newdata = weekly_ratings_and_outcomes %>%
+                                                       filter(SEASON == 2018 | SEASON == 2019)) %>%
+                                   as_tibble() %>%
+                                   set_names(".pred") %>%
+                                   bind_cols(.,
+                                              weekly_ratings_and_outcomes %>%
+                                                       filter(SEASON == 2018 | SEASON == 2019))))
+
+```
+
+```{r score preds}
+
+score_preds %>%
+        select(preds) %>%
+        unnest()
+
+```
+

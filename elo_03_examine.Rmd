@@ -251,7 +251,12 @@ recruiting = recruiting_teams %>%
 
 # specify games to run function
 games = games_raw %>%
-        filter(SEASON >=1970) %>%
+        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ HOME_DIVISION)) %>%
+        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ AWAY_DIVISION)) %>%
+        mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
+        filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
         arrange(GAME_DATE) %>%
         select(GAME_ID, 
                SEASON, 
@@ -302,24 +307,12 @@ selected_pars = tibble(k = 35,
 
 # now get the elo ratings based on this training set
 elo_games= calc_elo_ratings(games %>%
-                                    filter(SEASON < 2022) %>%
-                                    filter(!is.na(HOME_POINTS) & !is.na(AWAY_POINTS)),
-                          home_field_advantage = selected_pars$home_field_advantage,
+                                    filter(SEASON < 2022),
+                            home_field_advantage = selected_pars$home_field_advantage,
                           reversion = selected_pars$reversion,
                           k = selected_pars$k,
                           v = selected_pars$v,
                           verbose = T)
-
-# # get with recruiting
-# elo_games_recruiting= calc_elo_ratings_with_recruiting(games %>%
-#                                     filter(SEASON < 2022) %>%
-#                                     filter(!is.na(HOME_POINTS) & !is.na(AWAY_POINTS)),
-#                                                        recruiting_weight = selected_pars$recruiting_weight,
-#                                                           home_field_advantage = selected_pars$home_field_advantage,
-#                                                           reversion = selected_pars$reversion,
-#                                                           k = selected_pars$k,
-#                                                           v = selected_pars$v,
-#                                                           verbose = T)
 
 # fbs teams
 teams = elo_games$team_outcomes %>%
@@ -367,18 +360,20 @@ Based on ratings over this time period, which teams have had the highest average
 top_teams = elo_games$team_outcomes %>%
         filter(DIVISION == 'fbs') %>%
         group_by(TEAM) %>%
-        summarize(Elo_Mean= mean(POSTGAME_ELO)) %>%
+        summarize(Elo_Mean= mean(POSTGAME_ELO),
+                  games = n()) %>%
         mutate_if(is.numeric, round,0) %>%
-        arrange(desc(Elo_Mean))
+        arrange(desc(Elo_Mean)) 
 
 top_teams %>%
+        filter(games > 400) %>%
         head(10) %>%
         flextable() %>%
         autofit()
         
 ```
 
-```{r plot these teams}
+```{r plot these teams, warning=F}
 
 plot_elo_historical_team(
         elo_games$team_outcomes,
@@ -398,6 +393,7 @@ I can look at rivals side by side to see how the two teams typically compared in
 ```{r plot elo historical michigan}
 
 plot_elo_historical_team(elo_games$team_outcomes,
+                         smooth = T,
                          team = c('Michigan', 'Ohio State'))
 
 ```
@@ -624,7 +620,7 @@ elo_games$team_outcomes %>%
 
 elo_games$team_outcomes %>%
         filter(DIVISION == 'fbs') %>%
-        filter(TEAM == 'Texas A&M') %>%
+        filter(TEAM == 'SMU') %>%
         arrange(SEASON, TEAM) %>%
         group_by(SEASON, TEAM) %>%
         filter(GAME_DATE == max(GAME_DATE)) %>%
@@ -645,7 +641,7 @@ elo_games$team_outcomes %>%
 ```{r tamu upsets}
 
 elo_games$team_outcomes %>%
-        filter(TEAM == 'Texas A&M' & OUTCOME == 'win') %>%
+        filter(TEAM == 'SMU' & OUTCOME == 'win') %>%
         left_join(., elo_games$game_outcomes %>% 
                           select(GAME_ID, HOME_TEAM, AWAY_TEAM, HOME_POINTS, AWAY_POINTS, HOME_PROB, AWAY_PROB),
                   by = c("GAME_ID")) %>%
