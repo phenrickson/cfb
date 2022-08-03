@@ -45,11 +45,11 @@ function(games,
                                            # simulate that week
                                            # simulate the reast of the season
                                            sims_season =  future_replicate(nsims,
-                                                                           sim_elo_ratings_with_recruiting(games_to_simulate,
+                                                                           sim_elo_ratings(games_to_simulate,
                                                                                                            teams = elo_so_far$teams,
                                                                                                            team_seasons = elo_so_far$team_seasons,
                                                                                                            home_field_advantage = elo_pars$home_field_advantage,
-                                                                                                           recruiting_weight = elo_pars$recruiting_weight,
+                                                                                                      #     recruiting_weight = elo_pars$recruiting_weight,
                                                                                                            reversion = elo_pars$reversion,
                                                                                                            k = elo_pars$k,
                                                                                                            v = elo_pars$v,
@@ -62,7 +62,7 @@ function(games,
                                                                          idcol = T) %>%
                                                    mutate(SIM_FROM_WEEK = season_weeks[i,]$PREVIOUS_WEEK) %>%
                                                    mutate(home_field_advantage = elo_pars$home_field_advantage,
-                                                          recruiting_weight = elo_pars$recruiting_weight,
+                                                     #     recruiting_weight = elo_pars$recruiting_weight,
                                                           reversion = elo_pars$reversion,
                                                           k = elo_pars$k,
                                                           v = elo_pars$v)
@@ -73,7 +73,9 @@ function(games,
                                                            left_join(.,
                                                                      sim_game_outcomes %>%
                                                                              group_by(GAME_ID, SIM_FROM_WEEK,
-                                                                                      home_field_advantage, recruiting_weight, reversion,
+                                                                                      home_field_advantage, 
+                                                                                     # recruiting_weight, 
+                                                                                      reversion,
                                                                                       k, v) %>%
                                                                              mutate(HOME_SIM_PRED = case_when(HOME_SIM_MARGIN >0 ~ 1,
                                                                                                               TRUE ~ 0)) %>%
@@ -95,7 +97,8 @@ function(games,
                                                                                     HOME_SIM_PROB,
                                                                                     HOME_SIM_MARGIN,
                                                                                     SIM_FROM_WEEK,
-                                                                                    home_field_advantage, recruiting_weight,
+                                                                                    home_field_advantage, 
+                                                                                    #recruiting_weight,
                                                                                     reversion, k, v),
                                                                      by = "GAME_ID") %>%
                                                            select(SIM_FROM_WEEK, everything()) %>%
@@ -118,11 +121,11 @@ function(games,
                                            # then, update the elo with the actual result for next week
                                            if (nrow(games_so_far)==0)  {elo_so_far = elo_so_far} else
                                                    {
-                                                           elo_so_far = calc_elo_ratings_with_recruiting(
+                                                           elo_so_far = calc_elo_ratings(
                                                                    games = games_so_far,
                                                                    teams = elo_so_far$teams,
                                                                    team_seasons = elo_so_far$team_seasons,
-                                                                   recruiting_weight = 0,
+                                                            #       recruiting_weight = 0,
                                                                    home_field_advantage = elo_pars$home_field_advantage,
                                                                    reversion = elo_pars$reversion,
                                                                    k = elo_pars$k,
@@ -157,7 +160,7 @@ function(games,
                                HOME_POSTGAME_ELO,
                                AWAY_TEAM,
                                home_field_advantage,
-                               recruiting_weight,
+                           #    recruiting_weight,
                                reversion,
                                k,
                                v
@@ -183,7 +186,7 @@ function(games,
                                                  AWAY_POSTGAME_ELO,
                                                  HOME_TEAM,
                                                  home_field_advantage,
-                                                 recruiting_weight,
+                                            #     recruiting_weight,
                                                  reversion,
                                                  k,
                                                  v) %>%
@@ -212,7 +215,7 @@ function(games,
                                HOME_POSTGAME_ELO,
                                AWAY_TEAM,
                                home_field_advantage,
-                               recruiting_weight,
+                             #  recruiting_weight,
                                reversion,
                                k,
                                v
@@ -241,7 +244,7 @@ function(games,
                                                  AWAY_POSTGAME_ELO,
                                                  HOME_TEAM,
                                                  home_field_advantage,
-                                                 recruiting_weight,
+                                                 #recruiting_weight,
                                                  reversion,
                                                  k,
                                                  v) %>%

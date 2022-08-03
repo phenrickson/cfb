@@ -241,6 +241,12 @@ load(here::here("data", "weekly_team_rankings.Rdata"))
 
 # Team Efficiency Measures and Elo Ratings
 
+So far, I have developed offensive and defensive efficiency measure for teams at the season weekly levels. These are useful as retrospective measures to understand a team's performance, but how well does it perform as a predictive measure? This notebook compares college football efficiency measures to Elo ratings for the purpose of predicting games. 
+
+## Predicting Games with Elo Ratings
+
+First, I'll compute Elo ratings using all games involving at least one FBS team back to 1869. This will give each team a pregame and postgame Elo rating, which we can use to predict both the winner and the margin of victory. I've tuned the Elo ratings for the college football setting by adding adjustments based on the home field advantage and the margin of victory, as well as mean reversion after each season.
+
 ```{r join recruiting with games}
 
 # specify games to run function
@@ -261,6 +267,8 @@ games = games_raw %>%
                NEUTRAL_SITE, 
                HOME_TEAM,
                AWAY_TEAM,
+               CONFERENCE_GAME,
+               CONFERENCE_CHAMPIONSHIP,
                HOME_CONFERENCE,
                AWAY_CONFERENCE,
                HOME_DIVISION,
@@ -321,12 +329,13 @@ game_elo_ratings = elo_games$game_outcomes
 
 ```
 
+Elo ratings are the baseline upon which we would hope to improve by including additional data - they only take into account each team's pre game Elo rating and home field advantage, then update based on the outcome of the game and the margin of victory. This can be highly useful for predicting games and simulating seasons, but it doesn't include any information about *why* a particular team might be good. How well do Elo ratings do in predicting the winner of games over the time period 2007 to 2021?
 
 ```{r team elo ratings}
 
 # examine elo ratings accuracy
-game_elo_ratings %>%
-        filter(SEASON > 2005 & SEASON < 2022) %>%
+elo_season_accuracy = game_elo_ratings %>%
+        filter(SEASON > 2007 & SEASON < 2022) %>%
         mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
                                        TRUE ~'no'))) %>%
         mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
@@ -337,18 +346,257 @@ game_elo_ratings %>%
         yardstick::accuracy(truth = HOME_WIN,
                             estimate = HOME_PRED,
                             event_level = 'second') %>%
-        mutate_if(is.numeric, round, 2)
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(method = 'elo') 
+
+
+elo_season_accuracy %>%
+        select(SEASON, method, .metric, .estimate) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
 
 ```
 
-How do season end Elo ratings compare to each team's end of season offensive/defensive efficiency?
+Generally speaking, the Elo ratings do quite well in predicting games. They hover around the mid 70s accuracy in predicting the winner of games over this time period. But, there is some room for improvement, in that they tend to do better predicting regular season games than postseason games. The latter are going to be inherently harder to predict, but we see a pretty big dropoff in both accuracy and log loss in predicting the winner of postseason games.
+
+```{r elo ratings on postseason games}
+
+elo_season_type_accuracy = game_elo_ratings %>%
+        filter(SEASON > 2007 & SEASON < 2022) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+        mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+        group_by(SEASON_TYPE) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED,
+                            event_level = 'second') %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(method = 'elo')
+
+elo_season_type_accuracy %>%
+        select(SEASON_TYPE, method, .metric, .estimate) %>%
+        flextable() %>%
+        autofit()
+
+
+# game_elo_ratings %>%
+#         filter(SEASON > 2007 & SEASON < 2022) %>%
+#         mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+#                                        TRUE ~'no'))) %>%
+#         mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+#                                        TRUE ~ 'no'))) %>%
+#         mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+#                                         TRUE ~ 'no')) %>%
+#         group_by(SEASON_TYPE) %>%
+#         yardstick::mn_log_loss(truth = HOME_WIN,
+#                             estimate = HOME_PROB,
+#                             event_level = 'second') %>%
+#         mutate_if(is.numeric, round, 2)
+# 
+
+```
+
+By incorporating information within the season from play by play data, can we improve upon the baseline Elo ratings?
+
+## Predicting Games with Efficiency Measures
+
+I'll now look at how well we do if we use each team's overall efficiency measures.
+
+```{r get games for overall efficiency}
+
+weekly_ratings_and_outcomes = games %>%
+        group_by(SEASON) %>%
+        mutate(WEEK = case_when(SEASON_TYPE == 'postseason' ~ max(WEEK) + 1,
+               TRUE ~ WEEK)) %>%
+        ungroup()  %>%
+        left_join(., weekly_team_rankings %>%
+                          filter(TYPE == 'adjusted') %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, OVERALL, OFFENSE, DEFENSE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_POWER = OVERALL,
+                                 HOME_OFF_POWER = OFFENSE,
+                                 HOME_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "HOME_TEAM")) %>%
+        arrange(SEASON, WEEK) %>%
+        left_join(., weekly_team_rankings %>%
+                          filter(TYPE == 'adjusted') %>%
+                          mutate(WEEK = WEEK +1) %>%
+                          select(SEASON, WEEK, TEAM, OVERALL, OFFENSE, DEFENSE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_POWER = OVERALL,
+                                 AWAY_OFF_POWER = OFFENSE,
+                                 AWAY_DEF_POWER = DEFENSE),
+                  by = c("SEASON", "WEEK", "AWAY_TEAM")) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS - AWAY_POINTS) %>%
+        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
+               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
+        mutate(HOME_POWER_DIFF = (100*HOME_POWER - 100*AWAY_POWER)) %>%
+        filter(!is.na(HOME_OFF_POWER_DIFF))
+
+```
+
+Each team has overall efficiency rating based on their offense and defense to that point in the season. I'll predict the winner simply based on the difference in their overall ratings with an adjustment for home field advantage and see how it compares to Elo.
+
+```{r predict via margin}
+
+efficiency_season_accuracy = weekly_ratings_and_outcomes %>%
+        filter(SEASON > 2007 & SEASON < 2022) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'),
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_POWER_DIFF +3 >=0 ~ 'yes',
+                                       TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        group_by(SEASON) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED,
+                            event_level = 'second') %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(method = 'efficiency')
+
+efficiency_season_accuracy %>%
+        select(SEASON, method, .metric, .estimate) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        flextable() %>%
+        autofit()
+
+efficiency_season_type_accuracy = weekly_ratings_and_outcomes %>%
+        filter(SEASON > 2007 & SEASON < 2022) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'),
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_POWER_DIFF +3 >=0 ~ 'yes',
+                                       TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        group_by(SEASON_TYPE) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED,
+                            event_level = 'second') %>%
+        mutate(method = 'efficiency') %>%
+        mutate_if(is.numeric, round, 2)
+
+
+efficiency_season_type_accuracy %>%
+        select(SEASON_TYPE, method, .metric, .estimate) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+Interestingly, we do about the same in predicting the postseason using Elo and the efficiency ratings! We do a bit worse in predicting regular season games, but some of that difference is because I don't have efficiency ratings for FCS teams, so we're not seeing any FCS games included in assessing efficiency measures and these are games that tend to be easier to predict. If we drop games with FCS teams and look at overall performance, the Elo ratings only slightly edge out the raw efficiency ratings.
+
+```{r assess both using only fbs games}
+
+# only fbs games
+ weekly_ratings_and_outcomes %>%
+        filter(SEASON > 2007 & SEASON < 2022) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'),
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_POWER_DIFF +3 >=0 ~ 'yes',
+                                       TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED,
+                            event_level = 'second') %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(method = 'efficiency') %>%
+        bind_rows(.,
+                  game_elo_ratings %>%
+        filter(SEASON > 2007 & SEASON < 2022) %>%
+                filter(HOME_DIVISION == 'fbs' & AWAY_DIVISION == 'fbs') %>%
+                mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS  ~ 'yes',
+                                       TRUE ~'no'))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB >=.5 ~ 'yes',
+                                       TRUE ~ 'no'))) %>%
+                mutate(PRED_CORRECT = case_when(HOME_WIN == HOME_PRED ~ 'yes',
+                                        TRUE ~ 'no')) %>%
+                yardstick::accuracy(truth = HOME_WIN,
+                            estimate = HOME_PRED,
+                            event_level = 'second') %>%
+                mutate_if(is.numeric, round, 2) %>%
+                mutate(method = 'elo')) %>%
+        select(method, .metric, .estimate) %>%
+        flextable() %>%
+        autofit()
+
+```
+
+This means we have two different methods for predicting games, one of which (efficiency) is considerably more complicated than the other. Elo ratings also are *much* simpler to use for the purpose of simulating seasons, as we can easily update them based on simulated outcomes. If we were going purely for simplicity and ease of calculation, we'd go for the Elo ratings everytime.
+
+But, for the sake of science, can we combine the two in order to do better than using just one? I'll fit a logistic regression of the home win on the difference in a team's overall efficiency measures and Elo. Does it do better in predicting games?
+
+```{r combine and predict}
+
+weekly_ratings_and_outcomes %>%
+        select(GAME_ID, SEASON, WEEK, SEASON_TYPE, HOME_TEAM, AWAY_TEAM, HOME_SCORE_DIFF, contains("POWER_DIFF")) %>%
+        left_join(.,
+                  elo_games$game_outcomes %>%
+                          select(GAME_ID, SEASON, HOME_PROB, NEUTRAL_SITE, HOME_PREGAME_ELO, AWAY_PREGAME_ELO, HOME_RECRUITING_SCORE, AWAY_RECRUITING_SCORE) %>%
+                          mutate(HOME_ELO_DIFF = case_when(NEUTRAL_SITE == T ~ HOME_PREGAME_ELO - AWAY_PREGAME_ELO,
+                                                           NEUTRAL_SITE == F ~ selected_pars$home_field_advantage + HOME_PREGAME_ELO - AWAY_PREGAME_ELO)),
+                  by = c("SEASON", "GAME_ID")) %>%
+        mutate(HOME_RECRUITING_SCORE = replace_na(HOME_RECRUITING_SCORE, 0),
+               AWAY_RECRUITING_SCORE = replace_na(AWAY_RECRUITING_SCORE, 0)) %>%
+        mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING_SCORE - AWAY_RECRUITING_SCORE) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_SCORE_DIFF > 0 ~ 'yes',
+                                    TRUE ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        nest() %>%
+        mutate(glm = map(data,
+                         ~ glm(HOME_WIN ~ HOME_ELO_DIFF + HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF,
+                                   family = 'binomial',
+                                   data = .x))) %>%
+        mutate(tidied = map(glm, tidy, se='robust', conf.int=T)) %>%
+        mutate(augmented = map2(glm, data, 
+                                ~ augment(.x, 
+                                          newdata = .y,
+                                          type.predict = 'response'))) %>%
+        select(augmented) %>%
+        unnest() %>%
+        mutate(.pred = factor(case_when(.fitted > .5 ~ 'yes',
+                                 TRUE ~ 'no'),
+                              levels = c('no', 'yes'))) %>%
+        select(GAME_ID, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_WIN, HOME_PROB, .fitted, .pred) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_PROB > 0.5 ~ 'yes',
+                                     TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                            estimate  = .pred) %>%
+        mutate_if(is.numeric, round, 2)
+        # ggplot(., aes(x=.fitted,
+        #               color = HOME_WIN,
+        #               label = paste(HOME_TEAM, AWAY_TEAM, SEASON),
+        #               y=HOME_PROB))+
+        # geom_point()+
+        # geom_text(check_overlap = T,
+        #           vjust = -1,
+        #           size = 2.5)
+        #         
+
+```
+And... not really. Even using both, we seem to have hit a ceiling in getting about 73% of games correct. What then is the value of the efficiency measures? The main thing we are interested in is simulating seasons. If efficiency ratings, as well as recruiting data, helps us predict where teams are going to end up in terms of Elo ratings, we can use them to make preseason adjustments to team Elo ratings which will affect our simulations.
+ 
+# Adjusting Elo Ratings with Efficiency and Recruiting
+
+## Comparing Elo Ratings and Efficiency
+
+How do season end Elo ratings compare to each team's end of season offensive/defensive efficiency? This is taking each team's season end overall efficiency metric (offense + defense net points per play) and comparing it to their season end Elo rating.
 
 ```{r join elo ratings with power ratings}
 
 # get adjusted team rankings
 adjusted_team_weekly_rankings = weekly_team_rankings %>%
         filter(TYPE == 'adjusted') %>%
-        select(SEASON, WEEK, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL)
+        select(SEASON, GAME_ID, WEEK, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL) %>%
+        group_by(SEASON, TEAM, WEEK) %>%
+        filter(GAME_ID == max(GAME_ID)) %>%
+        ungroup()
 
 # get end of season elo
 adjusted_team_weekly_rankings %>%
@@ -363,6 +611,7 @@ adjusted_team_weekly_rankings %>%
                           filter(LAST_GAME ==T) %>%
                           select(SEASON, TEAM, POSTGAME_ELO),
                   by = c("SEASON", "TEAM")) %>%
+        mutate(OVERALL = OVERALL * 100) %>%
         ggplot(., aes(x=OVERALL,
                       label = paste(TEAM, SEASON),
                       y=POSTGAME_ELO))+
@@ -379,9 +628,9 @@ adjusted_team_weekly_rankings %>%
 #                           
 ```
 
-As we would probably have expected (and hoped), team overall efficiency measures are highly correlated with season end Elo ratings.
+As we would probably have expected (and hoped), these are highly correlated: teams with an net efficiency on offense and defense tend to win games and improve their Elo rating.
 
-When do they disagree?
+When do they disagree? I'll regress the season end Elo ratings on the season end efficiency measure and look at teams with the largest absolute residuals.
 
 ```{r look at disagreements between the two}
 
@@ -400,6 +649,7 @@ nested_lm = adjusted_team_weekly_rankings %>%
                   by = c("SEASON", "TEAM")) %>%
         filter(!is.na(OVERALL) & !is.na(POSTGAME_ELO)) %>%
         mutate(OVERALL = OVERALL * 100) %>%
+        distinct(SEASON, WEEK, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL, POSTGAME_ELO) %>%
    #     mutate(OVERALL = (OVERALL - mean(OVERALL) / sd(OVERALL)))
         nest()  %>%
         mutate(lm = map(data,
@@ -415,22 +665,43 @@ nested_lm %>%
         unnest() %>%
         mutate_if(is.numeric, round, 2)
         
-        
+```
+
+The bivariate linear model indicates that team with an overall efficiency of zero will have an Elo rating of around 1520 (about the FBS average), while each additional point of efficiency increases their Elo rating by 12. So a team with an overall efficiency of 40 at the end of the season will be expected to have an Elo rating of 1520 + (12 * 40) = 2000. 
+
+Next we can look at the residuals from this model. Which team's Elo ratings were the furthest away from their expected Elo ratings based on their underlying efficiency?
+
+```{r examine residuals}
+
 nested_lm %>%
         select(data, augmented, resid) %>%
         unnest() %>%
         mutate_if(is.numeric, round, 1) %>%
         arrange(desc(abs(.resid))) %>%
-        select(SEASON, WEEK, TEAM, POSTGAME_ELO, OVERALL, .fitted, .resid) %>%
-        head(25)
+        mutate(SEASON_ELO = POSTGAME_ELO) %>%
+        select(SEASON, WEEK, TEAM, OVERALL, SEASON_ELO, .fitted, .resid) %>%
+        mutate(SEASON = factor(SEASON)) %>%
+        select(-WEEK) %>%
+        head(25) %>%
+        flextable() %>%
+        autofit()
 
 ```
 
-Given where a team was at the end of one season, what predicts a team's Elo for the next season?
+Teams with a positive residual have a higher Elo than we would have expected from their overall rating. UMass is potentially even worse than their Elo rating would indicate, given that they have an absurdly low overall efficiency in 2019 and 2020. Similarly, Louisiana 2021 has a higher Elo rating than you would expect given their underlying offensive/defensive efficiency. I wonder if they won a lot of close games? Some other teams like LSU and Ohio State have a higher rating because they started the season very strong, so their Elo rating is still hovering higher than would have expected than from their efficiency alone.
+
+Teams with a negative residual are the opposite, having a lower Elo rating than we would have expected based on their offensive/defensive efficiency. Duke 2008 evidently was a *slightly* above average team based on efficiency, but they ended the season with a very low Elo rating.
+
+## Predicting Next Season's Elo Rating
+
+Given where a team ended its previous season, what predicts a team's Elo for the next season? The Elo framework is really handy because it can allow us to easily simulate games based on simulated results. Given the margin of victory and the winner of the game, we can easily adjust both teams ratings, and then simulate, and so on. So, the goal is to convert efficiency into Elo 
+
+I'll regress each team's season ending Elo from season $t$ on what we observed from the previous season $t-1$. I'll first use their Elo rating alone, then I'll add Elo and their efficiency from the end of season $t-1$. I've centered the previous season's Elo at 0 in order to make the intercept easier to interpret. I'll use the seasons up until 2018 as the set in fitting the models.
 
 ```{r predicting next season end elo}
 
- nested_lags = adjusted_team_weekly_rankings %>%
+nested_lags = adjusted_team_weekly_rankings %>%
+        filter(SEASON < 2018) %>%
         mutate(OVERALL = OVERALL * 100) %>%
         group_by(SEASON, TEAM) %>%
         filter(WEEK == max(WEEK)) %>%
@@ -453,9 +724,10 @@ Given where a team was at the end of one season, what predicts a team's Elo for 
                   by = c("SEASON", "TEAM")) %>%
         filter(!is.na(OVERALL) & !is.na(ELO)) %>%
         filter(!is.na(PREVIOUS_ELO) & !is.na(PREVIOUS_OVERALL)) %>%
-        nest() 
+        mutate(PREVIOUS_ELO = PREVIOUS_ELO-mean(PREVIOUS_ELO))
 
 nested_lags_elo = nested_lags %>%
+        nest() %>%
         mutate(lm = map(data, ~ lm(ELO ~ PREVIOUS_ELO,
                                          #  PREVIOUS_OVERALL,
                                    data = .x))) %>%
@@ -471,21 +743,26 @@ nested_lags_elo %>%
 nested_lags_elo %>%
         select(glanced) %>%
         unnest() %>%
-        mutate_if(is.numeric, round, 2)
+        mutate_if(is.numeric, round, 2) %>%
+        select(r.squared, sigma, nobs)
 
-nested_lags_elo %>%
-        select(data, augmented) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 1) %>%
-        arrange(desc(abs(.resid))) %>%
-        select(SEASON, TEAM, PREVIOUS_OVERALL, OVERALL, PREVIOUS_ELO, ELO, .fitted, .resid)
+# nested_lags_elo %>%
+#         select(data, augmented) %>%
+#         unnest() %>%
+#         mutate_if(is.numeric, round, 1) %>%
+#         arrange(desc(abs(.resid))) %>%
+#         select(SEASON, TEAM, PREVIOUS_OVERALL, OVERALL, PREVIOUS_ELO, ELO, .fitted, .resid)
 
 ```
 
+Season over season, each point of Elo rating from a previous season is worth about .8 for next season's Elo. A team with an average Elo last season will be expected to have an average of about 1518 for next season.
+
+If we include overall efficiency as well as the Elo rating in predicting the next season's season ending Elo, how does this change?
 
 ```{r nested lags with both}
 
 nested_lags_both = nested_lags %>%
+        nest() %>%
         mutate(lm = map(data, ~ lm(ELO ~ PREVIOUS_ELO + PREVIOUS_OVERALL,
                                    data = .x))) %>%
         mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
@@ -500,95 +777,88 @@ nested_lags_both %>%
 nested_lags_both %>%
         select(glanced) %>%
         unnest() %>%
-        mutate_if(is.numeric, round, 2)
-
-nested_lags_both %>%
-        select(data, augmented) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 1) %>%
-        arrange(desc(abs(.resid))) %>%
-        select(SEASON, TEAM, PREVIOUS_OVERALL, OVERALL, PREVIOUS_ELO, ELO, .fitted, .resid)
+        mutate_if(is.numeric, round, 2) %>%
+        select(r.squared, sigma, nobs)
+# 
+# nested_lags_both %>%
+#         select(data, augmented) %>%
+#         unnest() %>%
+#         mutate_if(is.numeric, round, 1) %>%
+#         arrange(desc(abs(.resid))) %>%
+#         select(SEASON, TEAM, PREVIOUS_OVERALL, OVERALL, PREVIOUS_ELO, ELO, .fitted, .resid)
 
 ```
 
+Now, the effect of last year's Elo is lower (and this difference should be significant, from eyeballing the confidence intervals), where one point of Elo from last season only increases this season's Elo by 0.43. This is because we now have the effect of overall efficiency, which indicates that a one point increase in efficiency translates to about 5 Elo points. This means that where a team is expected to end up next year depends both on its previous Elo ratings and on its efficiency. Elo ratings have a larger absolute effect (based on standardizing the variables and examining the effect of a one standard deviation change), but efficiency is a factor as well.
 
-Ultimately, the real test of these ratings is to figure out their efficacy in predicting games.
+```{r compare predictions for next season}
 
-## Predicting Games
+# pluck(nested_lags_both,
+#       "lm", 1) %>%
+#         augment(., 
+#                 newdata = tibble(PREVIOUS_ELO = 1900 - 1520,
+#                           PREVIOUS_OVERALL = seq(-5, 25, 5))) %>%
+#         mutate(PREVIOUS_ELO = PREVIOUS_ELO + 1520) %>%
+#         mutate_if(is.numeric, round, 0)
 
-```{r combine to predict}
+pluck(nested_lags_both,
+      "lm", 1) %>%
+        augment(., 
+                newdata = tibble(PREVIOUS_ELO = 0,
+                          PREVIOUS_OVERALL = seq(-25, 25, 5))) %>%
+        mutate(PREVIOUS_ELO = PREVIOUS_ELO + 1520) %>%
+        mutate_if(is.numeric, round, 0)
 
-games_elo_and_efficiency = elo_games$game_outcomes %>%
-        filter(SEASON > 2007) %>%
-        left_join(., weekly_team_rankings %>%
-                          filter(TYPE == 'adjusted') %>%
-                          mutate(WEEK = WEEK + 1) %>%
-                          select(-GAME_ID) %>%
-                          left_join(., weekly_team_rankings %>%
-                                            filter(TYPE == 'raw') %>%
-                                            select(SEASON, GAME_ID, WEEK, TEAM),
-                                    by = c("SEASON", "WEEK", "TEAM")) %>%
-                          select(SEASON, GAME_ID, TEAM, OFFENSE, DEFENSE, OVERALL) %>%
-                          filter(!is.na(GAME_ID)) %>%
-                          rename(HOME_TEAM = TEAM,
-                                 HOME_OFFENSE = OFFENSE,
-                                 HOME_DEFENSE = DEFENSE,
-                                 HOME_OVERALL = OVERALL),
-                  by = c("SEASON", "GAME_ID", "HOME_TEAM")) %>%
-        left_join(., weekly_team_rankings %>%
-                          filter(TYPE == 'adjusted') %>%
-                          mutate(WEEK = WEEK + 1) %>%
-                          select(-GAME_ID) %>%
-                          left_join(., weekly_team_rankings %>%
-                                            filter(TYPE == 'raw') %>%
-                                            select(SEASON, GAME_ID, WEEK, TEAM),
-                                    by = c("SEASON", "WEEK", "TEAM")) %>%
-                          select(SEASON, GAME_ID, TEAM, OFFENSE, DEFENSE, OVERALL) %>%
-                          filter(!is.na(GAME_ID)) %>%
-                          rename(AWAY_TEAM = TEAM,
-                                 AWAY_OFFENSE = OFFENSE,
-                                 AWAY_DEFENSE = DEFENSE,
-                                 AWAY_OVERALL = OVERALL),
-                  by = c("SEASON", "GAME_ID", "AWAY_TEAM")) %>%
-        filter(HOME_DIVISION == 'fbs' & AWAY_DIVISION == 'fbs')
 
-points_model = games_elo_and_efficiency %>%
-        filter(SEASON < 2019) %>%
-        filter(!is.na(HOME_OVERALL) & !is.na(AWAY_OVERALL)) %>%
-        mutate(HOME_OVERALL = HOME_OVERALL * 100,
-               AWAY_OVERALL = AWAY_OVERALL * 100) %>%
-        mutate(HOME_OVERALL_DIFF = HOME_OVERALL - AWAY_OVERALL,
-               HOME_ELO_DIFF = HOME_PREGAME_ELO - AWAY_PREGAME_ELO) %>%
-        nest() %>%
-        mutate(lm = map(data,
-                        ~ lm(HOME_MARGIN ~ HOME_ELO_DIFF + HOME_OVERALL_DIFF,
-                             data = .x))) %>%
-        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
-        mutate(glanced = map(lm, glance))
+ # pluck(nested_lags_both, "lm", 1) %>%
+ #        predict(., newdata = nested_lags_both %>%
+ #                        select(data) %>% 
+ #                        unnest() %>% 
+ #                        filter(SEASON == 2021) %>% 
+ #                        select(SEASON, WEEK, TEAM, OVERALL, ELO) %>% 
+ #                        rename(PREVIOUS_OVERALL = OVERALL, 
+ #                               PREVIOUS_ELO = ELO) %>%
+ #                        mutate(PREVIOUS_ELO = PREVIOUS_ELO - 1520),
+ #                interval = 'predict') %>%
+ #        bind_cols(newdata = nested_lags_both %>%
+ #                        select(data) %>% 
+ #                        unnest() %>% 
+ #                        filter(SEASON == 2021) %>% 
+ #                        select(SEASON, WEEK, TEAM, OVERALL, ELO) %>% 
+ #                        rename(PREVIOUS_OVERALL = OVERALL, 
+ #                               PREVIOUS_ELO = ELO) %>%
+ #                        mutate(PREVIOUS_ELO = PREVIOUS_ELO - 1520),
+ #                  .) %>%
+ #        mutate_if(is.numeric, round, 2) %>%
+ #        select(TEAM, fit, lwr, upr) %>%
+ #        arrange(desc(fit))
 
-points_model %>%
-        select(glanced) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 2)
-
-points_model %>%
-        select(tidied) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 2)
-                        
 ```
 
-Translate overall into Elo rating.
+Based on this, we can convert efficiency into Elo ratings and evaluate whether it helps in predicting games and simulating seasons.
 
-```{r convert overall to elo rating}
+## Adding Recruiting
 
-adjusted_team_weekly_rankings %>%
-        filter(WEEK == 0) %>%
-        mutate(OVERALL = OVERALL * 100) %>%
-        mutate(OVERALL_ELO = 1520 + 12 * OVERALL) %>%
-        arrange(desc(OVERALL_ELO))
-        group_by(SEASON, TEAM) %>%
-        filter(WEEK == max(WEEK)) %>%
+Since we're in the business of evaluating pieces to tinker with in adjusting Elo ratings, I'll also add in a team's composite recruiting scores from recent years. I'm regressing each team's season ending Elo rating on their previous season's Elo rating, their previous season efficiency measures, and their recruiting composite going into the season (which is based on previous years). I'll run this regression up until 2018, then I'll use the 2018-2021 seasons as a validation set.
+
+```{r create workflow and recipe}
+
+# 2022 season 
+future_season_rankings = expand.grid(TEAM = season_team_rankings  %>%
+                                  select(TEAM) %>%
+                                  distinct(TEAM) %>%
+                                  pull(),
+                               TYPE = c('raw', 'adjusted'),
+                          SEASON = 2022) %>%
+        as_tibble()
+
+# get efficiency and elo for historical + future season
+teams_data = season_team_rankings %>%
+        select(-MARGIN) %>%
+        bind_rows(., future_season_rankings) %>%
+        filter(TYPE == 'adjusted') %>%
+        select(-TYPE) %>%
+        # add in season end elo ratings
         left_join(.,
                   team_elo_ratings %>%
                           group_by(SEASON, TEAM) %>%
@@ -596,235 +866,397 @@ adjusted_team_weekly_rankings %>%
                           mutate(WEEK = row_number()) %>%
                           mutate(LAST_GAME = GAME_DATE == max(GAME_DATE)) %>%
                           filter(LAST_GAME ==T) %>%
-                          select(SEASON, TEAM, POSTGAME_ELO),
-                  by = c("SEASON", "TEAM")) 
+                          select(SEASON, TEAM, POSTGAME_ELO) %>%
+                          rename(ELO = POSTGAME_ELO),
+                  by = c("SEASON", "TEAM")) %>%
+        # add in season recruiting data
+        left_join(., 
+                  recruiting %>%
+                          select(TEAM, SEASON, RECRUITING_SCORE),
+                  by = c("SEASON", "TEAM")) %>%
+        arrange(SEASON, TEAM) %>%
+        group_by(TEAM) %>%
+        mutate(PREVIOUS_OVERALL = lag(OVERALL, 1),
+               PREVIOUS_OFFENSE = lag(OFFENSE, 1),
+               PREVIOUS_DEFENSE = lag(DEFENSE, 1),
+               PREVIOUS_ELO = lag(ELO, 1)) %>%
+        ungroup() %>%
+        filter(SEASON > 2007)
 
+# split into training and test
+teams_train  = teams_data %>%
+        filter(SEASON < 2018)
+
+teams_valid = teams_data %>%
+        filter(SEASON >=2018 & SEASON < 2022)
+
+teams_test = teams_data %>%
+        filter(SEASON == 2022)
+
+# create recipe
+teams_recipe =      
+        recipe(ELO ~.,
+               data = teams_train) %>%
+        update_role(all_predictors(),
+                    new_role = "id") %>%
+        update_role(PREVIOUS_OFFENSE,
+                    PREVIOUS_DEFENSE,
+                    PREVIOUS_ELO,
+                    RECRUITING_SCORE,
+                    new_role = 'predictor') %>%
+        # manual missingness
+        step_mutate(RECRUITING_SCORE = replace_na(RECRUITING_SCORE, 0),
+                    PREVIOUS_ELO = replace_na(PREVIOUS_ELO, 1200),
+                    PREVIOUS_OFFENSE = replace_na(PREVIOUS_OFFENSE,-0.1),
+                    PREVIOUS_DEFENSE = replace_na(PREVIOUS_DEFENSE, -0.1)) %>%
+        step_normalize(all_predictors())
+
+# linear model
+lm_mod = linear_reg(mode = "regression",
+                    engine = "lm")
+
+# create workflow
+teams_workflow = workflow() %>%
+        add_recipe(teams_recipe) %>%
+        add_model(lm_mod)
+        
 ```
 
-## Team Rankings and Predicting Games
+I'm using four features to model each team's Elo rating in season $t$, with the features using information from seasons prior to $t$. I normalized each of these features to indicate the effect of a standard deviation change on next season's Elo rating. 
 
-Ultimately, the real test of these measures is to figure out their efficacy in predicting games.
-
-```{r fit a model}
-
-weekly_ratings_and_outcomes = ppa_data %>%
-        select(SEASON, GAME_ID, WEEK, HOME, AWAY) %>%
-        distinct() %>%
-        arrange(SEASON, WEEK) %>%
-        left_join(., games_raw %>%
-                          select(GAME_ID, NEUTRAL_SITE, HOME_POINTS, AWAY_POINTS),
-                  by = c("GAME_ID")) %>%
-        left_join(., weekly_team_rankings %>%
-                          mutate(WEEK = WEEK +1) %>%
-                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
-                          rename(HOME = TEAM,
-                                 HOME_POWER = MARGIN,
-                                 HOME_OFF_POWER = OFFENSE,
-                                 HOME_DEF_POWER = DEFENSE),
-                  by = c("SEASON", "WEEK", "HOME")) %>%
-        arrange(SEASON, WEEK) %>%
-        left_join(., weekly_team_rankings %>%
-                          mutate(WEEK = WEEK +1) %>%
-                          select(SEASON, WEEK, TEAM, MARGIN, OFFENSE, DEFENSE) %>%
-                          rename(AWAY = TEAM,
-                                 AWAY_POWER = MARGIN,
-                                 AWAY_OFF_POWER = OFFENSE,
-                                 AWAY_DEF_POWER = DEFENSE),
-                  by = c("SEASON", "WEEK", "AWAY")) %>%
-        mutate(HOME_SCORE_DIFF = HOME_POINTS - AWAY_POINTS) %>%
-        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
-               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
-        filter(!is.na(HOME_OFF_POWER_DIFF))
-
-score_models = weekly_ratings_and_outcomes %>%
-        filter(SEASON > 2007 & SEASON < 2013) %>%
-        nest(-SEASON) %>%
-        mutate(lm = map(data, 
-                        ~ lm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
-                             data = .x))) %>%
-        mutate(tidied = map(lm, tidy, se='robust', conf.int=T)) %>%
-        mutate(glanced = map(lm, glance)) %>%
-        mutate(augmented = map2(lm, data, 
-                                ~ augment(.x) %>%
-                                       bind_cols(., .y %>%
-                                                         select(-HOME_SCORE_DIFF,
-                                                                -NEUTRAL_SITE,
-                                                                -HOME_OFF_POWER_DIFF,
-                                                                -HOME_DEF_POWER_DIFF))))
-
-score_models %>%
-        select(SEASON, tidied) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 2) %>%
-        ggplot(., aes(x=SEASON,
-                      y=estimate,
-                      ymin = conf.low,
-                      ymax = conf.high))+
-        geom_pointrange()+
-        facet_wrap(term ~.,
-                   ncol = 2,
-                   scales = "free")+
-        geom_hline(yintercept = 0)+
-        theme_bw()
-
+```{r fit workflow on training set}
+# fit the model
+teams_workflow %>%
+        fit(teams_train) %>%
+        extract_fit_engine() %>%
+        tidy() %>%
+        mutate_if(is.numeric, round, 2)
 ```
 
+I'll then predict the Elo ratings for next season as the initial values.
 
-```{r get the one model}
+```{r predict}
 
-score_models %>%
-        select(SEASON, glanced) %>%
-        unnest()
+adjusted_teams_valid = 
+        teams_workflow %>%
+        fit(teams_train) %>%
+        augment(bind_rows(teams_train %>%
+                                  mutate(dataset = 'train'),
+                          teams_valid %>%
+                                  mutate(dataset = 'valid'),
+                          teams_test %>%
+                                  mutate(dataset = 'test'))) %>%
+        select(SEASON, dataset, TEAM, starts_with("PREVIOUS"),
+               ELO, .pred) %>%
+        mutate_if(is.numeric, round, 3) 
 
-score_models %>%
-        select(SEASON, augmented) %>%
-        unnest() %>%
-        mutate_if(is.numeric, round, 2) %>%
-        select(SEASON, HOME, AWAY, HOME_SCORE_DIFF, .fitted) %>%
-        ggplot(., aes(x=.fitted,
-                      label = paste(HOME, AWAY, SEASON),
-                      y=HOME_SCORE_DIFF))+
+adjusted_teams_valid %>%
+        filter(dataset != 'test') %>%
+        ggplot(., aes(x=.pred, 
+                      label = paste(TEAM, SEASON),
+                      y=ELO))+
         geom_point()+
         geom_text(check_overlap = T,
-                  vjust = -1,
-                  size = 3)+
+                  vjust = -1)+
         theme_phil()+
-        geom_vline(xintercept=0,
-                   linetype = 'dashed')+
-        geom_hline(yintercept = 0,
-                   linetype = 'dashed')+
-        xlab("Predicted Home Margin")+
-        ylab("Actual Home Margin")
+        facet_wrap(dataset ~.)+
+        geom_abline(slope = 1,
+                    intercept =0,
+                    linetype = 'dashed')
 
 ```
 
-```{r fit lm and glm, include=F}
+Compute and compare Elo updated from here.
 
-library(broom.mixed)
+```{r comptue elo ratings from adjusted starting values}
 
-score_models =  weekly_ratings_and_outcomes %>%
-        filter(SEASON > 2007 & SEASON < 2013) %>%
-        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
-               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
-        filter(!is.na(HOME_OFF_POWER_DIFF)) %>%
-        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
-                                    TRUE ~ 'no'),
-                                 levels = c("no", "yes"))) %>%
+# function to turn teams and elo ratings into a list
+teams_to_list = function(x) {
+        
+        setNames(unlist(x$ELO) %>%
+                                          split(., seq(nrow(x))),
+                                  rownames(x))
+}
+
+team_seasons_to_list = function(x) {
+        
+        setNames(unlist(x$SEASON) %>%
+                                          split(., seq(nrow(x))),
+                                  rownames(x))
+}
+
+seasons = seq(2018, 2021)
+
+assess_metrics = metric_set(yardstick::mn_log_loss,
+                           yardstick::accuracy)
+
+
+compare = foreach(i = 1:length(seasons),
+                  .combine = bind_rows) %do% {
+                
+                # set input season
+        input_season = seasons[i]
+        
+        # get computed elo as input
+        adjusted_teams_elo = adjusted_teams_valid %>%
+                filter(SEASON == input_season) %>%
+                select(TEAM, .pred) %>%
+                rename(ELO = .pred) %>%
+                column_to_rownames("TEAM")
+                
+        # fbs teams
+        adjusted_teams = teams_to_list(adjusted_teams_elo)
+        
+        # get previous fcs teams
+        actual_teams_elo = elo_games$team_outcomes %>%
+                filter(SEASON < input_season) %>%
+                group_by(TEAM) %>%
+                filter(GAME_DATE == max(GAME_DATE)) %>%
+                slice_max(POSTGAME_ELO, n=1, with_ties = F) %>%
+                ungroup() %>%
+                select(TEAM, POSTGAME_ELO) %>%
+                rename(ELO = POSTGAME_ELO) %>%
+                column_to_rownames("TEAM")
+        
+        # get season of last observed
+        team_seasons = elo_games$team_outcomes %>%
+                filter(SEASON < input_season) %>%
+                group_by(TEAM) %>%
+                slice_max(., order_by = SEASON, n=1, with_ties =F) %>%
+                ungroup() %>%
+                select(TEAM, SEASON) %>%
+                column_to_rownames("TEAM")
+        
+        # create dictionaries
+        actual_teams = teams_to_list(actual_teams_elo)
+        actual_team_seasons = team_seasons_to_list(team_seasons)
+        
+        # now get the elo ratings based on this training set
+        games_with_actual = calc_elo_ratings(games %>%
+                                            filter(SEASON ==input_season),
+                                        teams = actual_teams,
+                                        team_seasons = actual_team_seasons,
+                                        home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = selected_pars$reversion,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose = T)
+        
+        # get actual
+        actual = games_with_actual %$% 
+                game_outcomes %>%
+                mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 'win' ~ 'yes',
+                                            TRUE ~ 'no'),
+                                         levels = c("no", "yes"))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB > .5 ~ 'yes',
+                                                    TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                mutate(yes = HOME_PROB) %>%
+                group_by(SEASON) %>%
+                assess_metrics(truth = HOME_WIN,
+                                         yes,
+                                    estimate = HOME_PRED,
+                               event_level = 'second') %>%
+                mutate(type = 'elo')
+
+
+        # games with adjusted
+        # now get the elo ratings based on this training set
+        games_with_adjusted = calc_elo_ratings(games %>%
+                                            filter(SEASON ==input_season),
+                                        teams = c(adjusted_teams, actual_teams[!(names(actual_teams) %in% names(adjusted_teams))]),
+                                        team_seasons = actual_team_seasons,
+                                        home_field_advantage = selected_pars$home_field_advantage,
+                                  reversion = 0,
+                                  k = selected_pars$k,
+                                  v = selected_pars$v,
+                                  verbose = T)
+        
+        # get actual
+        adjusted = games_with_adjusted %$% 
+                game_outcomes %>%
+                mutate(HOME_WIN = factor(case_when(HOME_OUTCOME == 'win' ~ 'yes',
+                                            TRUE ~ 'no'),
+                                         levels = c("no", "yes"))) %>%
+                mutate(HOME_PRED = factor(case_when(HOME_PROB > .5 ~ 'yes',
+                                                    TRUE ~ 'no'),
+                                          levels = c("no", "yes"))) %>%
+                mutate(yes = HOME_PROB) %>%
+                group_by(SEASON) %>%
+                assess_metrics(truth = HOME_WIN,
+                                         yes,
+                                    estimate = HOME_PRED,
+                               event_level = 'second') %>%
+                mutate(type = 'adjusted elo')
+        
+        bind_rows(actual,
+                  adjusted)
+        
+                  }
+
+compare %>%
+        spread(.metric, .estimate) %>%
+        mutate_if(is.numeric, round, 3)
+        
+```
+
+## Simulating via Elo, Efficiency, and Recruiting
+
+Now, I'll simulate each season based on the adjusted vs actual going into the season.
+
+```{r set up for simulation}
+
+# for parallelization
+library(future.apply)
+plan(multisession, workers = 7)
+
+# initial season
+initial_season = 2022
+
+# set initial games
+initial_games = games %>%
+        filter(SEASON < initial_season)
+
+# set of pars
+elo_pars1 = tibble(k = 35,
+                  v = 400,
+                  reversion = 0.2,
+                  home_field_advantage = 75,
+                  recruiting_weight =0)
+
+# get fbs teams
+teams = elo_games$team_outcomes %>%
+        filter(SEASON == initial_season) %>%
+        filter(DIVISION == 'fbs') %>%
+        distinct(TEAM) %>%
+        arrange(TEAM)
+
+# train points model
+points_model = elo_games$game_outcomes %>%
+        filter(SEASON >=1970) %>% 
+        filter(SEASON < initial_season) %>%
+        mutate(HOME_ELO_DIFF = case_when(NEUTRAL_SITE == F ~ 
+                                                 HOME_PREGAME_ELO + 
+                                                 elo_pars$home_field_advantage -
+                                                 AWAY_PREGAME_ELO,
+                                         TRUE ~ HOME_PREGAME_ELO - AWAY_PREGAME_ELO)) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
         nest() %>%
-        mutate(lm = map(data, 
-                        ~ stan_glm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
-                             data = .x))) %>%
-        mutate(glm = map(data,
-                         ~ stan_glm(HOME_WIN ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
-                                    family = stats::binomial,
-                                    data = .x))) %>%
-        mutate(tidied_lm = map(lm, tidy, se='robust', conf.int=T)) %>%
-        mutate(tidied_glm = map(glm, tidy, se='robust', conf.int=T))
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF +0,
+                                   data = .x))) %>%
+        pluck("lm",1)
+
+# functions
+source(here::here("functions", "calc_elo_ratings.R"))
+source(here::here("functions", "sim_elo_ratings.R"))
+source(here::here("functions", "sim_rest_of_season.R"))
 
 ```
 
-Now predict the remaining seasons.
 
-```{r predict 2014 and 2015}
 
-library(rstan)
-library(rstanarm)
-library(rstantools)
-library(tidybayes)
+```{r set up for adjusted elo simulations}
 
-score_preds = score_models %>%
-        mutate(preds = map(lm,
-                           ~ predict(.,
-                                               newdata = weekly_ratings_and_outcomes %>%
-                                                       filter(SEASON == 2014 | SEASON == 2015)) %>%
-                                   as_tibble() %>%
-                                   set_names(".pred") %>%
-                                   bind_cols(.,
-                                              weekly_ratings_and_outcomes %>%
-                                                       filter(SEASON == 2014 | SEASON == 2015))))
+# get computed elo as input
+adjusted_teams_elo = adjusted_teams_valid %>%
+        filter(SEASON == initial_season) %>%
+        select(TEAM, .pred) %>%
+        rename(ELO = .pred) %>%
+        column_to_rownames("TEAM")
+                
+# fbs teams
+adjusted_teams = teams_to_list(adjusted_teams_elo)
 
-```
-
-```{r evaluate preds}
-
-score_preds %>%
-        select(preds) %>%
-        unnest(preds) %>%
-        ggplot(., aes(x= .pred,
-                      label = paste(HOME, AWAY),
-                      y= HOME_SCORE_DIFF))+
-        geom_point()+
-        geom_text(check_overlap = T,
-                  vjust = -1,
-                  size = 3)+
-        theme_phil()+
-        facet_wrap(SEASON ~.) + 
-        stat_cor(p.accuracy = 0.01) +
-        geom_vline(xintercept = 0,
-                   linetype = 'dashed')+
-        geom_hline(yintercept =0,
-                   linetype = 'dashed')
+# get previous fcs teams
+actual_teams_elo = elo_games$team_outcomes %>%
+        filter(SEASON < initial_season) %>%
+        group_by(TEAM) %>%
+        filter(GAME_DATE == max(GAME_DATE)) %>%
+        slice_max(POSTGAME_ELO, n=1, with_ties = F) %>%
+        ungroup() %>%
+        select(TEAM, POSTGAME_ELO) %>%
+        rename(ELO = POSTGAME_ELO) %>%
+        column_to_rownames("TEAM")
+        
+# get season of last observed
+team_seasons = elo_games$team_outcomes %>%
+        filter(SEASON < initial_season) %>%
+        group_by(TEAM) %>%
+        slice_max(., order_by = SEASON, n=1, with_ties =F) %>%
+        ungroup() %>%
+        select(TEAM, SEASON) %>%
+        column_to_rownames("TEAM")
+        
+# create dictionaries
+actual_teams = teams_to_list(actual_teams_elo)
+actual_team_seasons = team_seasons_to_list(team_seasons)
 
 ```
 
-```{r how well does this do in predicting national championships}
 
-score_preds %>%
-        select(preds) %>%
-        unnest(preds) %>%
-        left_join(.,
-                  games_raw %>%
-                          select(GAME_ID, SEASON_TYPE),
-                  by = c("GAME_ID")) %>%
-        filter(SEASON_TYPE == 'postseason') %>%
-        select(SEASON, HOME, AWAY, .pred, HOME_POWER, AWAY_POWER, HOME_SCORE_DIFF) %>%
-        mutate_if(is.numeric, round, 1)
+```{r simulate}
 
-```
+# elo_initial = list(teams = actual_teams,
+#                    team_seasons = actual_team_seasons)
+# 
+# # simulate season from the start
+# set.seed(11)
+# actual_season_simulations = sim_rest_of_season(games,
+#                                         season = initial_season,
+#                                         elo_initial = elo_initial,
+#                                         elo_pars = elo_pars1,
+#                                         nsims = 100,
+#                                         sim_start_week = 0,
+#                                         season_start_only = T,
+#                                         aggregate = T,
+#                                         points_model = points_model)
+# 
+# adjusted_season_simulations %$%
+#         team_outcomes %>% 
+#         group_by(TEAM) %>% 
+#         filter(GAME_DATE == max(GAME_DATE)) %>% 
+#         select(SEASON, TEAM, POSTGAME_ELO) %>%
+#         arrange(desc(POSTGAME_ELO))
 
-```{r now retrain the model}
+# now adjusted
+# get computed elo as input
+adjusted_teams_elo = adjusted_teams_valid %>%
+        filter(SEASON == input_season) %>%
+        select(TEAM, .pred) %>%
+        rename(ELO = .pred) %>%
+        column_to_rownames("TEAM")
+        
+# fbs teams
+adjusted_teams = teams_to_list(adjusted_teams_elo)
+elo_initial = list(teams = c(adjusted_teams, actual_teams[!(names(actual_teams) %in% names(adjusted_teams))]),
+                   team_seasons = actual_team_seasons)
 
-score_models =  weekly_ratings_and_outcomes %>%
-        filter(SEASON > 2007 & SEASON < 2017) %>%
-        mutate(HOME_OFF_POWER_DIFF = HOME_OFF_POWER - AWAY_OFF_POWER,
-               HOME_DEF_POWER_DIFF = HOME_DEF_POWER - AWAY_DEF_POWER) %>%
-        filter(!is.na(HOME_OFF_POWER_DIFF)) %>%
-        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
-                                    TRUE ~ 'no'),
-                                 levels = c("no", "yes"))) %>%
-        nest() %>%
-        mutate(lm = map(data, 
-                        ~ stan_glm(HOME_SCORE_DIFF ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
-                             data = .x))) %>%
-        mutate(glm = map(data,
-                         ~ stan_glm(HOME_WIN ~ HOME_OFF_POWER_DIFF + HOME_DEF_POWER_DIFF + NEUTRAL_SITE,
-                                    family = stats::binomial,
-                                    data = .x))) %>%
-        mutate(tidied_lm = map(lm, tidy, se='robust', conf.int=T)) %>%
-        mutate(tidied_glm = map(glm, tidy, se='robust', conf.int=T))
+# elo pars
+elo_pars2 = tibble(k = 35,
+                  v = 400,
+                  reversion = 0.1,
+                  home_field_advantage = 75,
+                  recruiting_weight =0)
 
-```
+# simulate season from the start
+set.seed(11)
+adjusted_season_simulations = sim_rest_of_season(games,
+                                        season = initial_season,
+                                        elo_initial = elo_initial,
+                                        elo_pars = elo_pars2,
+                                        nsims = 2022,
+                                        sim_start_week = 0,
+                                        season_start_only = T,
+                                        aggregate = T,
+                                        points_model = points_model)
 
-```{r predict new years}
-
-score_preds = score_models %>%
-        mutate(preds = map(lm,
-                           ~ predict(.,
-                                               newdata = weekly_ratings_and_outcomes %>%
-                                                       filter(SEASON == 2018 | SEASON == 2019)) %>%
-                                   as_tibble() %>%
-                                   set_names(".pred") %>%
-                                   bind_cols(.,
-                                              weekly_ratings_and_outcomes %>%
-                                                       filter(SEASON == 2018 | SEASON == 2019))))
-
-```
-
-```{r score preds}
-
-score_preds %>%
-        select(preds) %>%
-        unnest()
+adjusted_season_simulations %$%
+        team_outcomes %>% 
+        group_by(TEAM) %>% 
+        filter(GAME_DATE == max(GAME_DATE)) %>% 
+        select(SEASON, TEAM, POSTGAME_ELO) %>%
+        arrange(desc(POSTGAME_ELO))
 
 ```
 
