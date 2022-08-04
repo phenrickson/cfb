@@ -445,8 +445,6 @@ plot_elo_historical_team(
 
 ```
 
-
-
 ## Biggest Season Changes in Elo
 
 Which teams have changed the most between seasons?

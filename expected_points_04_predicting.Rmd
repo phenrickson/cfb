@@ -44,6 +44,7 @@ set_flextable_defaults(theme_fun = theme_alafoli,
                        padding.left = 6,
                        padding.right = 6,
                        background.color = "white")
+
 ```
 
 ```{r connect to snowflake}
@@ -216,8 +217,6 @@ source(here::here("functions/calc_elo_ratings.R"))
 source(here::here("functions", "simulateX.R"))
 source(here::here("functions", "sim_game_margin.R"))
 source(here::here("functions", "sim_elo_ratings.R"))
-
-# with recruiting
 source(here::here("functions", "calc_elo_ratings.R"))
 source(here::here("functions", "sim_elo_ratings.R"))
 source(here::here("functions", "sim_rest_of_season.R"))
@@ -835,7 +834,7 @@ pluck(nested_lags_both,
 
 ```
 
-Based on this, we can convert efficiency into Elo ratings and evaluate whether it helps in predicting games and simulating seasons.
+Based on this, we can use efficiency to adjust Elo rating to see whether it improves our ability to predict games and simulate seasons.
 
 ## Adding Recruiting
 
@@ -844,7 +843,7 @@ Since we're in the business of evaluating pieces to tinker with in adjusting Elo
 ```{r create workflow and recipe}
 
 # 2022 season 
-future_season_rankings = expand.grid(TEAM = season_team_rankings  %>%
+future_seasons = expand.grid(TEAM = season_team_rankings  %>%
                                   select(TEAM) %>%
                                   distinct(TEAM) %>%
                                   pull(),
@@ -855,7 +854,7 @@ future_season_rankings = expand.grid(TEAM = season_team_rankings  %>%
 # get efficiency and elo for historical + future season
 teams_data = season_team_rankings %>%
         select(-MARGIN) %>%
-        bind_rows(., future_season_rankings) %>%
+        bind_rows(., future_seasons) %>%
         filter(TYPE == 'adjusted') %>%
         select(-TYPE) %>%
         # add in season end elo ratings
@@ -922,18 +921,20 @@ teams_workflow = workflow() %>%
         
 ```
 
-I'm using four features to model each team's Elo rating in season $t$, with the features using information from seasons prior to $t$. I normalized each of these features to indicate the effect of a standard deviation change on next season's Elo rating. 
+I'm using four features from season $t-1, t-2...$ to model each team's Elo rating in season $t$. I normalized each of these features to indicate the effect of a standard deviation change on next season's Elo rating. The linear model indicates that a perfectly average FBS team will be set at 1512. The coefficient for each term is the effect of a one standard deviation increase. This means that a one standard deviation increase in Elo is worth about 90 Elo for next season, a one standard deviation increase in recruiting is worth 50 Elo, and a one standard deviation increase in efficiency for offense and defense is worth about 30 Elo.
 
 ```{r fit workflow on training set}
+
 # fit the model
 teams_workflow %>%
         fit(teams_train) %>%
         extract_fit_engine() %>%
         tidy() %>%
         mutate_if(is.numeric, round, 2)
+
 ```
 
-I'll then predict the Elo ratings for next season as the initial values.
+I'll then predict the Elo ratings for next season using information from past seasons.
 
 ```{r predict}
 
@@ -966,7 +967,7 @@ adjusted_teams_valid %>%
 
 ```
 
-Compute and compare Elo updated from here.
+I can then run each season, with the adjusted Elo ratings being the starting point adjusted based on recruiting and the previous season's efficiency.
 
 ```{r comptue elo ratings from adjusted starting values}
 
@@ -986,7 +987,6 @@ team_seasons_to_list = function(x) {
 }
 
 seasons = seq(2018, 2021)
-
 assess_metrics = metric_set(yardstick::mn_log_loss,
                            yardstick::accuracy)
 
@@ -994,7 +994,7 @@ assess_metrics = metric_set(yardstick::mn_log_loss,
 compare = foreach(i = 1:length(seasons),
                   .combine = bind_rows) %do% {
                 
-                # set input season
+        # set input season
         input_season = seasons[i]
         
         # get computed elo as input
@@ -1100,9 +1100,30 @@ compare %>%
         
 ```
 
+Overall, we're about the same, slightly better on log loss for each season while the accuracy is slightly tends to bounce between seasons.
+
+```{r predict test set after fitting on valid}
+
+adjusted_teams_test =
+        teams_workflow %>%
+        fit(bind_rows(teams_train,
+                      teams_valid)) %>%
+        augment(bind_rows(teams_train %>%
+                                  mutate(dataset = 'train'),
+                          teams_valid %>%
+                                  mutate(dataset = 'valid'),
+                          teams_test %>%
+                                  mutate(dataset = 'test'))) %>%
+        select(SEASON, dataset, TEAM, starts_with("PREVIOUS"),
+               ELO, .pred) %>%
+        mutate_if(is.numeric, round, 3)
+
+```
+
+
 ## Simulating via Elo, Efficiency, and Recruiting
 
-Now, I'll simulate each season based on the adjusted vs actual going into the season.
+Now, I'll simulate the 2021 season using the standard Elo ratings vs the adjusted Elo ratings.
 
 ```{r set up for simulation}
 
@@ -1111,14 +1132,14 @@ library(future.apply)
 plan(multisession, workers = 7)
 
 # initial season
-initial_season = 2022
+initial_season = 2021
 
 # set initial games
 initial_games = games %>%
         filter(SEASON < initial_season)
 
 # set of pars
-elo_pars1 = tibble(k = 35,
+elo_pars = tibble(k = 35,
                   v = 400,
                   reversion = 0.2,
                   home_field_advantage = 75,
@@ -1197,36 +1218,143 @@ actual_team_seasons = team_seasons_to_list(team_seasons)
 
 ```{r simulate}
 
-# elo_initial = list(teams = actual_teams,
-#                    team_seasons = actual_team_seasons)
-# 
-# # simulate season from the start
-# set.seed(11)
-# actual_season_simulations = sim_rest_of_season(games,
-#                                         season = initial_season,
-#                                         elo_initial = elo_initial,
-#                                         elo_pars = elo_pars1,
-#                                         nsims = 100,
-#                                         sim_start_week = 0,
-#                                         season_start_only = T,
-#                                         aggregate = T,
-#                                         points_model = points_model)
-# 
-# adjusted_season_simulations %$%
-#         team_outcomes %>% 
-#         group_by(TEAM) %>% 
-#         filter(GAME_DATE == max(GAME_DATE)) %>% 
-#         select(SEASON, TEAM, POSTGAME_ELO) %>%
-#         arrange(desc(POSTGAME_ELO))
+elo_initial = list(teams = actual_teams,
+                   team_seasons = actual_team_seasons)
 
-# now adjusted
+# simulate season from the start
+set.seed(11)
+elo_season_simulations = sim_rest_of_season(games,
+                                        season = initial_season,
+                                        elo_initial = elo_initial,
+                                        elo_pars = elo_pars,
+                                        nsims = 1000,
+                                        sim_start_week = 0,
+                                        season_start_only = T,
+                                        aggregate = F,
+                                        points_model = points_model)
+
+elo_win_simulations =
+        elo_season_simulations %$%
+        team_outcomes %>%
+        left_join(.,
+                  games %>%
+                          select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                  by = c("GAME_ID")) %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+        group_by(SEASON, .id, TEAM, SIM_OUTCOME) %>%
+        count() %>%
+        group_by(SEASON, TEAM, SIM_OUTCOME) %>%
+        summarize(mean = mean(n),
+                  median = median(n),
+                  .groups = 'drop') %>%
+        select(-median) %>%
+        spread(SIM_OUTCOME, mean) %>%
+        select(SEASON, TEAM, win, loss) %>%
+        mutate_if(is.numeric, replace_na, 0) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        arrange(desc(win))
+
+elo_game_simulations = games %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+        filter(SEASON == initial_season) %>%
+        left_join(.,
+        elo_season_simulations %$%
+        game_outcomes %>%
+                     group_by(GAME_ID,
+                              SIM_FROM_WEEK,
+                              home_field_advantage,
+                             # recruiting_weight,
+                              reversion,
+                              k, v) %>%
+                     mutate(HOME_SIM_PRED = case_when(HOME_SIM_MARGIN >0 ~ 1,
+                                                      TRUE ~ 0)) %>%
+                     summarize(HOME_PREGAME_ELO = mean(HOME_PREGAME_ELO),
+                               AWAY_PREGAME_ELO = mean(AWAY_PREGAME_ELO),
+                               HOME_POSTGAME_ELO = mean(HOME_POSTGAME_ELO),
+                               AWAY_POSTGAME_ELO = mean(AWAY_POSTGAME_ELO),
+                               home_wins = sum(HOME_SIM_PRED),
+                               home_margin = mean(HOME_SIM_MARGIN),
+                               n = n(),
+                               .groups = 'drop') %>%
+                     mutate(HOME_SIM_PROB = home_wins / n) %>%
+                     mutate(HOME_SIM_MARGIN = home_margin) %>%
+                     select(GAME_ID,
+                            HOME_PREGAME_ELO,
+                            AWAY_PREGAME_ELO,
+                            HOME_POSTGAME_ELO,
+                            AWAY_POSTGAME_ELO,
+                            HOME_SIM_PROB,
+                            HOME_SIM_MARGIN,
+                            SIM_FROM_WEEK,
+                            home_field_advantage,
+                            #recruiting_weight,
+                            reversion, k, v),
+             by = "GAME_ID")
+
+elo_team_simulations = elo_game_simulations %>%
+                        select(SIM_FROM_WEEK,
+                               GAME_ID,
+                               SEASON,
+                               SEASON_TYPE,
+                               WEEK,
+                               GAME_DATE,
+                               HOME_TEAM,
+                               HOME_CONFERENCE,
+                               HOME_DIVISION,
+                               HOME_SIM_PROB,
+                               HOME_SIM_MARGIN,
+                               HOME_PREGAME_ELO,
+                               HOME_POSTGAME_ELO,
+                               AWAY_TEAM,
+                               home_field_advantage,
+                           #    recruiting_weight,
+                               reversion,
+                               k,
+                               v
+                        ) %>%
+                        rename(OPPONENT = AWAY_TEAM) %>%
+                        set_names(., gsub("HOME_", "", names(.))) %>%
+                        bind_rows(.,
+                                  elo_game_simulations %>%
+                                          mutate(AWAY_SIM_PROB = 1-HOME_SIM_PROB,
+                                                 AWAY_SIM_MARGIN = -HOME_SIM_MARGIN) %>%
+                                          select(SIM_FROM_WEEK,
+                                                 GAME_ID,
+                                                 SEASON,
+                                                 SEASON_TYPE,
+                                                 WEEK,
+                                                 GAME_DATE,
+                                                 AWAY_TEAM,
+                                                 AWAY_CONFERENCE,
+                                                 AWAY_DIVISION,
+                                                 AWAY_SIM_PROB,
+                                                 AWAY_SIM_MARGIN,
+                                                 AWAY_PREGAME_ELO,
+                                                 AWAY_POSTGAME_ELO,
+                                                 HOME_TEAM,
+                                                 home_field_advantage,
+                                            #     recruiting_weight,
+                                                 reversion,
+                                                 k,
+                                                 v) %>%
+                                          rename(OPPONENT = HOME_TEAM) %>%
+                                          set_names(., gsub("AWAY_", "", names(.)))) %>%
+                        arrange(GAME_DATE)
+
+```
+
+
+```{r new chunj for adjusted}
+
 # get computed elo as input
 adjusted_teams_elo = adjusted_teams_valid %>%
         filter(SEASON == input_season) %>%
         select(TEAM, .pred) %>%
         rename(ELO = .pred) %>%
         column_to_rownames("TEAM")
-        
+
 # fbs teams
 adjusted_teams = teams_to_list(adjusted_teams_elo)
 elo_initial = list(teams = c(adjusted_teams, actual_teams[!(names(actual_teams) %in% names(adjusted_teams))]),
@@ -1235,7 +1363,7 @@ elo_initial = list(teams = c(adjusted_teams, actual_teams[!(names(actual_teams) 
 # elo pars
 elo_pars2 = tibble(k = 35,
                   v = 400,
-                  reversion = 0.1,
+                  reversion = 0,
                   home_field_advantage = 75,
                   recruiting_weight =0)
 
@@ -1245,18 +1373,290 @@ adjusted_season_simulations = sim_rest_of_season(games,
                                         season = initial_season,
                                         elo_initial = elo_initial,
                                         elo_pars = elo_pars2,
-                                        nsims = 2022,
+                                        nsims = 1000,
                                         sim_start_week = 0,
                                         season_start_only = T,
-                                        aggregate = T,
+                                        aggregate = F,
                                         points_model = points_model)
 
-adjusted_season_simulations %$%
-        team_outcomes %>% 
-        group_by(TEAM) %>% 
-        filter(GAME_DATE == max(GAME_DATE)) %>% 
-        select(SEASON, TEAM, POSTGAME_ELO) %>%
-        arrange(desc(POSTGAME_ELO))
+adjusted_win_simulations =
+        adjusted_season_simulations %$%
+        team_outcomes %>%
+        left_join(.,
+                  games %>%
+                          select(GAME_ID, CONFERENCE_CHAMPIONSHIP),
+                  by = c("GAME_ID")) %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+        group_by(SEASON, .id, TEAM, SIM_OUTCOME) %>%
+        count() %>%
+        group_by(SEASON, TEAM, SIM_OUTCOME) %>%
+        summarize(mean = mean(n),
+                  median = median(n),
+                  .groups = 'drop') %>%
+        select(-median) %>%
+        spread(SIM_OUTCOME, mean) %>%
+        select(SEASON, TEAM, win, loss) %>%
+        mutate_if(is.numeric, replace_na, 0) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        arrange(desc(win))
+
+adjusted_game_simulations = games %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP != T) %>%
+        filter(SEASON == initial_season) %>%
+        left_join(.,
+        adjusted_season_simulations %$%
+        game_outcomes %>%
+                     group_by(GAME_ID,
+                              SIM_FROM_WEEK,
+                              home_field_advantage,
+                             # recruiting_weight,
+                              reversion,
+                              k, v) %>%
+                     mutate(HOME_SIM_PRED = case_when(HOME_SIM_MARGIN >0 ~ 1,
+                                                      TRUE ~ 0)) %>%
+                     summarize(HOME_PREGAME_ELO = mean(HOME_PREGAME_ELO),
+                               AWAY_PREGAME_ELO = mean(AWAY_PREGAME_ELO),
+                               HOME_POSTGAME_ELO = mean(HOME_POSTGAME_ELO),
+                               AWAY_POSTGAME_ELO = mean(AWAY_POSTGAME_ELO),
+                               home_wins = sum(HOME_SIM_PRED),
+                               home_margin = mean(HOME_SIM_MARGIN),
+                               n = n(),
+                               .groups = 'drop') %>%
+                     mutate(HOME_SIM_PROB = home_wins / n) %>%
+                     mutate(HOME_SIM_MARGIN = home_margin) %>%
+                     select(GAME_ID,
+                            HOME_PREGAME_ELO,
+                            AWAY_PREGAME_ELO,
+                            HOME_POSTGAME_ELO,
+                            AWAY_POSTGAME_ELO,
+                            HOME_SIM_PROB,
+                            HOME_SIM_MARGIN,
+                            SIM_FROM_WEEK,
+                            home_field_advantage,
+                            #recruiting_weight,
+                            reversion, k, v),
+             by = "GAME_ID")
+
+team_simulations = adjusted_game_simulations %>%
+                        select(SIM_FROM_WEEK,
+                               GAME_ID,
+                               SEASON,
+                               SEASON_TYPE,
+                               WEEK,
+                               GAME_DATE,
+                               HOME_TEAM,
+                               HOME_CONFERENCE,
+                               HOME_DIVISION,
+                               HOME_SIM_PROB,
+                               HOME_SIM_MARGIN,
+                               HOME_PREGAME_ELO,
+                               HOME_POSTGAME_ELO,
+                               AWAY_TEAM,
+                               home_field_advantage,
+                           #    recruiting_weight,
+                               reversion,
+                               k,
+                               v
+                        ) %>%
+                        rename(OPPONENT = AWAY_TEAM) %>%
+                        set_names(., gsub("HOME_", "", names(.))) %>%
+                        bind_rows(.,
+                                  adjusted_game_simulations %>%
+                                          mutate(AWAY_SIM_PROB = 1-HOME_SIM_PROB,
+                                                 AWAY_SIM_MARGIN = -HOME_SIM_MARGIN) %>%
+                                          select(SIM_FROM_WEEK,
+                                                 GAME_ID,
+                                                 SEASON,
+                                                 SEASON_TYPE,
+                                                 WEEK,
+                                                 GAME_DATE,
+                                                 AWAY_TEAM,
+                                                 AWAY_CONFERENCE,
+                                                 AWAY_DIVISION,
+                                                 AWAY_SIM_PROB,
+                                                 AWAY_SIM_MARGIN,
+                                                 AWAY_PREGAME_ELO,
+                                                 AWAY_POSTGAME_ELO,
+                                                 HOME_TEAM,
+                                                 home_field_advantage,
+                                            #     recruiting_weight,
+                                                 reversion,
+                                                 k,
+                                                 v) %>%
+                                          rename(OPPONENT = HOME_TEAM) %>%
+                                          set_names(., gsub("AWAY_", "", names(.)))) %>%
+                        arrange(GAME_DATE)
 
 ```
+
+
+```{r actual wins}
+
+actual_wins = games %>% 
+        filter(SEASON == 2021) %>% 
+        filter(SEASON_TYPE == 'regular') %>% 
+        filter(CONFERENCE_CHAMPIONSHIP !=T) %>% 
+        group_by(HOME_TEAM) %>% 
+        mutate(HOME_WIN = case_when(HOME_POINTS > AWAY_POINTS ~ 'yes', TRUE ~ 'no')) %>% 
+        group_by(SEASON, HOME_TEAM, HOME_WIN) %>% 
+        count() %>% 
+        ungroup() %>%
+        spread(HOME_WIN, n) %>%
+        rename(TEAM = HOME_TEAM) %>%
+        mutate_if(is.numeric, replace_na, 0) %>%
+        bind_rows(.,
+                  games %>% 
+                        filter(SEASON == 2021) %>% 
+                        filter(SEASON_TYPE == 'regular') %>% 
+                        filter(CONFERENCE_CHAMPIONSHIP !=T) %>% 
+                        group_by(AWAY_TEAM) %>% 
+                        mutate(AWAY_WIN = case_when(AWAY_POINTS > HOME_POINTS ~ 'yes', TRUE ~ 'no')) %>% 
+                        group_by(SEASON, AWAY_TEAM, AWAY_WIN) %>% 
+                        count() %>% 
+                          ungroup() %>%
+                        spread(AWAY_WIN, n) %>%
+                        rename(TEAM = AWAY_TEAM) %>%
+                        mutate_if(is.numeric, replace_na, 0) 
+                  ) %>%
+        group_by(SEASON, TEAM) %>%
+        summarize(actual_win = sum(yes),
+                  actual_loss = sum(no),
+                  .groups = 'drop') 
+
+# compare wins
+adjusted_win_simulations %>%
+        left_join(.,
+                  actual_wins,
+                  by = c("SEASON", "TEAM")) %>%
+        left_join(., team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(SEASON) %>%
+        yardstick::rmse(truth = actual_win,
+                        estimate = win) %>%
+        mutate_if(is.numeric, round, 2) %>%
+        mutate(method = 'adjusted elo') %>%
+        bind_rows(.,
+        elo_win_simulations %>%
+                left_join(.,
+                          actual_wins,
+                          by = c("SEASON", "TEAM")) %>%
+                left_join(., team_conference_season,
+                          by = c("SEASON", "TEAM")) %>%
+                filter(DIVISION == 'fbs') %>%
+                group_by(SEASON) %>%
+                yardstick::rmse(truth = actual_win,
+                                estimate = win) %>%
+                mutate_if(is.numeric, round, 2) %>%
+                mutate(method = 'elo')) %>%
+        select(method, everything()) %>%
+        spread(method, .estimate)
+
+```
+
+```{r accuracy of measures}
+
+bind_rows(adjusted_game_simulations %>%
+                  mutate(method = 'adjusted elo'),
+          elo_game_simulations %>%
+                  mutate(method = 'elo')) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                                     TRUE ~ 'no'),
+                                           levels = c("no", "yes"))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_SIM_PROB >= .5 ~ 'yes',
+                                            TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        group_by(method, SEASON) %>%
+        yardstick::accuracy(truth = HOME_WIN,
+                               estimate = HOME_PRED,
+                               event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3)
+
+```
+
+Now compare log loss and calibration of probabilities
+
+```{r get win probs calibration and log loss}
+
+bind_rows(adjusted_game_simulations %>%
+                  mutate(method = 'adjusted elo'),
+          elo_game_simulations %>%
+                  mutate(method = 'elo')) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                                     TRUE ~ 'no'),
+                                           levels = c("no", "yes"))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_SIM_PROB >= .5 ~ 'yes',
+                                            TRUE ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        group_by(method, SEASON) %>%
+        yardstick::mn_log_loss(truth = HOME_WIN,
+                               estimate = HOME_SIM_PROB,
+                               event_level = 'second') %>%
+        mutate_if(is.numeric, round, 3)
+
+bind_rows(adjusted_game_simulations %>%
+                  mutate(method = 'adjusted elo'),
+          elo_game_simulations %>%
+                  mutate(method = 'elo')) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                                     TRUE ~ 'no'),
+                                           levels = c("no", "yes"))) %>%
+        mutate(HOME_PROB_BIN = plyr::round_any(HOME_SIM_PROB, .025, floor)) %>%
+        group_by(method, SEASON, HOME_PROB_BIN, HOME_WIN) %>%
+        count() %>%
+        spread(HOME_WIN, n) %>%
+        mutate_at(c("no", "yes"),
+                  ~ replace_na(., 0)) %>%
+        group_by(method, SEASON) %>%
+        mutate(games = no + yes) %>%
+        mutate(observed_home_prop = yes / games) %>%
+        ggplot(., aes(x=HOME_PROB_BIN,
+                      size = games,
+                    #  color = method,
+                      y=observed_home_prop))+
+       # facet_wrap(SEASON ~.)+
+        geom_point()+
+        theme_phil()+
+        geom_abline(slope = 1,
+                    intercept=0,
+                    linetype = 'dashed')+
+        geom_smooth(method = 'loess',
+                    formula = 'y ~ x',
+                    color = 'blue',
+                    guides = 'none',
+                    show.legend = F)+
+        xlab("Predicted Probability of Home Win")+
+        ylab("Observed Probability of Home Win")+
+        facet_wrap(method ~.)+
+        theme(legend.title = element_text())+
+        guides(size = guide_legend(title = 'Number of Games',
+                                   title.position = 'top'))+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 10,
+                                                  hjust = 0.5))+
+        ggtitle("Calibration of Win Probabilities for 2021 Season")
+
+```
+
+And the margin
+
+```{r compare margin}
+
+bind_rows(adjusted_game_simulations %>%
+                  mutate(method = 'adjusted elo'),
+          elo_game_simulations %>%
+                  mutate(method = 'elo')) %>%
+        group_by(method, SEASON) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+        yardstick::rmse(truth = HOME_MARGIN,
+                        estimate = HOME_SIM_MARGIN) %>%
+        mutate_if(is.numeric, round, 3)
+
+```
+
+Okay so we do a bit better in simulating with the adjusted Elo approach. Hooray!
 
