@@ -6,8 +6,8 @@ function(sim_team_outcomes,
         elo_func = 
                 function(x) {
                         
-                        breaks = c(0,1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400)
-                        colorRamp=colorRampPalette(c("white", "grey50"))
+                        breaks = c(1000, 1100, 1200 ,1300, 1400, 1500, 1520, 1600, 1700, 1800, 1900, 2000, 2200)
+                        colorRamp=colorRampPalette(c("red", "white", "deepskyblue1"))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
                                      breaks = breaks,
@@ -22,7 +22,7 @@ function(sim_team_outcomes,
                 function(x) {
                         
                         breaks = c(0, 5, 10, 15, 20, 40, 60)/100
-                        colorRamp=colorRampPalette(c("white", "grey50"))
+                        colorRamp=colorRampPalette(c("white", "grey60"))
                         col_palette <- colorRamp(length(breaks))
                         mycut <- cut(x, 
                                      breaks = breaks,
@@ -62,6 +62,8 @@ function(sim_team_outcomes,
                summarize(games = n_distinct(GAME_ID)) %>%
                summarize(max_games = max(games)) %>%
                pull(max_games)
+      
+      if(max_games > 12) {max_games = 12} else {max_games = max_games}
         
         # # now get total expected wins
         season_totals = sim_team_outcomes %>%
@@ -124,9 +126,9 @@ function(sim_team_outcomes,
 
         table %>%
                 rename(Elo = ELO) %>%
-                mutate(`End Elo`= round(Elo, 0)) %>%
+                mutate(Rating= round(Elo, 0)) %>%
                 mutate(Rank = row_number()) %>%
-                select(SEASON, TEAM, Rank, `End Elo`, one_of(paste(win_counts))) %>%
+                select(SEASON, TEAM, Rank, Rating, one_of(paste(win_counts))) %>%
                 rename(Season = SEASON,
                        Team = TEAM) %>%
                 flextable() %>%
@@ -136,12 +138,12 @@ function(sim_team_outcomes,
                 add_header_row(.,
                                values = c("","", "Simulated", paste("Simulated Win Probabilities for", season, "Regular Season")),
                                colwidths = c(1, 1, 2, 1+max(win_counts))) %>%
-                flextable::align(j = c("Rank", "End Elo", paste(seq(0, max(win_counts), 1))),
+                flextable::align(j = c("Rank", "Rating", paste(seq(0, max(win_counts), 1))),
                                  part = "all",
                                  align = "center") %>%
                 color(part = "all",
                       color = "grey20") %>%
                 bg(.,
-                   j = 'End Elo',
+                   j = 'Rating',
                    bg = elo_func)
 }

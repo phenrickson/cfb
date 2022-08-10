@@ -2,9 +2,16 @@ plot_elo_team_season <-
 function(sim_team_outcomes,
                                 games,
                                 team, 
+         team_color,
                                 season,
-                                alpha = 0.5,
+                                alpha = 0.25,
                                 fbs_average = 1520) {
+        
+        # integer plotting function
+        int_breaks <- function(x, n = 5) {
+                l <- pretty(x, n)
+                l[abs(l %% 1) < .Machine$double.eps ^ 0.5] 
+        }
         
         # fbs elo average
         fbs_average = 1520
@@ -49,11 +56,13 @@ function(sim_team_outcomes,
                                                   OPPONENT == AWAY_TEAM ~ paste("vs","\n", OPPONENT_ABBR, sep=""))) %>%
                 arrange(.id, SEASON, TEAM, GAME_DATE) %>%
                 group_by(.id, SEASON, TEAM) %>%
-                mutate(GAME = row_number()) %>%
-                left_join(., teamcolors %>%
-                                  filter(league == 'ncaa') %>%
-                                  mutate(TEAM = location),
-                          by = c("TEAM"))
+                mutate(GAME = row_number()) 
+        
+        # %>%
+        #         left_join(., teamcolors %>%
+        #                           filter(league == 'ncaa') %>%
+        #                           mutate(TEAM = location),
+        #                   by = c("TEAM"))
         
         # team wins based on simulations
         team_wins =   team_temp %>% 
@@ -98,7 +107,6 @@ function(sim_team_outcomes,
         # now make plot
         plot_team_data %>%
                 ggplot(., aes(x=GAME,
-                              color = name,
                               group = .id,
                               y = PREGAME_ELO)) +
                 geom_vline(xintercept = seq(1, max(team_temp$GAME+1)),
@@ -109,9 +117,10 @@ function(sim_team_outcomes,
                 #               x = GAME,
                 #               y = 2250),
                 #           size = 4)+
-                geom_line(alpha = alpha)+
+                geom_line(alpha = alpha,
+                          color = team_color)+
                 theme_phil()+
-                scale_color_teams(name = "TEAM")+
+              #  scale_color_teams(name = "TEAM")+
                 guides(color = 'none')+
                 ggtitle(paste("Simulated Elo Ratings for" , team, season),
                         subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
@@ -130,14 +139,15 @@ function(sim_team_outcomes,
                          y=2300,
                          label = plot_team_data %>% filter(.id == 1) %>%
                                  pull(PLOT_LABEL),
-                         size = 2.5,
-                         color = unique(plot_team_data$primary)
+                         size = 3,
+                         color = team_color,
                          )+
                 geom_hline(yintercept = c(fbs_average),
                                           linetype = 'dashed',
                                           color = 'grey60')+
                 annotate("text",
                          x=0.25,
+                         size = 2.5,
                          y=fbs_average + 25,
                          color = 'grey60',
                          label = 'FBS Average')
