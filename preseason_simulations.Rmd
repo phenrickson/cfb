@@ -1,5 +1,5 @@
 ---
-title: "Simulating Seasons"
+title: "Simulating the Upcoming CFB Season"
 author: "Phil Henrickson"
 date: "6/7/2022"
 output: 
@@ -10,7 +10,6 @@ output:
     toc_float: TRUE #let your ToC follow you as you scroll
     keep_md: no
     fig.caption: yes
-    css: "styles.css"
 params:
         input_season: 2022
 ---
@@ -53,7 +52,6 @@ set_flextable_defaults(theme_fun = theme_alafoli,
 
 ```{r connect to snowflake}
 
-
 library(DBI)
 library(odbc)
 library(RODBC)
@@ -82,6 +80,7 @@ source(here::here("functions", "sim_game_margin.R"))
 source(here::here("functions", "calc_elo_ratings.R"))
 source(here::here("functions", "sim_elo_ratings.R"))
 source(here::here("functions", "sim_rest_of_season.R"))
+source(here::here("functions", "theme_phil.R"))
 
 # color palettes
 load(here::here("data", "team_colors.Rdata"))
@@ -265,6 +264,9 @@ games = games_raw %>%
                   by = c("SEASON",
                          "AWAY_TEAM"))
 
+# data sources
+load(file=here::here("data", "season_team_rankings_type.Rdata"))
+
 ```
 
 ```{r functions for turning elo to list}
@@ -286,7 +288,217 @@ team_seasons_to_list = function(x) {
 
 ```
 
-# The Data
+```{r conference divisions}
+
+conference_divisions = 
+        tibble(SEASON = 2022,
+               CONFERENCE = "SEC",
+               CONFERENCE_DIVISION = c("East"),
+               TEAM = c("Florida",
+                        "Georgia",
+                        "Kentucky",
+                        "Missouri",
+                        "South Carolina",
+                        "Tennessee",
+                        "Vanderbilt")) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "SEC",
+                         CONFERENCE_DIVISION = "West",
+                         TEAM = c("Alabama",
+                                  "Arkansas",
+                                  "Auburn",
+                                  "LSU",
+                                  "Mississippi State",
+                                  "Ole Miss",
+                                  "Texas A&M"))
+        ) %>%
+           bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Big Ten",
+                         CONFERENCE_DIVISION = "West",
+                         TEAM = c("Illinois", 
+                                  "Iowa", 
+                                  "Minnesota",
+                                  "Nebraska",
+                                  "Northwestern",
+                                  "Purdue",
+                                  "Wisconsin"))
+           ) %>%
+         bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Big Ten",
+                         CONFERENCE_DIVISION = "East",
+                         TEAM = c("Indiana",
+                                  "Maryland",
+                                  "Michigan",
+                                  "Michigan State",
+                                  "Ohio State",
+                                  "Penn State",
+                                  "Rutgers"))
+         ) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "ACC",
+                         CONFERENCE_DIVISION = "Atlantic",
+                         TEAM = c("Boston College",
+                                  "Clemson",
+                                  "Florida State",
+                                  "Louisville",
+                                  "NC State",
+                                  "Syracuse",
+                                  "Wake Forest"))
+                  ) %>%
+                bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "ACC",
+                         CONFERENCE_DIVISION = "Coastal",
+                         TEAM = c("Duke",
+                                  "Georgia Tech",
+                                  "Miami",
+                                  "North Carolina",
+                                  "Pittsburgh",
+                                  "Virginia",
+                                  "Virginia Tech"))
+                ) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Mid-American",
+                         CONFERENCE_DIVISION = "East",
+                         TEAM = c("Akron",
+                                  "Bowling Green",
+                                  "Buffalo", 
+                                  "Kent State",
+                                  "Miami (OH)",
+                                  "Ohio"))
+        ) %>%
+                bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Mid-American",
+                         CONFERENCE_DIVISION = "West",
+                         TEAM = c("Ball State",
+                                  "Central Michigan",
+                                  "Eastern Michigan",
+                                  "Northern Illinois",
+                                  "Toledo",
+                                  "Western Michigan"))
+                  ) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Mountain West",
+                         CONFERENCE_DIVISION = "Mountain",
+                         TEAM = c("Air Force",
+                                  "Boise State",
+                                  "Colorado State",
+                                  "New Mexico",
+                                  "Utah State",
+                                  "Wyoming"))
+        ) %>%
+          bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Mountain West",
+                         CONFERENCE_DIVISION = "West",
+                         TEAM = c("Fresno State",
+                                  "Hawai'i",
+                                  "Nevada",
+                                  "San Diego State",
+                                  "San José State",
+                                  "UNLV"))) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Sun Belt",
+                         CONFERENCE_DIVISION = "East",
+                         TEAM = c("Appalachian State",
+                                  "Coastal Carolina",
+                                  "Georgia Southern",
+                                  "Georgia State",
+                                  "James Madison",
+                                  "Marshall",
+                                  "Old Dominion"))
+        ) %>% 
+                bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = "Sun Belt",
+                         CONFERENCE_DIVISION = "West",
+                         TEAM = c("Arkansas State",
+                                  "Louisiana",
+                                  "Louisiana Monroe",
+                                  "South Alabama",
+                                  "Southern Mississippi",
+                                  "Texas State",
+                                  "Troy"))
+                  ) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = 'Big 12',
+                         TEAM = c("Baylor",
+                                  "Iowa State",
+                                  "Kansas State",
+                                  "Kansas",
+                                  "Oklahoma",
+                                  "Oklahoma State",
+                                  "TCU",
+                                  "Texas",
+                                  "Texas Tech",
+                                  "West Virginia"))) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = 'Pac-12',
+                         TEAM = c("Arizona",
+                                  "Arizona State",
+                                  "California",
+                                  "Colorado",
+                                  "Oregon",
+                                  "Oregon State",
+                                  "Stanford",
+                                  "UCLA",
+                                  "USC",
+                                  "Utah",
+                                  "Washington",
+                                  "Washington State"))
+        ) %>%
+          bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = 'Conference USA',
+                         TEAM = c("Charlotte",
+                                  "Florida Atlantic",
+                                  "Florida International",
+                                  "Louisiana Tech",
+                                  "Middle Tennessee",
+                                  "North Texas",
+                                  "Rice",
+                                  "UAB",
+                                  "UTEP",
+                                  "UT San Antonio",
+                                  "Western Kentucky"))
+          ) %>%
+        bind_rows(.,
+                  tibble(SEASON = 2022,
+                         CONFERENCE = 'American Athletic',
+                         TEAM = c("Cincinnati",
+                                  "East Carolina",
+                                  "Houston",
+                                  "Memphis",
+                                  "Navy",
+                                  "SMU",
+                                  "South Florida",
+                                  "Temple",
+                                  "Tulane",
+                                  "Tulsa",
+                                  "UCF"
+                                  ))) %>%
+        bind_rows(.,
+                    tibble(SEASON = 2022,
+                         CONFERENCE = 'FBS Independents',
+                         TEAM = c("Army",
+                                  "BYU",
+                                  "Liberty",
+                                  "New Mexico State",
+                                  "Notre Dame",
+                                  "UConn",
+                                  "UMass")))
+
+```
 
 ```{r create data for simulating, include=F}
 
@@ -296,7 +508,7 @@ future_seasons = expand.grid(TEAM = season_team_rankings  %>%
                                      distinct(TEAM) %>%
                                      pull(),
                              TYPE = c('raw', 'adjusted'),
-                             SEASON = 2022) %>%
+                             SEASON = params$input_season) %>%
         as_tibble()
 
 # get efficiency and elo for historical + future season
@@ -404,13 +616,11 @@ points_model = elo_games %>%
 
 ```
 
-# Adjustments
-
 ```{r workflow and set up}
 
 # base elo, from historical games
 base_teams_elo = elo_teams %>%
-        filter(SEASON < input_season) %>%
+        filter(SEASON < params$input_season) %>%
         group_by(TEAM) %>%
         filter(GAME_DATE == max(GAME_DATE)) %>%
         slice_max(POSTGAME_ELO, n=1, with_ties = F) %>%
@@ -422,14 +632,14 @@ base_teams_elo = elo_teams %>%
 # now adjusted
 # get computed elo as input
 adjusted_teams_elo = adjusted_teams_test %>%
-        filter(SEASON == input_season) %>%
+        filter(SEASON == params$input_season) %>%
         select(TEAM, .pred) %>%
         rename(ELO = .pred) %>%
         column_to_rownames("TEAM")
 
 # get team seasons
 team_elo_seasons = elo_teams %>%
-        filter(SEASON < input_season) %>%
+        filter(SEASON < params$input_season) %>%
         group_by(TEAM) %>%
         slice_max(., order_by = SEASON, n=1, with_ties =F) %>%
         ungroup() %>%
@@ -448,30 +658,142 @@ elo_input = list(teams = c(adjusted_teams,
 
 ```
 
-# Preseason Rankings
+# What is this? {-}
+
+This notebook details the results of simulating the `r params$input_season` college football season before any actual games are played. 
+
+# Week 0 Team Power Ratings
+
+The following table displays each team's **Rating**, which is a combination of their previous season's Elo Rating, offensive efficiency, defensive efficiency, and a moving average of their composite recruiting score. These ratings are **Week 0** ratings because they rely only on information from previous seasons. As the season progresses, these ratings will update for each team as we gain new information based on the results of games (with the exception of recruiting, which is computed at the yearly level).
 
 ```{r rank teams after adjustment}
 
 # overall 
-adjusted_team_rankings %>%
-        filter(SEASON == 2021) %>%
-        gather("metric", "value",
-               -SEASON, -TEAM, -TYPE) %>%
-        filter(metric == 'OVERALL') %>%
-        left_join(., team_mapping,
+preseason_ratings = do.call(rbind, adjusted_teams) %>%
+        as.data.frame() %>%
+        rownames_to_column("TEAM") %>%
+        rename(RATING = V1) %>%
+        mutate(SEASON = params$input_season) %>%
+        left_join(.,
+                  team_mapping,
                   by = c("TEAM")) %>%
-        left_join(., team_conference_season,
-                  by = c("TEAM", "SEASON")) %>%
+        left_join(.,
+                  team_conference_season,
+                  by = c("SEASON", "TEAM")) %>%
         filter(!is.na(CONFERENCE)) %>%
+        filter(DIVISION =='fbs') %>%
+        left_join(.,
+                  teams_data %>%
+                          select(SEASON,
+                                 TEAM,
+                                 PREVIOUS_OFFENSE, 
+                                 PREVIOUS_DEFENSE,
+                                         RECRUITING_SCORE),
+                  by  = c("SEASON", "TEAM")) %>%
+        rename(OFFENSE = PREVIOUS_OFFENSE,
+               DEFENSE = PREVIOUS_DEFENSE,
+               RECRUITING = RECRUITING_SCORE)
+                  
+# make colors break for overall
+blueColorRamp = colorRampPalette(c("white", "deepskyblue1"))
+blueRedColorRamp = colorRampPalette(c("red", "white", "deepskyblue1"))
+
+# set up color mapping
+breaks_df = data.frame(outcome = 'Rating',
+                       breaks = quantile(preseason_ratings %>% 
+                                                 pull(RATING), 
+                                         probs = seq(0, 1, .01), na.rm=T) %>%
+                               as.vector) %>%
+        bind_rows(data.frame(outcome = 'Recruiting',
+                       breaks = quantile(preseason_ratings %>% 
+                                                 pull(RECRUITING), 
+                                         probs = seq(0, 1, .01), na.rm=T) %>%
+                               as.vector)) %>%
+        bind_rows(data.frame(outcome = 'Offense',
+                       breaks = quantile(preseason_ratings %>% 
+                                                 pull(OFFENSE), 
+                                         probs = seq(0, 1, .01), na.rm=T) %>%
+                               as.vector)) %>%
+        bind_rows(data.frame(outcome = 'Defense',
+                       breaks = quantile(preseason_ratings %>% 
+                                                 pull(DEFENSE), 
+                                         probs = seq(0, 1, .01), na.rm=T) %>%
+                               as.vector))
+
+# table
+preseason_ratings %>%
+        arrange(desc(RATING)) %>%
+        mutate(RANK = row_number()) %>%
+        select(SEASON, CONFERENCE, TEAM, RANK, RATING, OFFENSE, DEFENSE, RECRUITING) %>%
+        mutate(RATING = round(RATING, 0),
+               RECRUITING = round(RECRUITING, 0)) %>%
+        mutate(SEASON = factor(SEASON),
+               CONFERENCE = factor(CONFERENCE)) %>%
+        rename(Season = SEASON,
+               Conference = CONFERENCE,
+               Team = TEAM,
+               Rank = RANK,
+               Rating = RATING,
+               Offense = OFFENSE,
+               Defense = DEFENSE,
+               Recruiting = RECRUITING) %>%
+        datatable(escape=F,
+                  rownames = F,
+                       filter = 'top',
+                  options = list(pageLength = 25,
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(list(className = 'dt-center',
+                                                        targets = c("Season", "Conference",
+                                                                    "Team", "Rank", "Rating",
+                                                                    "Offense", "Defense",
+                                                                    "Recruiting"))))) %>%
+             formatStyle("Rating", backgroundColor = styleInterval(breaks_df %>%
+                                                                          filter(outcome == 'Rating') %>%
+                                                                          pull(breaks),
+                                                                  blueRedColorRamp(breaks_df %>%
+                                                                          filter(outcome == 'Rating') %>%
+                                                                          pull(breaks) %>%
+                                                                                  length()+1))) %>%
+          formatStyle("Offense", backgroundColor = styleInterval(breaks_df %>%
+                                                                          filter(outcome == 'Offense') %>%
+                                                                          pull(breaks),
+                                                                  blueRedColorRamp(breaks_df %>%
+                                                                          filter(outcome == 'Offense') %>%
+                                                                          pull(breaks) %>%
+                                                                                  length()+1))) %>%
+                     formatStyle("Defense", backgroundColor = styleInterval(breaks_df %>%
+                                                                          filter(outcome == 'Defense') %>%
+                                                                          pull(breaks),
+                                                                  blueRedColorRamp(breaks_df %>%
+                                                                          filter(outcome == 'Defense') %>%
+                                                                          pull(breaks) %>%
+                                                                                  length()+1))) %>%
+                     formatStyle("Recruiting", backgroundColor = styleInterval(breaks_df %>%
+                                                                          filter(outcome == 'Recruiting') %>%
+                                                                          pull(breaks),
+                                                                  blueRedColorRamp(breaks_df %>%
+                                                                          filter(outcome == 'Recruiting') %>%
+                                                                          pull(breaks) %>%
+                                                                                  length()+1)))
+
+```
+
+The following visualization shows the distribution of team ratings at the start of the season.
+
+```{r graph of preseason rankings, fig.height=8}
+
+preseason_ratings %>%
         ggplot(., aes(x = "1",
-                      label = ABBREVIATION,
+                      label = TEAM_ABBREVIATION,
                       fill = TEAM,
-                      y = value))+
+                      y = RATING))+
         # geom_point(position = 'auto',
         #            jitter.width = 0.05)+
-        geom_label_repel(position = position_auto(seed = 2,
+        geom_label_repel(position = position_auto(seed = 1,
                                                   jitter.width=0.5,
-                                            scale =F),
+                                            scale =T),
+                         max.overlaps = 100,
                    color = 'white',
                    size = 3,
                    alpha = 0.8)+
@@ -481,20 +803,64 @@ adjusted_team_rankings %>%
         xlab("This axis has no meaning")+
         theme(axis.ticks.x=element_blank(),
               axis.text.x = element_blank())+
-        facet_wrap(SEASON + metric ~.)+
   #      facet_wrap(SEASON + CONFERENCE + metric~.)+
         xlab("This axis has no meaning")+
-        ylab("Team Net Predicted Points Added per play")+
-        geom_hline(yintercept = 0,
+        ylab("Team Rating")+
+        geom_hline(yintercept = 1520,
+                   linetype = 'dashed',
                    color = 'grey60')+
         theme(plot.title = element_text(hjust = 0.5,
                                                 size = 16),
                       plot.subtitle =  element_text(hjust = 0.5),
-                      strip.text.x = element_text(size = 16,
-                                                  hjust = 0.5))
+                      strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+                ggtitle(paste(params$input_season, "Week 0 Team Ratings"),
+                subtitle = "Displaying preseason team ratings for all teams. Grey line indicates FBS median.")
 
 ```
 
+## Conferences
+
+The following visualization shows the distribution of team ratings by each conference.
+
+```{r conference ratings, fig.height=8}
+
+preseason_ratings %>%
+        ggplot(., aes(x = "1",
+                      label = TEAM_ABBREVIATION,
+                      fill = TEAM,
+                      y = RATING))+
+        # geom_point(position = 'auto',
+        #            jitter.width = 0.05)+
+        geom_label_repel(position = position_auto(seed = 5,
+                                                  jitter.width=0.15,
+                                            scale =T),
+                         max.overlaps = 100,
+                   color = 'white',
+                   size = 3,
+                   alpha = 0.8)+
+        custom_fill_teams+
+        guides(fill = 'none')+
+        theme_phil()+
+        xlab("This axis has no meaning")+
+        theme(axis.ticks.x=element_blank(),
+              axis.text.x = element_blank())+
+        facet_wrap(CONFERENCE ~.)+
+  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
+        xlab("This axis has no meaning")+
+        ylab("Team Rating")+
+        geom_hline(yintercept = 1520,
+                   linetype = 'dashed',
+                   color = 'grey40')+
+        theme(plot.title = element_text(hjust = 0.5,
+                                                size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 12,
+                                                  hjust = 0.5))+
+        ggtitle(paste(params$input_season, "Week 0 Team Ratings by Conference"),
+                subtitle = "Displaying preseason team ratings for all teams by conference. Grey line indicates FBS median.")
+
+```
 
 # Simulations
 
@@ -504,7 +870,7 @@ adjusted_team_rankings %>%
 # set.seed(1999)
 set.seed(1999)
 season_simulations = sim_rest_of_season(games,
-                                                 season = input_season,
+                                                 season = params$input_season,
                                                  elo_initial = elo_input,
                                                  elo_pars = elo_pars,
                                                  nsims = 1000,
@@ -515,726 +881,6 @@ season_simulations = sim_rest_of_season(games,
 
 ```
 
-```{r win probabilities by team season}
-
-source(here::here("functions", "table_wins_season.R"))
-
-table_wins_season(season_simulations %$%
-                          team_outcomes,
-                  games,
-                  2022)
-
-```
-
-# Strength of Schedule and Projected Record
-
-```{r hardest schedule}
-
-games %>%
-        filter(SEASON == params$input_season) %>%
-        select(SEASON, NEUTRAL_SITE, 
-               HOME_TEAM, AWAY_TEAM,
-               HOME_CONFERENCE, AWAY_CONFERENCE,
-               HOME_DIVISION, AWAY_DIVISION) %>%
-        mutate(HOME = T) %>%
-        rename(TEAM = HOME_TEAM,
-               CONFERENCE = HOME_CONFERENCE,
-               DIVISION = HOME_DIVISION,
-               OPPONENT = AWAY_TEAM,
-               OPPONENT_CONFERENCE = AWAY_CONFERENCE) %>%
-        bind_rows(.,
-                  games %>%
-                filter(SEASON == params$input_season) %>%
-                select(SEASON, NEUTRAL_SITE, AWAY_TEAM, HOME_TEAM, AWAY_CONFERENCE, HOME_CONFERENCE, HOME_DIVISION, AWAY_DIVISION) %>%
-                mutate(HOME = F) %>%
-                rename(TEAM = AWAY_TEAM,
-                       CONFERENCE = AWAY_CONFERENCE,
-                       DIVISION = AWAY_DIVISION,
-                       OPPONENT = HOME_TEAM,
-                       OPPONENT_CONFERENCE = HOME_CONFERENCE)) %>%
-        left_join(.,
-                          do.call(rbind, c(adjusted_teams,
-                           base_teams[!(names(base_teams) %in% names(adjusted_teams))])) %>% 
-                          as.data.frame() %>% 
-                          rownames_to_column("OPPONENT") %>%
-                          rename(OPPONENT_ELO = V1),
-                  by = c("OPPONENT")) %>%
-        left_join(.,
-                          do.call(rbind, c(adjusted_teams,
-                           base_teams[!(names(base_teams) %in% names(adjusted_teams))])) %>% 
-                          as.data.frame() %>% 
-                          rownames_to_column("TEAM") %>%
-                          rename(TEAM_ELO = V1),
-                  by = c("TEAM")) %>%
-        mutate(OPPONENT_ELO = case_when(HOME == F ~ OPPONENT_ELO + 75,
-                                        HOME == T ~ OPPONENT_ELO - 75)) %>%
-        filter(DIVISION == 'fbs') %>%
-        mutate_at(c("OPPONENT_ELO"),
-                  ~ replace_na(., 0)) %>%
-        group_by(SEASON, TEAM, TEAM_ELO) %>%
-        summarize(OPPONENT_MEAN_ELO = mean(OPPONENT_ELO),
-                  OPPONENT_MEDIAN_ELO = median(OPPONENT_ELO),
-                  diff = mean(TEAM_ELO - OPPONENT_ELO),
-                  .groups = 'drop') %>%
-        arrange(desc(OPPONENT_MEAN_ELO)) %>%
-        mutate_if(is.numeric, round, 1) %>%
-        mutate(RANK = row_number()) %>%
-        select(SEASON, RANK,
-               TEAM, 
-               TEAM_ELO, 
-               OPPONENT_MEAN_ELO, 
-               OPPONENT_MEDIAN_ELO) %>%
-        select(SEASON, RANK, TEAM, TEAM_ELO, OPPONENT_MEAN_ELO) %>%
-        rename(SCHEDULE_RANK = RANK) %>%
-        left_join(.,
-                  
-                  # elo and win totals
-        season_simulations %$%
-                team_outcomes %>% 
-                group_by(.id, SEASON, TEAM, CONFERENCE, SIM_OUTCOME) %>%
-                count() %>% 
-                group_by(SEASON, TEAM, CONFERENCE, SIM_OUTCOME) %>%
-                summarize(mean = mean(n),
-                          median = median(n),
-                          .groups = 'drop') %>%
-                select(-median) %>%
-                spread(SIM_OUTCOME, mean) %>%
-                mutate_at(c("win", "loss"),
-                          ~ replace_na(., 0)) %>%
-                select(SEASON, TEAM, win, loss) %>%
-                arrange(desc(win)) %>%
-                mutate_if(is.numeric, round, 2) %>%
-                left_join(.,
-                          season_simulations %$%
-                team_outcomes %>% 
-                group_by(SEASON, TEAM) %>% 
-                filter(GAME_DATE == max(GAME_DATE)) %>% 
-                summarize(ELO = round(mean(POSTGAME_ELO),0),
-                          .groups = 'drop') %>%
-                arrange(desc(ELO)),
-                by = c("SEASON", "TEAM")) %>%
-                select(SEASON, TEAM, win, loss),
-        by = c("SEASON", "TEAM")) %>%
-        left_join(.,
-                  season_simulations %$%
-                        team_outcomes %>% 
-                        filter(DIVISION == 'fbs') %>%
-                        mutate(win = case_when(SIM_OUTCOME == 'win' ~ 1, TRUE ~ 0)) %>% 
-                        mutate(sims = n_distinct(.id)) %>% 
-                        group_by(.id, SEASON, TEAM, CONFERENCE, SIM_OUTCOME, sims) %>% 
-                        summarize(wins = sum(win), .groups = 'drop') %>% 
-                        filter(wins >=6) %>%
-                        group_by(SEASON, TEAM, sims) %>% 
-                        count() %>%
-                        ungroup() %>% 
-                        mutate(BOWL = n/sims) %>% 
-                        select(SEASON, TEAM, BOWL),
-                  by = c("SEASON", "TEAM")
-                          ) %>%
-        rename(Season = SEASON,
-               Difficulty = SCHEDULE_RANK,
-               Team = TEAM,
-               Elo = TEAM_ELO,
-               Schedule = OPPONENT_MEAN_ELO,
-               Wins = win,
-               Losses = loss,
-               `Pr(Bowl)` = BOWL
-               ) %>%
-        select(Season, Team, Difficulty, Schedule, Wins, Losses, `Pr(Bowl)`)
-
-                # rename(Season = SEASON,
-                #        Team = TEAM,
-                #        Elo = ELO,
-                #        Wins = win,
-                #        Losses = loss) %>%
-                # arrange(desc(Elo))
-
-```
-# Conference Championships
-
-```{r conference simulations}
-
-conference_divisions = 
-        tibble(SEASON = 2022,
-               CONFERENCE = "SEC",
-               CONFERENCE_DIVISION = c("East"),
-               TEAM = c("Florida",
-                        "Georgia",
-                        "Kentucky",
-                        "Missouri",
-                        "South Carolina",
-                        "Tennessee",
-                        "Vanderbilt")) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "SEC",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Alabama",
-                                  "Arkansas",
-                                  "Auburn",
-                                  "LSU",
-                                  "Mississippi State",
-                                  "Ole Miss",
-                                  "Texas A&M"))
-        ) %>%
-           bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Big Ten",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Illinois", 
-                                  "Iowa", 
-                                  "Minnesota",
-                                  "Nebraska",
-                                  "Northwestern",
-                                  "Purdue",
-                                  "Wisconsin"))
-           ) %>%
-         bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Big Ten",
-                         CONFERENCE_DIVISION = "East",
-                         TEAM = c("Indiana",
-                                  "Maryland",
-                                  "Michigan",
-                                  "Michigan State",
-                                  "Ohio State",
-                                  "Penn State",
-                                  "Rutgers"))
-         ) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "ACC",
-                         CONFERENCE_DIVISION = "Atlantic",
-                         TEAM = c("Boston College",
-                                  "Clemson",
-                                  "Florida State",
-                                  "Louisville",
-                                  "NC State",
-                                  "Syracuse",
-                                  "Wake Forest"))
-                  ) %>%
-                bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "ACC",
-                         CONFERENCE_DIVISION = "Coastal",
-                         TEAM = c("Duke",
-                                  "Georgia Tech",
-                                  "Miami",
-                                  "North Carolina",
-                                  "Pittsburgh",
-                                  "Virginia",
-                                  "Virginia Tech")))
-
-```
-
-```{r check on conference}
-
-# conference wins
-conference_wins = season_simulations %$% 
-        team_outcomes %>%
-        left_join(.,
-                  conference_divisions,
-                  by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        left_join(.,
-                  conference_divisions %>%
-                  rename(OPPONENT = TEAM,
-                         OPPONENT_CONFERENCE = CONFERENCE,
-                         OPPONENT_CONFERENCE_DIVISION = CONFERENCE_DIVISION),
-                  by = c("SEASON", "OPPONENT")) %>%
-        mutate(CONFERENCE_DIVISION_GAME = CONFERENCE_DIVISION == OPPONENT_CONFERENCE_DIVISION) %>%
-        mutate(CONFERENCE_GAME = CONFERENCE == OPPONENT_CONFERENCE) %>%
-        filter(CONFERENCE_GAME == T) %>%
-       # filter(CONFERENCE_DIVISION_GAME == T) %>%
-        group_by(CONFERENCE, CONFERENCE_DIVISION_GAME) %>%
-        group_by(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION, SIM_OUTCOME) %>%
-        count() %>%
-        ungroup() %>%
-        spread(SIM_OUTCOME, n) %>%
-        # group_by(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION, SIM_OUTCOME) %>%
-        # summarize(mean = mean(n),
-        #           median = median(n),
-        #           .groups = 'drop') %>%
-        # select(-mean) %>%
-        mutate_at(c("win", "loss"),
-                  ~ replace_na(., 0)) %>%
-        select(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION, win, loss) 
-
-        
-# division conference wins
-division_wins = season_simulations %$% 
-        team_outcomes %>%
-        left_join(.,
-                  conference_divisions,
-                  by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        left_join(.,
-                  conference_divisions %>%
-                  rename(OPPONENT = TEAM,
-                         OPPONENT_CONFERENCE = CONFERENCE,
-                         OPPONENT_CONFERENCE_DIVISION = CONFERENCE_DIVISION),
-                  by = c("SEASON", "OPPONENT")) %>%
-        mutate(CONFERENCE_DIVISION_GAME = CONFERENCE_DIVISION == OPPONENT_CONFERENCE_DIVISION) %>%
-        mutate(CONFERENCE_GAME = CONFERENCE == OPPONENT_CONFERENCE) %>%
-        filter(CONFERENCE_DIVISION_GAME == T) %>%
-        group_by(CONFERENCE, CONFERENCE_DIVISION_GAME) %>%
-        group_by(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION, SIM_OUTCOME) %>%
-        count() %>%
-        ungroup() %>%
-        spread(SIM_OUTCOME, n) %>%
-        # group_by(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION, SIM_OUTCOME) %>%
-        # summarize(mean = mean(n),
-        #           median = median(n),
-        #           .groups = 'drop') %>%
-        # select(-mean) %>%
-        mutate_at(c("win", "loss"),
-                  ~ replace_na(., 0)) %>%
-        select(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION, win, loss)
-
-# tie breaker
-# head to head winner
-head_to_head_wins = season_simulations %$% 
-        game_outcomes %>%
-        left_join(.,
-                  conference_divisions %>%
-                          rename(HOME_TEAM = TEAM,
-                                 HOME_CONFERENCE = CONFERENCE,
-                                 HOME_CONFERENCE_DIVISION = CONFERENCE_DIVISION),
-                  by = c("SEASON", "HOME_TEAM", "HOME_CONFERENCE")) %>%
-        left_join(.,
-                  conference_divisions %>%
-                          rename(AWAY_TEAM = TEAM,
-                                 AWAY_CONFERENCE = CONFERENCE,
-                                 AWAY_CONFERENCE_DIVISION = CONFERENCE_DIVISION),
-                  by = c("SEASON", "AWAY_TEAM", "AWAY_CONFERENCE")) %>%
-        mutate(CONFERENCE_DIVISION_GAME = HOME_CONFERENCE_DIVISION == AWAY_CONFERENCE_DIVISION) %>%
-        mutate(CONFERENCE_GAME = HOME_CONFERENCE == AWAY_CONFERENCE) %>%
-        filter(CONFERENCE_DIVISION_GAME == T) %>%
-        mutate(winner = case_when(HOME_SIM_OUTCOME == 'win' ~ HOME_TEAM,
-                                  HOME_SIM_OUTCOME == 'loss' ~ AWAY_TEAM)) %>%
-      #  distinct(.id, SEASON, GAME_ID, CONFERENCE, CONFERENCE_DIVISION, TEAM, OPPONENT, winner) %>%
-        rename(CONFERENCE = HOME_CONFERENCE,
-               CONFERENCE_DIVISION = HOME_CONFERENCE_DIVISION,
-               TEAM = HOME_TEAM,
-               OPPONENT = AWAY_TEAM) %>%
-        select(.id, GAME_ID, SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, OPPONENT, winner) 
-
-head_to_head_winners = bind_rows(head_to_head_wins,
-                              head_to_head_wins %>%
-                                      rename(OPPONENT = TEAM,
-                                             TEAM = OPPONENT))
-
-# for conference championships:
-# for sec, big 12, ACC...
-# take team from each division with most division wins
-# if tied, take team with more conference wins
-# if still tied, take team with head to head win
-division_winners = division_wins %>%
-        group_by(.id, CONFERENCE, CONFERENCE_DIVISION) %>%
-        mutate(division_wins = win) %>%
-        slice_max(., division_wins, n=1, with_ties=T) %>%
-        left_join(.,
-                  season_simulations %$% 
-                          team_outcomes %>%
-                          group_by(.id, SEASON, TEAM) %>%
-                          filter(GAME_DATE == max(GAME_DATE)) %>%
-                          ungroup() %>%
-                          select(.id, SEASON, TEAM, POSTGAME_ELO),
-                  by = c(".id", "SEASON", "TEAM")) %>%
-        ungroup() %>%
-        left_join(.,
-                  conference_wins %>%
-                          mutate(conference_wins = win) %>%
-                          select(.id, SEASON, TEAM, conference_wins),
-                  by = c(".id", "SEASON", "TEAM")) %>%
-        group_by(.id, SEASON, CONFERENCE, CONFERENCE_DIVISION) %>%
-        slice_max(., order_by = conference_wins, with_ties = T) %>%
-        ungroup() %>%
-        group_by(.id, SEASON, CONFERENCE, CONFERENCE_DIVISION) %>% 
-        mutate(division_teams = n()) %>%
-        ungroup()
-                          
-# division wins
-conference_championships = division_winners %>%
-        left_join(., division_winners %>%
-                          filter(division_teams > 1) %>%
-                          select(.id, SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM) %>%
-                          rename(OPPONENT = TEAM),
-                  by = c(".id", "SEASON", "CONFERENCE", "CONFERENCE_DIVISION")) %>%
-        filter(TEAM != OPPONENT | is.na(OPPONENT)) %>%
-        rename(PREGAME_ELO = POSTGAME_ELO) %>%
-        select(.id, SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, OPPONENT,  PREGAME_ELO, division_wins, conference_wins) %>%
-        left_join(.,
-                  head_to_head_winners %>%
-                          rename(head_to_head = winner)  %>%
-                          select(.id, SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, OPPONENT, head_to_head),
-                  by = c(".id", "SEASON", "CONFERENCE", "CONFERENCE_DIVISION", "TEAM", "OPPONENT")) %>%
-        filter(TEAM == head_to_head | is.na(head_to_head)) %>%
-        # if still more than two, im just doing a damn coin flip and i will fight anyone who disagrees
-        group_by(.id, CONFERENCE, CONFERENCE_DIVISION) %>%
-        sample_n(1) %>%
-        ungroup() 
-
-```
-
-```{r simulate the damn conference championships}
-
-# simulate outcome
-conference_championship_results = conference_championships %>%
-        select(.id, SEASON, TEAM, CONFERENCE, PREGAME_ELO) %>%
-        group_by(.id, SEASON, CONFERENCE) %>%
-        mutate(DIVISION_ID = row_number()) %>%
-        ungroup() %>%
-        mutate(HOME = case_when(DIVISION_ID == 1 ~ 'HOME',
-                                DIVISION_ID== 2 ~ 'AWAY')) %>%
-        pivot_wider(., id_cols = c(".id", "SEASON", "CONFERENCE"),
-                    names_from = c("HOME"),
-                    values_from = c("TEAM", "PREGAME_ELO")) %>%
-        nest(-.id, -SEASON, -CONFERENCE) %>%
-        mutate(data=  map(data, ~ sim_game_margin(home_rating = .x$PREGAME_ELO_HOME,
-                                                    away_rating = .x$PREGAME_ELO_AWAY,
-                                                    points_model) %>%
-                                    as_tibble() %>%
-                                    rename(HOME_SIM_MARGIN = value) %>%
-                                  bind_cols(.x, .) %>%
-                                  mutate(WINNER= case_when(HOME_SIM_MARGIN >= 0 ~ TEAM_HOME,
-                                                           HOME_SIM_MARGIN <0 ~ TEAM_AWAY),
-                                         RUNNER_UP = case_when(HOME_SIM_MARGIN >= 0 ~ TEAM_AWAY,
-                                                           HOME_SIM_MARGIN <0 ~ TEAM_HOME)))) %>%
-        unnest() %>%
-        ungroup() %>%
-        select(.id, SEASON, CONFERENCE, TEAM_HOME, TEAM_AWAY, HOME_SIM_MARGIN, WINNER, RUNNER_UP)
-
-## make color func
-bg_col_func = 
-        function(x) {
-                
-                breaks = c(0, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.75, 0.9, 1)
-                colorRamp=colorRampPalette(c("white", "grey50"))
-                col_palette <- colorRamp(length(breaks))
-                mycut <- cut(x, 
-                             breaks = breaks,
-                             include.lowest = TRUE, 
-                             right=T,
-                             label = FALSE)
-                col_palette[mycut]
-                
-        }
-
-```
-
-```{r conference championship tables big ten}
-
-# table
-conference_divisions %>%
-        filter(CONFERENCE == 'Big Ten') %>%
-        left_join(.,
-        conference_championship_results %>%
-                gather("OUTCOME", "TEAM", 
-                       -.id, -SEASON, -CONFERENCE, -TEAM_HOME, -TEAM_AWAY, -HOME_SIM_MARGIN) %>%
-                mutate(sims = n_distinct(.id)) %>%
-                group_by(SEASON, CONFERENCE, OUTCOME, TEAM, sims) %>%
-                count() %>%
-                ungroup() %>%
-                mutate(perc = n/sims)  %>%
-                select(-n) %>%
-                spread(OUTCOME, perc) %>%
-                mutate_at(c("WINNER", "RUNNER_UP"),
-                          ~ replace_na(., 0)) %>%
-                mutate(APPEARANCE = WINNER + RUNNER_UP),
-                # left_join(., conference_divisions %>%
-                #                   select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION),
-                #                   by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        mutate_at(c("RUNNER_UP", "WINNER", "APPEARANCE"),
-                  ~ replace_na(., 0)) %>%
-        select(SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, WINNER, RUNNER_UP, APPEARANCE) %>%
-        arrange(CONFERENCE_DIVISION, desc(APPEARANCE)) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        rename(Season = SEASON,
-               Conference = CONFERENCE,
-               Division = CONFERENCE_DIVISION,
-               Team = TEAM,
-               Champion = WINNER,
-               `Runner-Up` = RUNNER_UP,
-               Appearance = APPEARANCE) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(.,
-           j = c("Champion", "Runner-Up", "Appearance"),
-           bg = bg_col_func) %>%
-        add_header_row(.,
-                       values = paste("    ", params$input_season, "Conference Championship Probabilties"),
-                       colwidths = c(7)) %>%
-        flextable::align(part = "header", align = "center") %>%
-        flextable::align(j = c("Season", "Conference","Division","Champion", "Runner-Up", "Appearance"),
-                               part = "body",
-                               align = "center") %>%
-        flextable::align(j = c("Team"),
-                         part = "header",
-                         align = "left")
-
-```
-
-```{r conference championship tables sec}
-
-# table
-conference_divisions %>%
-        filter(CONFERENCE == 'SEC') %>%
-        left_join(.,
-        conference_championship_results %>%
-                gather("OUTCOME", "TEAM", 
-                       -.id, -SEASON, -CONFERENCE, -TEAM_HOME, -TEAM_AWAY, -HOME_SIM_MARGIN) %>%
-                mutate(sims = n_distinct(.id)) %>%
-                group_by(SEASON, CONFERENCE, OUTCOME, TEAM, sims) %>%
-                count() %>%
-                ungroup() %>%
-                mutate(perc = n/sims)  %>%
-                select(-n) %>%
-                spread(OUTCOME, perc) %>%
-                mutate_at(c("WINNER", "RUNNER_UP"),
-                          ~ replace_na(., 0)) %>%
-                mutate(APPEARANCE = WINNER + RUNNER_UP),
-                # left_join(., conference_divisions %>%
-                #                   select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION),
-                #                   by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        mutate_at(c("RUNNER_UP", "WINNER", "APPEARANCE"),
-                  ~ replace_na(., 0)) %>%
-        select(SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, WINNER, RUNNER_UP, APPEARANCE) %>%
-        arrange(CONFERENCE_DIVISION, desc(APPEARANCE)) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        rename(Season = SEASON,
-               Conference = CONFERENCE,
-               Division = CONFERENCE_DIVISION,
-               Team = TEAM,
-               Champion = WINNER,
-               `Runner-Up` = RUNNER_UP,
-               Appearance = APPEARANCE) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(.,
-           j = c("Champion", "Runner-Up", "Appearance"),
-           bg = bg_col_func) %>%
-        add_header_row(.,
-                       values = paste("    ", params$input_season, "Conference Championship Probabilties"),
-                       colwidths = c(7)) %>%
-        flextable::align(part = "header", align = "center") %>%
-        flextable::align(j = c("Season", "Conference","Division","Champion", "Runner-Up", "Appearance"),
-                               part = "body",
-                               align = "center") %>%
-        flextable::align(j = c("Team"),
-                         part = "header", align = "left")
-        
-
-```
-
-```{r conference championship tables acc}
-
-# table
-conference_divisions %>%
-        filter(CONFERENCE == 'ACC') %>%
-        left_join(.,
-        conference_championship_results %>%
-                gather("OUTCOME", "TEAM", 
-                       -.id, -SEASON, -CONFERENCE, -TEAM_HOME, -TEAM_AWAY, -HOME_SIM_MARGIN) %>%
-                mutate(sims = n_distinct(.id)) %>%
-                group_by(SEASON, CONFERENCE, OUTCOME, TEAM, sims) %>%
-                count() %>%
-                ungroup() %>%
-                mutate(perc = n/sims)  %>%
-                select(-n) %>%
-                spread(OUTCOME, perc) %>%
-                mutate_at(c("WINNER", "RUNNER_UP"),
-                          ~ replace_na(., 0)) %>%
-                mutate(APPEARANCE = WINNER + RUNNER_UP),
-                # left_join(., conference_divisions %>%
-                #                   select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION),
-                #                   by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        mutate_at(c("RUNNER_UP", "WINNER", "APPEARANCE"),
-                  ~ replace_na(., 0)) %>%
-        select(SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, WINNER, RUNNER_UP, APPEARANCE) %>%
-        arrange(CONFERENCE_DIVISION, desc(APPEARANCE)) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        rename(Season = SEASON,
-               Conference = CONFERENCE,
-               Division = CONFERENCE_DIVISION,
-               Team = TEAM,
-               Champion = WINNER,
-               `Runner-Up` = RUNNER_UP,
-               Appearance = APPEARANCE) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(.,
-           j = c("Champion", "Runner-Up", "Appearance"),
-           bg = bg_col_func) %>%
-        add_header_row(.,
-                       values = paste("    ", params$input_season, "Conference Championship Probabilties"),
-                       colwidths = c(7)) %>%
-        flextable::align(part = "header", align = "center") %>%
-        flextable::align(j = c("Season", "Conference","Division","Champion", "Runner-Up", "Appearance"),
-                               part = "body",
-                               align = "center") %>%
-        flextable::align(j = c("Team"),
-                         part = "header", align = "left")
-        
-```
-
-Schedules
-
-```{r team}
-
-season_simulations %$%
-        team_outcomes %>%
-                filter(TEAM == 'Texas A&M') %>%
-        select(.id, SEASON, WEEK, GAME_ID, TEAM, OPPONENT, SIM_OUTCOME, SIM_MARGIN, PREGAME_ELO, POSTGAME_ELO) %>%
-        mutate_if(is.numeric, round, 0) %>%
-        summarize()
-
-```
-
-# Conference Championships
-
-```{r conference simulations}
-
-conference_divisions = 
-        tibble(SEASON = 2022,
-               CONFERENCE = "SEC",
-               CONFERENCE_DIVISION = c("East"),
-               TEAM = c("Florida",
-                        "Georgia",
-                        "Kentucky",
-                        "Missouri",
-                        "South Carolina",
-                        "Tennessee",
-                        "Vanderbilt")) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "SEC",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Alabama",
-                                  "Arkansas",
-                                  "Auburn",
-                                  "LSU",
-                                  "Mississippi State",
-                                  "Ole Miss",
-                                  "Texas A&M"))
-        ) %>%
-           bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Big Ten",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Illinois", 
-                                  "Iowa", 
-                                  "Minnesota",
-                                  "Nebraska",
-                                  "Northwestern",
-                                  "Purdue",
-                                  "Wisconsin"))
-           ) %>%
-         bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Big Ten",
-                         CONFERENCE_DIVISION = "East",
-                         TEAM = c("Indiana",
-                                  "Maryland",
-                                  "Michigan",
-                                  "Michigan State",
-                                  "Ohio State",
-                                  "Penn State",
-                                  "Rutgers"))
-         ) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "ACC",
-                         CONFERENCE_DIVISION = "Atlantic",
-                         TEAM = c("Boston College",
-                                  "Clemson",
-                                  "Florida State",
-                                  "Louisville",
-                                  "NC State",
-                                  "Syracuse",
-                                  "Wake Forest"))
-                  ) %>%
-                bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "ACC",
-                         CONFERENCE_DIVISION = "Coastal",
-                         TEAM = c("Duke",
-                                  "Georgia Tech",
-                                  "Miami",
-                                  "North Carolina",
-                                  "Pittsburgh",
-                                  "Virginia",
-                                  "Virginia Tech"))
-                ) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Mid-American",
-                         CONFERENCE_DIVISION = "East",
-                         TEAM = c("Akron",
-                                  "Bowling Green",
-                                  "Buffalo", 
-                                  "Kent State",
-                                  "Miami (OH)",
-                                  "Ohio"))
-        ) %>%
-                bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Mid-American",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Ball",
-                                  "Central Michigan",
-                                  "Eastern Michigan",
-                                  "Northern Illinois",
-                                  "Toledo",
-                                  "Western Michigan"))
-                  ) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Mountain West",
-                         CONFERENCE_DIVISION = "Mountain",
-                         TEAM = c("Air Force",
-                                  "Boise State",
-                                  "Colorado State",
-                                  "New Mexico",
-                                  "Utah State",
-                                  "Wyoming"))
-        ) %>%
-          bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Mountain West",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Fresno State",
-                                  "Hawai'i",
-                                  "Nevada",
-                                  "San Diego State",
-                                  "San Jose State",
-                                  "UNLV"))) %>%
-        bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Sun Belt",
-                         CONFERENCE_DIVISION = "East",
-                         TEAM = c("Appalachian State",
-                                  "Coastal Carolina",
-                                  "Georgia Southern",
-                                  "Georgia State",
-                                  "James Madison",
-                                  "Marshall",
-                                  "Old Dominion"))
-        ) %>% 
-                bind_rows(.,
-                  tibble(SEASON = 2022,
-                         CONFERENCE = "Sun Belt",
-                         CONFERENCE_DIVISION = "West",
-                         TEAM = c("Arkansas",
-                                  "Louisiana",
-                                  "Louisiana-Monre",
-                                  "South Alabama",
-                                  "Southern Miss",
-                                  "Texas State",
-                                  "Troy")))
-                                  
-```
 
 ```{r check on conference}
 
@@ -1361,7 +1007,7 @@ division_winners = division_wins %>%
 
 
 # for other conferences, need to just get top winning percentages
-conf_participants =  season_simulations %$% 
+conference_participants =  season_simulations %$% 
         game_outcomes %>%
         filter(
         (HOME_CONFERENCE == 'Pac-12' & AWAY_CONFERENCE == 'Pac-12') |
@@ -1393,26 +1039,84 @@ conf_participants =  season_simulations %$%
         mutate_at(c("win", "loss"),
                   ~ replace_na(., 0)) %>%
         mutate(perc = win / (win + loss)) %>%
-        group_by(.id, SEASON) %>%
+        group_by(.id, SEASON, CONFERENCE) %>%
+        arrange(desc(perc)) %>%
+    #    mutate(rank =  rank(desc(perc)))
         slice_max(perc, n=2, with_ties = T) %>%
-        ungroup() 
+        ungroup() %>%
+        group_by(.id, SEASON, CONFERENCE) %>%
+        mutate(rank = rank(desc(perc))) %>%
+        ungroup() %>%
+        group_by(.id, SEASON, CONFERENCE) %>%
+        mutate(participants = n())
+ 
+# now tiebreak
+conference_status = 
+        # teams that are in
+        conference_participants %>%
+        filter(rank <=2 & participants < 3) %>%
+        ungroup() %>%
+        # teams that need to have a tiebreaker based on head to head
+        bind_rows(.,
+                  conference_participants %>%
+                          filter(participants > 2) %>%
+                          left_join(.,
+                                      conference_participants %>%
+                                            filter(participants > 2) %>%
+                                            rename(OPPONENT=TEAM) %>%
+                                            select(.id, SEASON, CONFERENCE, OPPONENT),
+                                    by = c(".id", "SEASON", "CONFERENCE")
+                                    ) %>%
+                           left_join(.,
+                                     head_to_head_winners %>%
+                                             rename(head_to_head = winner)  %>%
+                                             select(.id, SEASON, CONFERENCE, TEAM, OPPONENT, head_to_head),
+                                     by = c(".id", "SEASON", "CONFERENCE", "TEAM", "OPPONENT")) %>%
+                          filter(TEAM != OPPONENT) %>%
+                          group_by(.id, SEASON, CONFERENCE, TEAM, loss, win, perc, rank) %>%
+                          mutate(head_to_head_win = case_when(TEAM == head_to_head ~ 1,
+                                                    TRUE ~ 0)) %>%
+                          summarize(head_to_head_wins = sum(head_to_head_win),
+                                    .groups = 'drop') %>%
+                          group_by(.id, SEASON, CONFERENCE) %>%
+                          slice_max(order_by = perc,
+                                    n = 2, 
+                                    with_ties=T)
+                  ) %>%
+        group_by(.id, SEASON, CONFERENCE) %>%
+        mutate(participants = n(),
+               max_perc = max(perc),
+               min_perc = min(perc)) %>%
+        mutate(status = case_when(participants == 2 ~ 1,
+                                  perc == max(perc) & perc > min(perc) ~ 1,
+                                  TRUE ~ 0)) %>%
+                group_by(.id, SEASON, CONFERENCE) %>%
+        mutate(spots_left = 2-sum(status)) 
 
-# conf participants
-conf_participants %>%
+# conference_booked
+conference_booked = conference_status %>%
+        select(.id, SEASON, TEAM, CONFERENCE, loss, win, perc, rank, participants, status,  spots_left) %>%
+        filter(status == 1) %>%
+        bind_rows(.,
+                  conference_status %>%
+                          select(.id, SEASON, TEAM, CONFERENCE, loss, win, perc, rank, participants, status,  spots_left) %>%
+                          filter(status == 0) %>%
+                          group_by(.id, SEASON, CONFERENCE) %>%
+                          sample_n(size = spots_left)
+                  ) %>%
         left_join(.,
-                  conf_participants %>%
-                          rename(OPPONENT=TEAM) %>%
-                          select(.id, SEASON, CONFERENCE, OPPONENT),
-                  by = c(".id", "SEASON", "CONFERENCE")) %>%
-         left_join(.,
-                  head_to_head_winners %>%
-                          rename(head_to_head = winner)  %>%
-                          select(.id, SEASON, CONFERENCE, TEAM, OPPONENT, head_to_head),
-                  by = c(".id", "SEASON", "CONFERENCE", "TEAM", "OPPONENT")) %>%
-        filter(TEAM == head_to_head | is.na(head_to_head))
+          season_simulations %$% 
+                          team_outcomes %>%
+                          group_by(.id, SEASON, TEAM) %>%
+                          filter(GAME_DATE == max(GAME_DATE)) %>%
+                          ungroup() %>%
+                          select(.id, SEASON, TEAM, POSTGAME_ELO),
+                  by = c(".id", "SEASON", "TEAM")) %>%
+        ungroup() %>%
+        rename(PREGAME_ELO = POSTGAME_ELO)
 
 # division wins
-conference_championships = division_winners %>%
+division_booked = division_winners %>%
         left_join(., division_winners %>%
                           filter(division_teams > 1) %>%
                           select(.id, SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM) %>%
@@ -1432,11 +1136,18 @@ conference_championships = division_winners %>%
         sample_n(1) %>%
         ungroup() 
 
+
+# combine into conference championships table
+conference_championships = bind_rows(division_booked,
+                                     conference_booked) %>%
+        arrange(.id,  CONFERENCE)
+
 ```
 
 ```{r simulate the damn conference championships}
 
 # simulate outcome
+set.seed(2000)
 conference_championship_results = conference_championships %>%
         select(.id, SEASON, TEAM, CONFERENCE, PREGAME_ELO) %>%
         group_by(.id, SEASON, CONFERENCE) %>%
@@ -1448,35 +1159,41 @@ conference_championship_results = conference_championships %>%
                     names_from = c("HOME"),
                     values_from = c("TEAM", "PREGAME_ELO")) %>%
         nest(-.id, -SEASON, -CONFERENCE) %>%
-        mutate(data=  map(data, ~ sim_game_margin(home_rating = .x$PREGAME_ELO_HOME,
+        mutate(result=  map(data, ~ sim_game_margin(home_rating = .x$PREGAME_ELO_HOME,
                                                     away_rating = .x$PREGAME_ELO_AWAY,
                                                     points_model) %>%
                                     as_tibble() %>%
                                     rename(HOME_SIM_MARGIN = value) %>%
                                   bind_cols(.x, .) %>%
-                                  mutate(WINNER= case_when(HOME_SIM_MARGIN >= 0 ~ TEAM_HOME,
+                                    mutate(HOME_SIM_MARGIN = case_when(HOME_SIM_MARGIN == 0 ~ sample(c(-1, 1), 1),
+                                                                       TRUE ~ HOME_SIM_MARGIN)) %>%
+                                  mutate(WINNER= case_when(HOME_SIM_MARGIN > 0 ~ TEAM_HOME,
                                                            HOME_SIM_MARGIN <0 ~ TEAM_AWAY),
                                          RUNNER_UP = case_when(HOME_SIM_MARGIN >= 0 ~ TEAM_AWAY,
                                                            HOME_SIM_MARGIN <0 ~ TEAM_HOME)))) %>%
+        mutate(update = map2(data, result, ~ get_new_elos(home_rating = .x$PREGAME_ELO_HOME,
+                                                         away_rating = .x$PREGAME_ELO_AWAY,
+                                                         home_field_advantage = 0,
+                                                         home_margin = .y$HOME_SIM_MARGIN,
+                                                         k = elo_pars$k,
+                                                         v = elo_pars$v) %>%
+                                     t() %>%
+                                     as_tibble() %>%
+                                     set_names(c("HOME_POSTGAME_ELO",
+                                                 "AWAY_POSTGAME_ELO",
+                                                 "HOME_EXPECTED_SCORE",
+                                                 "AWAY_EXPECTED_SCORE")))) %>%
+        select(.id, SEASON, CONFERENCE, data, result, update) %>%
         unnest() %>%
         ungroup() %>%
-        select(.id, SEASON, CONFERENCE, TEAM_HOME, TEAM_AWAY, HOME_SIM_MARGIN, WINNER, RUNNER_UP)
-
-## make color func
-bg_col_func = 
-        function(x) {
-                
-                breaks = c(0, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.75, 0.9, 1)
-                colorRamp=colorRampPalette(c("white", "grey50"))
-                col_palette <- colorRamp(length(breaks))
-                mycut <- cut(x, 
-                             breaks = breaks,
-                             include.lowest = TRUE, 
-                             right=T,
-                             label = FALSE)
-                col_palette[mycut]
-                
-        }
+        select(.id, SEASON, CONFERENCE, 
+               TEAM_HOME, TEAM_AWAY, 
+               PREGAME_ELO_HOME, PREGAME_ELO_AWAY,
+               HOME_POSTGAME_ELO, AWAY_POSTGAME_ELO,
+               HOME_SIM_MARGIN, 
+               WINNER, RUNNER_UP) %>%
+        rename(POSTGAME_ELO_HOME = HOME_POSTGAME_ELO,
+               POSTGAME_ELO_AWAY = AWAY_POSTGAME_ELO)
 
 # conference championship probs
 conference_championship_probs = 
@@ -1492,636 +1209,378 @@ conference_championship_probs =
                 mutate(perc = n/sims)  %>%
                 select(-n) %>%
                 spread(OUTCOME, perc) %>%
-        mutate_at(c("WINNER", "RUNNER_UP"),
+                mutate_at(c("WINNER", "RUNNER_UP"),
                           ~ replace_na(., 0)) %>%
-                mutate(DIVISION_WIN = RUNNER_UP + WINNER,
-                       CONFERENCE_WIN = WINNER) %>%
-        select(SEASON, CONFERENCE, TEAM, DIVISION_WIN, CONFERENCE_WIN),
+                rename(CHAMPION = WINNER) %>%
+                # mutate(DIVISION_WIN = RUNNER_UP + WINNER,
+                #        CONFERENCE_WIN = WINNER) %>%
+        select(SEASON, CONFERENCE, TEAM, CHAMPION, RUNNER_UP),
         by = c("SEASON","CONFERENCE", "TEAM"))
 
+source(here::here("functions", "table_conference_championship.R"))
+
 ```
 
+## Team Predictions
 
+### Win Total Probabilities
 
-```{r conference championship tables big ten}
+```{r table of win probabilities}
 
-# table
-conference_divisions %>%
-        filter(CONFERENCE == 'Big Ten') %>%
+source(here::here("functions", "table_wins_season.R"))
+
+table_wins_season(season_simulations %$%
+                          team_outcomes,
+                  games,
+                  2022)
+
+```
+
+### Strength of Schedule and Record
+
+```{r schedule difficulty and record}
+
+## make color func
+bg_bowl_func = 
+        function(x) {
+                
+                breaks = seq(0, 1, 0.01)
+                colorRamp=colorRampPalette(c("white", "deepskyblue1"))
+                col_palette <- colorRamp(length(breaks))
+                mycut <- cut(x, 
+                             breaks = breaks,
+                             include.lowest = TRUE, 
+                             right=T,
+                             label = FALSE)
+                col_palette[mycut]
+        }
+
+# table of difficulty and bowl
+preseason_predictions = games %>%
+        filter(SEASON == params$input_season) %>%
+        select(SEASON, NEUTRAL_SITE, 
+               HOME_TEAM, AWAY_TEAM,
+               HOME_CONFERENCE, AWAY_CONFERENCE,
+               HOME_DIVISION, AWAY_DIVISION) %>%
+        mutate(HOME = T) %>%
+        rename(TEAM = HOME_TEAM,
+               CONFERENCE = HOME_CONFERENCE,
+               DIVISION = HOME_DIVISION,
+               OPPONENT = AWAY_TEAM,
+               OPPONENT_CONFERENCE = AWAY_CONFERENCE) %>%
+        bind_rows(.,
+                  games %>%
+                filter(SEASON == params$input_season) %>%
+                select(SEASON, NEUTRAL_SITE, AWAY_TEAM, HOME_TEAM, AWAY_CONFERENCE, HOME_CONFERENCE, HOME_DIVISION, AWAY_DIVISION) %>%
+                mutate(HOME = F) %>%
+                rename(TEAM = AWAY_TEAM,
+                       CONFERENCE = AWAY_CONFERENCE,
+                       DIVISION = AWAY_DIVISION,
+                       OPPONENT = HOME_TEAM,
+                       OPPONENT_CONFERENCE = HOME_CONFERENCE)) %>%
         left_join(.,
-        conference_championship_results %>%
-                gather("OUTCOME", "TEAM", 
-                       -.id, -SEASON, -CONFERENCE, -TEAM_HOME, -TEAM_AWAY, -HOME_SIM_MARGIN) %>%
-                mutate(sims = n_distinct(.id)) %>%
-                group_by(SEASON, CONFERENCE, OUTCOME, TEAM, sims) %>%
-                count() %>%
-                ungroup() %>%
-                mutate(perc = n/sims)  %>%
-                select(-n) %>%
-                spread(OUTCOME, perc) %>%
-                mutate_at(c("WINNER", "RUNNER_UP"),
-                          ~ replace_na(., 0)) %>%
-                mutate(APPEARANCE = WINNER + RUNNER_UP),
-                # left_join(., conference_divisions %>%
-                #                   select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION),
-                #                   by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        mutate_at(c("RUNNER_UP", "WINNER", "APPEARANCE"),
-                  ~ replace_na(., 0)) %>%
-        select(SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, WINNER, RUNNER_UP, APPEARANCE) %>%
-        arrange(CONFERENCE_DIVISION, desc(APPEARANCE)) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        rename(Season = SEASON,
-               Conference = CONFERENCE,
-               Division = CONFERENCE_DIVISION,
-               Team = TEAM,
-               Champion = WINNER,
-               `Runner-Up` = RUNNER_UP,
-               Appearance = APPEARANCE) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(.,
-           j = c("Champion", "Runner-Up", "Appearance"),
-           bg = bg_col_func) %>%
-        add_header_row(.,
-                       values = paste("    ", params$input_season, "Conference Championship Probabilties"),
-                       colwidths = c(7)) %>%
-        flextable::align(part = "header", align = "center") %>%
-        flextable::align(j = c("Season", "Conference","Division","Champion", "Runner-Up", "Appearance"),
-                               part = "body",
-                               align = "center") %>%
-        flextable::align(j = c("Team"),
-                         part = "header",
-                         align = "left")
-
-```
-
-```{r conference championship tables sec}
-
-# table
-conference_divisions %>%
-        filter(CONFERENCE == 'SEC') %>%
+                          do.call(rbind, c(adjusted_teams,
+                           base_teams[!(names(base_teams) %in% names(adjusted_teams))])) %>% 
+                          as.data.frame() %>% 
+                          rownames_to_column("OPPONENT") %>%
+                          rename(OPPONENT_ELO = V1),
+                  by = c("OPPONENT")) %>%
         left_join(.,
-        conference_championship_results %>%
-                gather("OUTCOME", "TEAM", 
-                       -.id, -SEASON, -CONFERENCE, -TEAM_HOME, -TEAM_AWAY, -HOME_SIM_MARGIN) %>%
-                mutate(sims = n_distinct(.id)) %>%
-                group_by(SEASON, CONFERENCE, OUTCOME, TEAM, sims) %>%
-                count() %>%
-                ungroup() %>%
-                mutate(perc = n/sims)  %>%
-                select(-n) %>%
-                spread(OUTCOME, perc) %>%
-                mutate_at(c("WINNER", "RUNNER_UP"),
-                          ~ replace_na(., 0)) %>%
-                mutate(APPEARANCE = WINNER + RUNNER_UP),
-                # left_join(., conference_divisions %>%
-                #                   select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION),
-                #                   by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        mutate_at(c("RUNNER_UP", "WINNER", "APPEARANCE"),
+                          do.call(rbind, c(adjusted_teams,
+                           base_teams[!(names(base_teams) %in% names(adjusted_teams))])) %>% 
+                          as.data.frame() %>% 
+                          rownames_to_column("TEAM") %>%
+                          rename(TEAM_ELO = V1),
+                  by = c("TEAM")) %>%
+        mutate(OPPONENT_ELO = case_when(HOME == F ~ OPPONENT_ELO + 75,
+                                        HOME == T ~ OPPONENT_ELO - 75)) %>%
+        filter(DIVISION == 'fbs') %>%
+        mutate_at(c("OPPONENT_ELO"),
                   ~ replace_na(., 0)) %>%
-        select(SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, WINNER, RUNNER_UP, APPEARANCE) %>%
-        arrange(CONFERENCE_DIVISION, desc(APPEARANCE)) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        rename(Season = SEASON,
-               Conference = CONFERENCE,
-               Division = CONFERENCE_DIVISION,
-               Team = TEAM,
-               Champion = WINNER,
-               `Runner-Up` = RUNNER_UP,
-               Appearance = APPEARANCE) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(.,
-           j = c("Champion", "Runner-Up", "Appearance"),
-           bg = bg_col_func) %>%
-        add_header_row(.,
-                       values = paste("    ", params$input_season, "Conference Championship Probabilties"),
-                       colwidths = c(7)) %>%
-        flextable::align(part = "header", align = "center") %>%
-        flextable::align(j = c("Season", "Conference","Division","Champion", "Runner-Up", "Appearance"),
-                               part = "body",
-                               align = "center") %>%
-        flextable::align(j = c("Team"),
-                         part = "header", align = "left")
-        
-
-```
-
-```{r conference championship tables acc}
-
-# table
-conference_divisions %>%
-        filter(CONFERENCE == 'ACC') %>%
+        group_by(SEASON, TEAM, TEAM_ELO) %>%
+        summarize(OPPONENT_MEAN_ELO = mean(OPPONENT_ELO),
+                  OPPONENT_MEDIAN_ELO = median(OPPONENT_ELO),
+                  diff = mean(TEAM_ELO - OPPONENT_ELO),
+                  .groups = 'drop') %>%
+        arrange(desc(OPPONENT_MEAN_ELO)) %>%
+        mutate_if(is.numeric, round, 1) %>%
+        mutate(RANK = row_number()) %>%
+        select(SEASON, RANK,
+               TEAM, 
+               TEAM_ELO, 
+               OPPONENT_MEAN_ELO, 
+               OPPONENT_MEDIAN_ELO) %>%
+        select(SEASON, RANK, TEAM, TEAM_ELO, OPPONENT_MEAN_ELO) %>%
+        rename(SCHEDULE_RANK = RANK) %>%
         left_join(.,
-        conference_championship_results %>%
-                gather("OUTCOME", "TEAM", 
-                       -.id, -SEASON, -CONFERENCE, -TEAM_HOME, -TEAM_AWAY, -HOME_SIM_MARGIN) %>%
-                mutate(sims = n_distinct(.id)) %>%
-                group_by(SEASON, CONFERENCE, OUTCOME, TEAM, sims) %>%
-                count() %>%
-                ungroup() %>%
-                mutate(perc = n/sims)  %>%
-                select(-n) %>%
-                spread(OUTCOME, perc) %>%
-                mutate_at(c("WINNER", "RUNNER_UP"),
+                  # elo and win totals
+        season_simulations %$%
+                team_outcomes %>% 
+                group_by(.id, SEASON, TEAM, CONFERENCE, SIM_OUTCOME) %>%
+                count() %>% 
+                group_by(SEASON, TEAM, CONFERENCE, SIM_OUTCOME) %>%
+                summarize(mean = mean(n),
+                          median = median(n),
+                          .groups = 'drop') %>%
+                select(-median) %>%
+                spread(SIM_OUTCOME, mean) %>%
+                mutate_at(c("win", "loss"),
                           ~ replace_na(., 0)) %>%
-                mutate(APPEARANCE = WINNER + RUNNER_UP),
-                # left_join(., conference_divisions %>%
-                #                   select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION),
-                #                   by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        by = c("SEASON", "TEAM", "CONFERENCE")) %>%
-        mutate_at(c("RUNNER_UP", "WINNER", "APPEARANCE"),
-                  ~ replace_na(., 0)) %>%
-        select(SEASON, CONFERENCE, CONFERENCE_DIVISION, TEAM, WINNER, RUNNER_UP, APPEARANCE) %>%
-        arrange(CONFERENCE_DIVISION, desc(APPEARANCE)) %>%
-        mutate(SEASON = factor(SEASON)) %>%
+                select(SEASON, TEAM, win, loss) %>%
+                arrange(desc(win)) %>%
+                mutate_if(is.numeric, round, 2) %>%
+                left_join(.,
+                          season_simulations %$%
+                team_outcomes %>% 
+                group_by(SEASON, TEAM) %>% 
+                filter(GAME_DATE == max(GAME_DATE)) %>% 
+                summarize(ELO = round(mean(POSTGAME_ELO),0),
+                          .groups = 'drop') %>%
+                arrange(desc(ELO)),
+                by = c("SEASON", "TEAM")) %>%
+                select(SEASON, TEAM, win, loss),
+        by = c("SEASON", "TEAM")) %>%
+        left_join(.,
+                  season_simulations %$%
+                        team_outcomes %>% 
+                        filter(DIVISION == 'fbs') %>%
+                        mutate(win = case_when(SIM_OUTCOME == 'win' ~ 1, TRUE ~ 0)) %>% 
+                        mutate(sims = n_distinct(.id)) %>% 
+                        group_by(.id, SEASON, TEAM, CONFERENCE, SIM_OUTCOME, sims) %>% 
+                        summarize(wins = sum(win), .groups = 'drop') %>% 
+                        filter(wins >=6) %>%
+                        group_by(SEASON, TEAM, sims) %>% 
+                        count() %>%
+                        ungroup() %>% 
+                        mutate(BOWL = n/sims) %>% 
+                        select(SEASON, TEAM, BOWL),
+                  by = c("SEASON", "TEAM")) %>%
+        left_join(.,
+                  conference_championship_probs,
+                  by = c("TEAM", "SEASON"))
+
+# make datatable
+preseason_predictions %>%
+        mutate(TEAM = factor(TEAM)) %>%
+        mutate(CONFERENCE = factor(CONFERENCE)) %>%
         rename(Season = SEASON,
-               Conference = CONFERENCE,
-               Division = CONFERENCE_DIVISION,
                Team = TEAM,
-               Champion = WINNER,
-               `Runner-Up` = RUNNER_UP,
-               Appearance = APPEARANCE) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(.,
-           j = c("Champion", "Runner-Up", "Appearance"),
-           bg = bg_col_func) %>%
-        add_header_row(.,
-                       values = paste("    ", params$input_season, "Conference Championship Probabilties"),
-                       colwidths = c(7)) %>%
-        flextable::align(part = "header", align = "center") %>%
-        flextable::align(j = c("Season", "Conference","Division","Champion", "Runner-Up", "Appearance"),
-                               part = "body",
-                               align = "center") %>%
-        flextable::align(j = c("Team"),
-                         part = "header", align = "left")
+               Conference = CONFERENCE,
+               Difficulty = SCHEDULE_RANK,
+               Wins = win,
+               Losses = loss,
+               Bowl = BOWL,
+               Conf.Ch. = CHAMPION,
+               Rating = TEAM_ELO) %>%
+        mutate_at(c("Conf.Ch."),
+                  ~ replace_na(.,0)) %>%
+        select(Season,
+               Conference,
+               Team,
+               Difficulty,
+               Wins,
+               Losses,
+               Bowl, 
+               Conf.Ch.) %>%
+           datatable(escape=F,
+                  rownames = F,
+                       filter = 'top',
+                  options = list(pageLength = 25,
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(list(className = 'dt-center',
+                                                        targets = c("Season", "Conference",
+                                                                    "Team", "Difficulty",
+                                                                    "Wins",
+                                                                    "Losses",
+                                                                    "Conf.Ch.")))))
+
+```
+
+## Conference Championship Probabilities
+
+### SEC 
+
+```{r conf champ sec}
+
+table_conference_championship(conference_championship_probs,
+                              'SEC')
+
+```
+
+### Big Ten
+
+```{r conf champ big ten}
+
+table_conference_championship(conference_championship_probs,
+                              'Big Ten')
+
+```
+
+### Big 12
+
+```{r conference championship tables big 12}
+
+table_conference_championship(conference_championship_probs,
+                              'Big 12')
+
+```
+
+### ACC
+
+```{r conference champs acc}
+
+table_conference_championship(conference_championship_probs,
+                              'ACC')
+
+```
+
+### Pac-12
+
+```{r conference champs pac 12}
+
+table_conference_championship(conference_championship_probs,
+                              'Pac-12')
+
+```
+
+### American Athletic
+
+```{r conference championship tables aac}
+
+table_conference_championship(conference_championship_probs,
+                              'American Athletic')
+
+```
+
+
+### Sun Belt
+
+```{r conference championship tables conf usa}
+
+table_conference_championship(conference_championship_probs,
+                              'Sun Belt')
+
+```
+
+### Mountain West
+
+```{r conference champs mountain west}
+
+table_conference_championship(conference_championship_probs,
+                              'Mountain West')
+
+```
+
+### Mid-American
+
+```{r conference champs mid america}
+
+table_conference_championship(conference_championship_probs,
+                              'Mid-American')
+
+```
+
+### Conference USA
+
+```{r conference champs conf usa}
+
+table_conference_championship(conference_championship_probs,
+                              'Conference USA')
+
+```
+
+# One Simulated Season
+
+```{r randomly sample and look at results}
+
+set.seed(1999)
+samp = sample(1:1000, 1)
+max_week = max(season_simulations$game_outcomes$WEEK)
+
+set.seed(1999)
+season_simulations %$%
+        game_outcomes %>%
+        filter(.id == samp) %>%
+        rename(HOME_MARGIN = HOME_SIM_MARGIN,
+               sim = .id) %>%
+        mutate(CONFERENCE_GAME = case_when(HOME_CONFERENCE == AWAY_CONFERENCE ~ T,
+                                           TRUE ~ F)) %>%
+        select(sim, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_MARGIN) %>%
+        bind_rows(.,
+                  conference_championship_results %>%
+                          filter(.id == samp) %>%
+                          rename(HOME_TEAM = TEAM_HOME,
+                                 AWAY_TEAM = TEAM_AWAY,
+                                 HOME_MARGIN = HOME_SIM_MARGIN,
+                                 sim = .id) %>%
+                          mutate(WEEK = max_week + 1) %>%
+                          mutate(CONFERENCE_GAME = T) %>%
+                          select(sim, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_MARGIN)) %>%
         
+        mutate(WINNER = case_when(HOME_MARGIN > 0 ~ HOME_TEAM,
+                                  HOME_MARGIN < 0 ~ AWAY_TEAM)) %>%
+        rename(Sim = sim,
+               Season = SEASON,
+               Week = WEEK,
+               Home = HOME_TEAM,
+               Away = AWAY_TEAM,
+               Margin = HOME_MARGIN,
+               Winner = WINNER) %>%
+         datatable(escape=F,
+                  rownames = F)
 
 ```
 
-# Bowls
+```{r save output}
 
+# save preseason ratings
+save(adjusted_teams,
+     file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "adjusted_teams.Rdata"))
 
+# base
+save(base_teams,
+     file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "base_teams.Rdata"))
 
-```{r rankings by type}
+# save results of simulations
+save(season_simulations,
+     file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "season_simulations.Rdata"))
 
-load(here::here("data", "season_team_rankings_type.Rdata"))
+# save conference championship results
+save(conference_championship_results,
+     file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "conference_champ_sims.Rdata"))
 
-col_type_func =  
-                function(x) {
-                        
-                        breaks = c(-1, -0.8, -.5, -.4, -.3, -.2, -.1, -0.05, -0.03, -0.01, -0.001, -0.0005,
-                                   0, 0.0005, 0.001, 0.01,0.03, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1)
-                        colorRamp=colorRampPalette(c("red", "white", "deepskyblue"))
-                        col_palette <- colorRamp(length(breaks))
-                        mycut <- cut(x, 
-                                     breaks = breaks,
-                                     include.lowest = TRUE, 
-                                     right=T,
-                                     label = FALSE)
-                        col_palette[mycut]
-                        
-                }
-        
-```
+# table of probabilities
+save(conference_championship_probs,
+     file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "conference_champ_probs.Rdata"))
 
-```{r plot team historicalhistorical}
+# save 
+save(preseason_ratings,
+     file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "preseason_ratings.Rdata"))
 
-#min_date = min(elo_teams$GAME_DATE)[1]
-min_date = as.Date(paste("1950-01-01"))
-min_year = year(min_date)
-#min_year = 1900
-
-smooth = T
-team = 'Tennessee'
-
-source(here::here("functions", "theme_phil.R"))
-
-all_teams_data = elo_teams %>%
-                filter(SEASON > min_year) %>%
-                filter(DIVISION == 'fbs') 
-        
-all_teams_median = all_teams_data %>%
-                summarize(median = median(POSTGAME_ELO)) %>%
-                pull(median)
-        
-p = all_teams_data %>%
-                ggplot(., aes(x=GAME_DATE,
-                              by = TEAM,
-                              y= POSTGAME_ELO))+
-                geom_point(alpha = 0.008)+
-                geom_hline(yintercept = all_teams_median,
-                           linetype = 'dashed',
-                           color = 'grey60')+
-                annotate("text",
-                         x = min_date,
-                         y=all_teams_median + 40,
-                         size = 3,
-                         color = 'grey60',
-                         label = paste("FBS", "\n", "Median"))
-        
-team_data = elo_teams %>%
-                filter(SEASON > min_year) %>%
-                filter(TEAM %in% team) %>%
-                mutate(SELECTED_TEAM = TEAM) %>%
-                group_by(TEAM) %>%
-                mutate(TEAM_LABEL = case_when(GAME_DATE == max(GAME_DATE) ~ TEAM)) %>%
-                ungroup()
-        
-        
-if(smooth == T ) {p = p + geom_line(data =team_data,
-                          aes(color = TEAM),
-                          stat = 'smooth',
-                          formula = 'y ~ x',
-                          method = 'loess',
-                          alpha =0.85,
-                          span = 0.15,
-                          lwd = 1.04)} else {p = p}
-        
-        p + geom_text_repel(data =team_data,
-                                aes(label = TEAM_LABEL,
-                                    color =TEAM),
-                        fontface = "bold",
-                        size = 4,
-                        direction = "y",
-                        hjust = -1.2,
-                        segment.size = .7,
-                        segment.alpha = .5,
-                        segment.linetype = "dotted",
-                        box.padding = .4,
-                        segment.curvature = -0.1,
-                        segment.ncp = 3,
-                        segment.angle = 20
-                ) +
-                geom_point(data = team_data,
-                           aes(color = TEAM),
-                           alpha  =0.4)+
-                theme_phil()+
-                ggtitle(paste("Historical Elo Rating(s) for", paste(team, collapse="-")),
-                        subtitle = str_wrap(paste('Displaying Postagme Elo Ratings for all FBS teams from',
-                                                  min_year, 'to present. Highlighted points/line indicate selected team.'), 120))+
-                theme(plot.title = element_text(hjust = 0.5, size = 16),
-                      plot.subtitle =  element_text(hjust = 0.5),
-                      strip.text.x = element_text(size = 12))+
-                custom_color_teams+
-                guides(color = 'none')+
-                xlab("Game Date")+
-                ylab("Postgame Elo Rating")+
-                scale_x_date(breaks = as.Date(paste(seq(min_year, 2020, 10), "01", "01", sep="-")),
-                             #date_breaks = c("10 year"),
-                             date_labels = c("%Y"))+
-                xlab("Season (Game Date)")
+# 
+save(preseason_predictions,
+          file = here::here("simulations",
+                       "preseason",
+                       params$input_season,
+                       "preseason_predictions.Rdata"))
 
 ```
-
-```{r historical upsets}
-
-# upset
-elo_teams %>%
-        left_join(., elo_games %>%
-                          select(GAME_ID, NEUTRAL_SITE),
-                  by = c("GAME_ID")) %>%
-        filter(SEASON >= 1950) %>%
-        filter(TEAM == team) %>%
-        filter(OUTCOME == 'loss') %>%
-        arrange(desc(WIN_PROB)) %>%
-        rename(DATE = GAME_DATE) %>%
-        mutate(SCORE = paste(POINTS, "-", OPPONENT_POINTS)) %>%
-        mutate(OPPONENT = case_when(HOME == F ~ paste("@", OPPONENT),
-                                    HOME == T ~ paste("vs", OPPONENT))) %>%
-        mutate(RANK = row_number()) %>%
-        rename(ELO = PREGAME_ELO,
-               OPPONENT_ELO = OPPONENT_PREGAME_ELO) %>%
-        mutate(ELO_DIFF = case_when(HOME == T & NEUTRAL_SITE ==F ~ ((75 + ELO) - OPPONENT_ELO),
-                                    HOME == F & NEUTRAL_SITE == F~ -((OPPONENT_ELO + 75) - ELO),
-                                    NEUTRAL_SITE==T~ ELO - OPPONENT_ELO)) %>%
-        mutate(PRED_MARGIN = round(.05 * ELO_DIFF, 1))  %>%
-        select(RANK, SEASON, WEEK, TEAM,  OPPONENT, WIN_PROB, PRED_MARGIN, OUTCOME, SCORE) %>%
-        mutate_if(is.numeric, round, 3)
-
-```
-
-```{r historical upsets games should not have won}
-
-# upset
-elo_teams %>%
-        left_join(., elo_games %>%
-                          select(GAME_ID, NEUTRAL_SITE),
-                  by = c("GAME_ID")) %>%
-        filter(SEASON >= 1950) %>%
-        filter(TEAM == team) %>%
-        filter(OUTCOME == 'win') %>%
-        arrange(WIN_PROB) %>%
-        rename(DATE = GAME_DATE) %>%
-        mutate(SCORE = paste(POINTS, "-", OPPONENT_POINTS)) %>%
-        mutate(OPPONENT = case_when(HOME == F ~ paste("@", OPPONENT),
-                                    HOME == T ~ paste("vs", OPPONENT))) %>%
-        mutate(RANK = row_number()) %>%
-        rename(ELO = PREGAME_ELO,
-               OPPONENT_ELO = OPPONENT_PREGAME_ELO) %>%
-        mutate(ELO_DIFF = case_when(HOME == T & NEUTRAL_SITE ==F ~ ((75 + ELO) - OPPONENT_ELO),
-                                    HOME == F & NEUTRAL_SITE == F~ -((OPPONENT_ELO + 75) - ELO),
-                                    NEUTRAL_SITE==T~ ELO - OPPONENT_ELO)) %>%
-        mutate(PRED_MARGIN = round(.05 * ELO_DIFF, 1))  %>%
-        select(RANK, SEASON, WEEK, TEAM,  OPPONENT, WIN_PROB, PRED_MARGIN, OUTCOME, SCORE) %>%
-        mutate_if(is.numeric, round, 3)
-
-```
-
-best teams by Elo
-
-```{r best teams for florida state}
-
-elo_teams %>%
-        left_join(., elo_games %>%
-                          select(GAME_ID, NEUTRAL_SITE),
-                  by = c("GAME_ID")) %>%
-        filter(SEASON >= 1950) %>%
-        filter(TEAM == team) %>%
-        group_by(SEASON) %>%
-        filter(GAME_DATE == max(GAME_DATE)) %>%
-        ungroup() %>%
-        rename(ELO = POSTGAME_ELO) %>%
-        select(SEASON, TEAM, ELO) %>%
-        mutate_if(is.numeric, round, 2) %>%
-        arrange(desc(ELO)) %>%
-        head(10)
-
-```
-
-best teams by overall efficiency
-
-```{r best team by overall efficiency}
-
-season_team_rankings %>%
-        filter(TYPE == 'adjusted') %>%
-        filter(TEAM == team) %>% 
-        arrange(desc(OVERALL)) %>%
-        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL)
-
-```
-
-
-```{r best teams by offense}
-
-season_team_rankings %>%
-        filter(TYPE == 'adjusted') %>%
-        filter(TEAM == team) %>% 
-        arrange(desc(OFFENSE)) %>%
-        select(SEASON, TEAM, TYPE, OFFENSE, DEFENSE, OVERALL)
-
-```
-
-
-```{r efficiency}
-
-plot_dat = season_team_rankings %>%
-        filter(TYPE == 'adjusted') %>%
-        select(-LOAD_DATE) %>%
-        gather("metric", "value",
-               -SEASON, -TEAM, -TYPE) %>%
-        left_join(., team_mapping,
-                  by = c("TEAM")) %>%
-        left_join(., team_conference_season,
-                  by = c("TEAM", "SEASON")) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        mutate(metric = factor(metric, levels = c("OVERALL", "OFFENSE", "DEFENSE"))) %>%
-        group_by(SEASON, TYPE, metric) %>%
-        arrange(desc(value)) %>%
-        mutate(RANK = row_number()) %>%
-        ungroup() %>%
-        group_by(metric) %>%
-        mutate(min = min(value)) %>%
-        ungroup()
-
-all_teams = plot_dat %>%
-        ggplot(., aes(x=SEASON,
-                      y=value))+
-        geom_point(position = position_auto(scale=F,
-                                            seed = 1),
-                           #position_jitternormal(sd_x= 0.12,
-                            #                        sd_y = 0),
-            #       fill = 'grey60',
-             #      color = 'white',
-            color = 'grey60',
-            alpha = 0.4)+
-        facet_wrap(metric ~.,
-                   scales = "free_y",
-                   ncol = 1)+
-        theme_phil()+
-        geom_hline(yintercept =0)+
-        guides(color = 'none')+
-        ylab("Team Net Predicted Points per Play")
-
-all_teams + 
-        geom_point(data = plot_dat %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      group = TEAM),
-                  lwd = 1.2)+
-        geom_line(data = plot_dat %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      group = TEAM),
-                  lwd = 1.2)+
-        geom_text(data = plot_dat %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      x = SEASON,
-                      label = RANK,
-                      y = min))+
-        custom_color_teams+
-        guides(color = 'none')+
-        theme(plot.title = element_text(hjust = 0.5,
-                                                size = 18),
-              axis.text.x = element_text(size = 12),
-              plot.subtitle =  element_text(hjust = 0.5),
-              strip.text.x = element_text(size = 12,
-                                                  hjust = 0.5))+
-        ggtitle(paste("College Football Efficiency Metrics by Season - ", team),
-                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. The background points in grey show the distribution of all teams in a given season. The highlighted line shows ", team, "'s rating by season with their season rank above the year.", sep=""), 140))+
-        xlab("")
-
-```
-
-offense defense by type
-
-```{r look at offense defense by type}
-
-plot_dat_type = season_team_rankings_type %>%
-        filter(TYPE == 'adjusted') %>%
-        gather("metric", "value",
-               -SEASON, -TEAM, -TYPE) %>%
-        filter(metric %in% c("OFFENSE_PASS", "OFFENSE_RUN","DEFENSE_PASS", "DEFENSE_RUN")) %>%
-        separate(metric, into = c("SIDE", "PLAY"), sep="_") %>%
-        left_join(., team_mapping,
-                  by = c("TEAM")) %>%
-        left_join(., team_conference_season,
-                  by = c("TEAM", "SEASON")) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        mutate(PLAY = factor(PLAY, levels = c("PASS", "RUN")),
-               SIDE = factor(SIDE, levels = c("OFFENSE", "DEFENSE"))) %>%
-        group_by(SEASON, TYPE, SIDE, PLAY) %>%
-        arrange(desc(value)) %>%
-        mutate(RANK = row_number()) %>%
-        ungroup() %>%
-        group_by(TYPE, SIDE, PLAY) %>%
-        mutate(min = min(value)) %>%
-        ungroup()
-
-all_teams_offense_type = plot_dat_type %>%
-        filter(SIDE == 'OFFENSE') %>%
-        ggplot(., aes(x=SEASON,
-                      y=value))+
-        geom_point(position = position_auto(scale=F,
-                                            seed = 1),
-                           #position_jitternormal(sd_x= 0.12,
-                            #                        sd_y = 0),
-            #       fill = 'grey60',
-             #      color = 'white',
-            color = 'grey60',
-            alpha = 0.4)+
-        facet_wrap(SIDE + PLAY ~.,
-                   scales = "free_y",
-                   ncol = 1)+
-        theme_phil()+
-        geom_hline(yintercept =0)+
-        guides(color = 'none')+
-        ylab("Team Net Predicted Points per Play")
-
-all_teams_offense_type + 
-       geom_point(data = plot_dat_type %>%
-                          filter(SIDE == 'OFFENSE') %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      group = TEAM),
-                  lwd = 1.2)+
-        geom_line(data = plot_dat_type %>%
-                          filter(SIDE == 'OFFENSE') %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      group = TEAM),
-                  lwd = 1.2)+
-        geom_text(data = plot_dat_type %>%
-                          filter(SIDE == 'OFFENSE') %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      x = SEASON,
-                      label = RANK,
-                      y = min))+
-        custom_color_teams+
-        guides(color = 'none')+
-        theme(plot.title = element_text(hjust = 0.5,
-                                                size = 18),
-              axis.text.x = element_text(size = 12),
-              plot.subtitle =  element_text(hjust = 0.5),
-              strip.text.x = element_text(size = 12,
-                                                  hjust = 0.5))+
-        ggtitle(paste("College Football Offense Efficiency by Season - ", team),
-                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. The background points in grey show the distribution of all teams in a given season. The highlighted line shows ", team, "'s rating by season with their season rank above the year.", sep=""), 140))+
-        xlab("")
-```
-
-```{r defense efficiency type}
-
-plot_dat_type = season_team_rankings_type %>%
-        filter(TYPE == 'adjusted') %>%
-        gather("metric", "value",
-               -SEASON, -TEAM, -TYPE) %>%
-        filter(metric %in% c("OFFENSE_PASS", "OFFENSE_RUN","DEFENSE_PASS", "DEFENSE_RUN")) %>%
-        separate(metric, into = c("SIDE", "PLAY"), sep="_") %>%
-        left_join(., team_mapping,
-                  by = c("TEAM")) %>%
-        left_join(., team_conference_season,
-                  by = c("TEAM", "SEASON")) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        mutate(PLAY = factor(PLAY, levels = c("PASS", "RUN")),
-               SIDE = factor(SIDE, levels = c("OFFENSE", "DEFENSE"))) %>%
-        group_by(SEASON, TYPE, SIDE, PLAY) %>%
-        arrange(desc(value)) %>%
-        mutate(RANK = row_number()) %>%
-        ungroup() %>%
-        group_by(TYPE, SIDE, PLAY) %>%
-        mutate(min = min(value)) %>%
-        ungroup()
-
-all_teams_defense_type = plot_dat_type %>%
-        filter(SIDE == 'DEFENSE') %>%
-        ggplot(., aes(x=SEASON,
-                      y=value))+
-        geom_point(position = position_auto(scale=F,
-                                            seed = 1),
-                           #position_jitternormal(sd_x= 0.12,
-                            #                        sd_y = 0),
-            #       fill = 'grey60',
-             #      color = 'white',
-            color = 'grey60',
-            alpha = 0.4)+
-        facet_wrap(SIDE + PLAY ~.,
-                   scales = "free_y",
-                   ncol = 1)+
-        theme_phil()+
-        geom_hline(yintercept =0)+
-        guides(color = 'none')+
-        ylab("Team Net Predicted Points per Play")
-
-all_teams_defense_type + 
-       geom_point(data = plot_dat_type %>%
-                          filter(SIDE == 'DEFENSE') %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      group = TEAM),
-                  lwd = 1.2)+
-        geom_line(data = plot_dat_type %>%
-                          filter(SIDE == 'DEFENSE') %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      group = TEAM),
-                  lwd = 1.2)+
-        geom_text(data = plot_dat_type %>%
-                          filter(SIDE == 'DEFENSE') %>%
-                          filter(TEAM == team),
-                  aes(color = TEAM,
-                      x = SEASON,
-                      label = RANK,
-                      y = min))+
-        custom_color_teams+
-        guides(color = 'none')+
-        theme(plot.title = element_text(hjust = 0.5,
-                                                size = 18),
-              axis.text.x = element_text(size = 12),
-              plot.subtitle =  element_text(hjust = 0.5),
-              strip.text.x = element_text(size = 12,
-                                                  hjust = 0.5))+
-        ggtitle(paste("College Football Defense Efficiency by Season - ", team),
-                subtitle = str_wrap(paste("Displaying opponent adjusted ratings for all teams based on net points added per play. The background points in grey show the distribution of all teams in a given season. The highlighted line shows ", team, "'s rating by season with their season rank above the year.", sep=""), 140))+
-        xlab("")
-
-```
-
-
-
-
-```{r table efficiency}
-
-season_team_rankings_type %>%
-        filter(TEAM == team) %>%
-        filter(TYPE == 'adjusted') %>%
-        arrange(SEASON) %>%
-        mutate(SEASON = factor(SEASON)) %>%
-        select(SEASON, TEAM, TYPE, OFFENSE_PASS, OFFENSE_RUN, DEFENSE_PASS, DEFENSE_RUN) %>%
-        flextable() %>%
-        autofit() %>%
-        bg(., j= c("OFFENSE_RUN", "OFFENSE_PASS",
-                   "DEFENSE_RUN", "DEFENSE_PASS"),
-           bg = col_type_func) %>%
-        flextable::align(j = c("OFFENSE_RUN", "OFFENSE_PASS",
-                   "DEFENSE_RUN", "DEFENSE_PASS"),
-              align = 'center')
-
-```
-
-

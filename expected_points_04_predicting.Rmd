@@ -303,30 +303,45 @@ selected_pars = tibble(k = 35,
                        v = 400,
                        reversion = 0.2,
                        home_field_advantage = 75)
-
-# now get the elo ratings based on this training set
-elo_games= calc_elo_ratings(games %>%
-                                    filter(SEASON < 2022),
-                            home_field_advantage = selected_pars$home_field_advantage,
-                          reversion = selected_pars$reversion,
-                          k = selected_pars$k,
-                          v = selected_pars$v,
-                          verbose = T)
-
-# get fbs teams
-teams = elo_games$team_outcomes %>%
-        filter(SEASON == 2021) %>%
-        filter(DIVISION == 'fbs') %>%
-        distinct(TEAM) %>%
-        arrange(TEAM)
-
-# extract team elo ratings
-team_elo_ratings = elo_games$team_outcomes
-
-# game
-game_elo_ratings = elo_games$game_outcomes
+# 
+# # now get the elo ratings based on this training set
+# elo_games= calc_elo_ratings(games %>%
+#                                     filter(SEASON < 2022),
+#                             home_field_advantage = selected_pars$home_field_advantage,
+#                           reversion = selected_pars$reversion,
+#                           k = selected_pars$k,
+#                           v = selected_pars$v,
+#                           verbose = T)
+# 
+# # get fbs teams
+# teams = elo_games$team_outcomes %>%
+#         filter(SEASON == 2021) %>%
+#         filter(DIVISION == 'fbs') %>%
+#         distinct(TEAM) %>%
+#         arrange(TEAM)
+# 
+# # extract team elo ratings
+# team_elo_ratings = elo_games$team_outcomes
+# 
+# # game
+# game_elo_ratings = elo_games$game_outcomes
 
 ```
+
+
+```{r query elo from snowflake}
+
+# query from snowflake
+# games
+game_elo_ratings = DBI::dbGetQuery(myconn,
+                                   "SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ELO_GAME_OUTCOMES")
+
+# teams
+team_elo_ratings = DBI::dbGetQuery(myconn,
+                                   "SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ELO_TEAM_OUTCOMES")
+
+```
+
 
 Elo ratings are the baseline upon which we would hope to improve by including additional data - they only take into account each team's pre game Elo rating and home field advantage, then update based on the outcome of the game and the margin of victory. This can be highly useful for predicting games and simulating seasons, but it doesn't include any information about *why* a particular team might be good. How well do Elo ratings do in predicting the winner of games over the time period 2007 to 2021?
 
@@ -487,7 +502,7 @@ efficiency_season_type_accuracy %>%
 
 ```
 
-Interestingly, we do about the same in predicting the postseason using Elo and the efficiency ratings! We do a bit worse in predicting regular season games, but some of that difference is because I don't have efficiency ratings for FCS teams, so we're not seeing any FCS games included in assessing efficiency measures and these are games that tend to be easier to predict. If we drop games with FCS teams and look at overall performance, the Elo ratings only slightly edge out the raw efficiency ratings.
+Interestingly, we do about the same in predicting the postseason using Elo and the efficiency ratings. We do a bit worse in predicting regular season games, but some of that difference is because I don't have efficiency ratings for FCS teams, so we're not seeing any FCS games included in assessing efficiency measures and these are games that tend to be easier to predict. If we drop games with FCS teams and look at overall performance, the Elo ratings only slightly edge out the raw efficiency ratings.
 
 ```{r assess both using only fbs games}
 
@@ -526,7 +541,7 @@ Interestingly, we do about the same in predicting the postseason using Elo and t
 
 ```
 
-This means we have two different methods for predicting games, one of which (efficiency) is considerably more complicated than the other. Elo ratings also are *much* simpler to use for the purpose of simulating seasons, as we can easily update them based on simulated outcomes. If we were going purely for simplicity and ease of calculation, we'd go for the Elo ratings everytime.
+This means we have two different methods for predicting games that perform about the same, one of which (efficiency) is considerably more complicated than the other. Elo ratings also are *much* simpler to use for the purpose of simulating seasons, as we can easily update them based on simulated outcomes. If we were going purely for simplicity and ease of calculation, we'd go for the Elo ratings everytime.
 
 But, for the sake of science, can we combine the two in order to do better than using just one? I'll fit a logistic regression of the home win on the difference in a team's overall efficiency measures and Elo. Does it do better in predicting games?
 
@@ -535,14 +550,14 @@ But, for the sake of science, can we combine the two in order to do better than 
 weekly_ratings_and_outcomes %>%
         select(GAME_ID, SEASON, WEEK, SEASON_TYPE, HOME_TEAM, AWAY_TEAM, HOME_SCORE_DIFF, contains("POWER_DIFF")) %>%
         left_join(.,
-                  elo_games$game_outcomes %>%
-                          select(GAME_ID, SEASON, HOME_PROB, NEUTRAL_SITE, HOME_PREGAME_ELO, AWAY_PREGAME_ELO, HOME_RECRUITING_SCORE, AWAY_RECRUITING_SCORE) %>%
+                  game_elo_ratings %>%
+                          select(GAME_ID, SEASON, HOME_PROB, NEUTRAL_SITE, HOME_PREGAME_ELO, AWAY_PREGAME_ELO) %>%
                           mutate(HOME_ELO_DIFF = case_when(NEUTRAL_SITE == T ~ HOME_PREGAME_ELO - AWAY_PREGAME_ELO,
                                                            NEUTRAL_SITE == F ~ selected_pars$home_field_advantage + HOME_PREGAME_ELO - AWAY_PREGAME_ELO)),
                   by = c("SEASON", "GAME_ID")) %>%
-        mutate(HOME_RECRUITING_SCORE = replace_na(HOME_RECRUITING_SCORE, 0),
-               AWAY_RECRUITING_SCORE = replace_na(AWAY_RECRUITING_SCORE, 0)) %>%
-        mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING_SCORE - AWAY_RECRUITING_SCORE) %>%
+        # mutate(HOME_RECRUITING_SCORE = replace_na(HOME_RECRUITING_SCORE, 0),
+        #        AWAY_RECRUITING_SCORE = replace_na(AWAY_RECRUITING_SCORE, 0)) %>%
+        # mutate(HOME_RECRUITING_DIFF = HOME_RECRUITING_SCORE - AWAY_RECRUITING_SCORE) %>%
         mutate(HOME_WIN = factor(case_when(HOME_SCORE_DIFF > 0 ~ 'yes',
                                     TRUE ~ 'no'),
                                  levels = c("no", "yes"))) %>%
@@ -565,9 +580,12 @@ weekly_ratings_and_outcomes %>%
         mutate(HOME_PRED = factor(case_when(HOME_PROB > 0.5 ~ 'yes',
                                      TRUE ~ 'no'),
                                   levels = c("no", "yes"))) %>%
+      #  group_by(SEASON) %>%
         yardstick::accuracy(truth = HOME_WIN,
                             estimate  = .pred) %>%
-        mutate_if(is.numeric, round, 2)
+        mutate_if(is.numeric, round, 2) %>%
+        flextable() %>%
+        autofit()
         # ggplot(., aes(x=.fitted,
         #               color = HOME_WIN,
         #               label = paste(HOME_TEAM, AWAY_TEAM, SEASON),
@@ -579,7 +597,8 @@ weekly_ratings_and_outcomes %>%
         #         
 
 ```
-And... not really. Even using both, we seem to have hit a ceiling in getting about 73% of games correct. What then is the value of the efficiency measures? The main thing we are interested in is simulating seasons. If efficiency ratings, as well as recruiting data, helps us predict where teams are going to end up in terms of Elo ratings, we can use them to make preseason adjustments to team Elo ratings which will affect our simulations.
+
+Not really? Even using both, we seem to have hit a ceiling in getting about 73% of games correct. What then is the value of the efficiency measures? The main thing we are interested in is simulating seasons. If efficiency ratings, as well as recruiting data, helps us predict where teams are going to end up in terms of Elo ratings, we can use them to make preseason adjustments to team Elo ratings which will affect our simulations.
  
 # Adjusting Elo Ratings with Efficiency and Recruiting
 
@@ -629,7 +648,7 @@ adjusted_team_weekly_rankings %>%
 
 As we would probably have expected (and hoped), these are highly correlated: teams with an net efficiency on offense and defense tend to win games and improve their Elo rating.
 
-When do they disagree? I'll regress the season end Elo ratings on the season end efficiency measure and look at teams with the largest absolute residuals.
+When do they disagree? I'll regress the season end Elo ratings on the season end efficiency measure and look at teams with the largest absolute residuals. This bivariate regression will also tell us the relationship between efficiency and Elo.
 
 ```{r look at disagreements between the two}
 
@@ -754,7 +773,7 @@ nested_lags_elo %>%
 
 ```
 
-Season over season, each point of Elo rating from a previous season is worth about .8 for next season's Elo. A team with an average Elo last season will be expected to have an average of about 1518 for next season.
+Season over season, each point of Elo rating from a previous season is worth about .8 for next season's Elo. A team with an average Elo last season will be expected to have an average of about 1531 for next season.
 
 If we include overall efficiency as well as the Elo rating in predicting the next season's season ending Elo, how does this change?
 
@@ -834,7 +853,7 @@ pluck(nested_lags_both,
 
 ```
 
-Based on this, we can use efficiency to adjust Elo rating to see whether it improves our ability to predict games and simulate seasons.
+Based on this, we can use efficiency to adjust a team's preseason Elo rating - we can then see whether it improves our ability to predict games and simulate seasons.
 
 ## Adding Recruiting
 
@@ -1008,7 +1027,7 @@ compare = foreach(i = 1:length(seasons),
         adjusted_teams = teams_to_list(adjusted_teams_elo)
         
         # get previous fcs teams
-        actual_teams_elo = elo_games$team_outcomes %>%
+        actual_teams_elo = team_elo_ratings %>%
                 filter(SEASON < input_season) %>%
                 group_by(TEAM) %>%
                 filter(GAME_DATE == max(GAME_DATE)) %>%
@@ -1019,7 +1038,7 @@ compare = foreach(i = 1:length(seasons),
                 column_to_rownames("TEAM")
         
         # get season of last observed
-        team_seasons = elo_games$team_outcomes %>%
+        team_seasons = team_elo_ratings %>%
                 filter(SEASON < input_season) %>%
                 group_by(TEAM) %>%
                 slice_max(., order_by = SEASON, n=1, with_ties =F) %>%
@@ -1040,7 +1059,7 @@ compare = foreach(i = 1:length(seasons),
                                   reversion = selected_pars$reversion,
                                   k = selected_pars$k,
                                   v = selected_pars$v,
-                                  verbose = T)
+                                  verbose = F)
         
         # get actual
         actual = games_with_actual %$% 
@@ -1070,7 +1089,7 @@ compare = foreach(i = 1:length(seasons),
                                   reversion = 0,
                                   k = selected_pars$k,
                                   v = selected_pars$v,
-                                  verbose = T)
+                                  verbose = F)
         
         # get actual
         adjusted = games_with_adjusted %$% 
@@ -1100,7 +1119,7 @@ compare %>%
         
 ```
 
-Overall, we're about the same, slightly better on log loss for each season while the accuracy is slightly tends to bounce between seasons.
+Overall, we're about the same, slightly better on log loss for each season while the accuracy is very close but bounces a bit between seasons.
 
 ```{r predict test set after fitting on valid}
 
@@ -1146,14 +1165,14 @@ elo_pars = tibble(k = 35,
                   recruiting_weight =0)
 
 # get fbs teams
-teams = elo_games$team_outcomes %>%
+teams = team_elo_ratings %>%
         filter(SEASON == initial_season) %>%
         filter(DIVISION == 'fbs') %>%
         distinct(TEAM) %>%
         arrange(TEAM)
 
 # train points model
-points_model = elo_games$game_outcomes %>%
+points_model = game_elo_ratings%>%
         filter(SEASON >=1970) %>% 
         filter(SEASON < initial_season) %>%
         mutate(HOME_ELO_DIFF = case_when(NEUTRAL_SITE == F ~ 
@@ -1190,7 +1209,7 @@ adjusted_teams_elo = adjusted_teams_valid %>%
 adjusted_teams = teams_to_list(adjusted_teams_elo)
 
 # get previous fcs teams
-actual_teams_elo = elo_games$team_outcomes %>%
+actual_teams_elo = team_elo_ratings %>%
         filter(SEASON < initial_season) %>%
         group_by(TEAM) %>%
         filter(GAME_DATE == max(GAME_DATE)) %>%
@@ -1201,7 +1220,7 @@ actual_teams_elo = elo_games$team_outcomes %>%
         column_to_rownames("TEAM")
         
 # get season of last observed
-team_seasons = elo_games$team_outcomes %>%
+team_seasons = team_elo_ratings%>%
         filter(SEASON < initial_season) %>%
         group_by(TEAM) %>%
         slice_max(., order_by = SEASON, n=1, with_ties =F) %>%
