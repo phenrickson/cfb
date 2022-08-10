@@ -86,12 +86,18 @@ games_raw = DBI::dbGetQuery(myconn,
 
 ## define games for elo function
 games = games_raw %>%
-        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
+        mutate(HOME_DIVISION = case_when(
+                (is.na(HOME_DIVISION) | HOME_DIVISION == 'missing') | SEASON < 1919 ~ 'fbs',
                                          TRUE ~ HOME_DIVISION)) %>%
-        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
+        mutate(AWAY_DIVISION = case_when(
+                (is.na(AWAY_DIVISION) | AWAY_DIVISION == 'missing') | SEASON < 1919 ~ 'fbs',
                                          TRUE ~ AWAY_DIVISION)) %>%
         mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
         filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
+        mutate(HOME_CONFERENCE = case_when(HOME_DIVISION == 'fbs' | is.na(HOME_CONFERENCE) ~ 'missing',
+                                           TRUE ~ HOME_CONFERENCE),
+               AWAY_CONFERENCE = case_when(AWAY_DIVISION == 'fbs' | is.na(AWAY_CONFERENCE) ~ 'missing',
+                                           TRUE ~ AWAY_CONFERENCE)) %>%
         arrange(GAME_DATE) %>%
         select(GAME_ID, 
                SEASON, 
@@ -135,8 +141,10 @@ team_elo_ratings =
         left_join(., game_elo_ratings %>%
                           select(GAME_ID, HOME_TEAM, AWAY_TEAM,
                                  HOME_PROB, AWAY_PROB,
-                                 HOME_PREGAME_ELO, HOME_POSTGAME_ELO,
-                                 AWAY_PREGAME_ELO, AWAY_POSTGAME_ELO),
+                                 HOME_PREGAME_ELO,
+                                 HOME_POSTGAME_ELO,
+                                 AWAY_PREGAME_ELO, 
+                                 AWAY_POSTGAME_ELO),
                   by = c("GAME_ID")) %>%
         mutate(HOME = HOME_TEAM == TEAM) %>%
         mutate(WIN_PROB = case_when(TEAM == HOME_TEAM ~ HOME_PROB,
@@ -169,16 +177,16 @@ team_elo_ratings =
 # write elo game outcomes
 DBI::dbWriteTable(myconn, 
                   name = DBI::SQL("CFD_ANALYTICS.ELO_GAME_OUTCOMES"),
-                  value = game_elo_ratings,
+                  value = game_elo_ratings %>%
                           mutate(LOAD_DATE = Sys.time()),
-                  append = T)
+                  overwrite = T)
 
 # write elo team outcomes
 DBI::dbWriteTable(myconn, 
                   name = DBI::SQL("CFD_ANALYTICS.ELO_TEAM_OUTCOMES"),
                   value = team_elo_ratings %>%
                           mutate(LOAD_DATE = Sys.time()),
-                  append = T)
+                  overwrite = T)
 
 rm(list=ls())
 gc()
