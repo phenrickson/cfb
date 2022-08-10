@@ -360,7 +360,6 @@ adjusted_teams_elo = adjusted_teams_elo %>%
         rename(ELO = .pred) %>%
         column_to_rownames("TEAM")
 
-
 # get team seasons
 team_elo_seasons = elo_teams %>%
         filter(SEASON < input_season) %>%

@@ -1,6 +1,6 @@
 ---
 title: "College Football Team Predictions"
-author: "Phil Henrickson"
+#author: "Phil Henrickson"
 date: "`r Sys.Date()`"
 output: 
   html_document:
@@ -53,7 +53,6 @@ set_flextable_defaults(theme_fun = theme_alafoli,
 ```
 
 ```{r connect to snowflake}
-
 
 library(DBI)
 library(odbc)
@@ -543,7 +542,7 @@ plot_grid(p1, p2,
 
 ```
 
-## `r params$input_season` Schedule
+## `r params$input_season` Game Predictions
 
 Using each team's starting rating, I simulate the result and margin of victory for each game of the 2022 season 1000 times. 
 
@@ -621,7 +620,7 @@ plot_elo_team_season(season_simulations %$%
                      params$team,
                      team_color = team_color,
                      params$input_season,
-                     alpha = 0.2)
+                     alpha = 0.15)
 
 ```
 
@@ -691,11 +690,11 @@ if(smooth == T ) {p = p + geom_line(data =team_data,
                                     color =TEAM),
                         fontface = "bold",
                         size = 3,
-                        direction = "y",
+                  #      direction = "y",
                         # vjust = 
                         # hjust = -1.2,
-                        segment.size = .7,
-                        segment.alpha = .5,
+                      #  segment.size = .7,
+                       # segment.alpha = .5,
                         segment.linetype = "dotted",
                         box.padding = .4,
                         segment.curvature = -0.1,
@@ -708,11 +707,11 @@ if(smooth == T ) {p = p + geom_line(data =team_data,
                                     color =TEAM),
                         fontface = "bold",
                         size = 3,
-                        direction = "y",
+                      #  direction = "y",
                         # vjust =
                         # hjust = -1.2,
-                        segment.size = .7,
-                        segment.alpha = .5,
+                      #  segment.size = .7,
+                       # segment.alpha = .5,
                         segment.linetype = "dotted",
                         box.padding = .4,
                         segment.curvature = -0.1,
@@ -890,7 +889,10 @@ if(smooth == T ) {p = p + geom_line(data =team_data,
 
 ## Efficiency
 
-In addition to Elo rating, I also make use of a team's recent offensive/defensive efficiency metrics in simulating games. This section shows how `r params$team` has rated in terms of overall, offensive, and defensive efficiency for each season since 2007. These ratings are computed from an expected points model built on play by play data, so these results are unavailable for years further back than 2007.
+In addition to Elo rating, I also compute and use each team's offensive/defensive expected points metrics from recent seasons in simulating upcoming games. These ratings come from an expected points model I trained on on play by play data in order to identify the value of individual plays within a game. 
+
+I score every play within a game with the model and then aggregate these results to the game and season level and adjust for opponent quality. These results re only available starting from the season of 2007, as this is when reliable play by play data becomes available.
+
 
 For more details on what goes into creating these ratings, go to my [description of the expected points model](https://phenrickson.github.io/cfb/expected_points_01_model.html) and my [methodology for adjusting for opponent quality](https://phenrickson.github.io/cfb/expected_points_03_adjusted.html).
 
@@ -934,7 +936,11 @@ season_team_rankings %>%
 
 ```
 
-These efficiency ratings indicate a team's **expected points per play** when its offense or defense is on the field, adjusted for opponent quality. A team's overall rating is a combination of its offense and defense ratings, and indicates the net points per play a team would expect when playing an average opponent. The visualization below shows how a team has changed over time as well as their season end efficiency ranking.
+These efficiency ratings indicate a team's **expected points per play** when its offense or defense is on the field, adjusted for opponent quality. A team's overall rating is a combination of its offense and defense ratings, and indicates the net points per play a team would expect when playing an average opponent. 
+
+For offenses, this indicates the average points the team scores against opponents per play. For defenses, this indicates the average points the team prevents opposing offenses from scoring per play. In both cases, I have set the scale of the variable to mean that positive is good while negative is bad.
+
+The visualization below shows how a team has changed over time as well as their season end efficiency ranking.
 
 ```{r efficiency, fig.height=9}
 
@@ -1032,7 +1038,7 @@ season_team_rankings_type %>%
 
 ```
 
-The following visualization shows how `r params$team`'s offense has been in running/passing the ball since 2007.
+The following visualization shows how efficient `r params$team`'s **offense** has been running/passing the ball each season since 2007.
 
 ```{r look at offense defense by type, fig.height=8}
 
@@ -1110,7 +1116,7 @@ all_teams_offense_type +
         xlab("")
 ```
 
-The following visualization shows how `r params$team`'s **defense** has been in stopping the opponent's run/pass.
+The following visualization shows how efficient `r params$team`'s **defense** has been in stopping the opponent's run/pass in each season since 2007.
 
 ```{r defense efficiency type, fig.height=8}
 

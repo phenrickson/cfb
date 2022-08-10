@@ -1,7 +1,6 @@
 ---
 title: "Simulating the Upcoming CFB Season"
-author: "Phil Henrickson"
-date: "6/7/2022"
+date: "`r Sys.Date()`"
 output: 
   html_document:
     toc: TRUE #adds a Table of Contents
@@ -14,7 +13,7 @@ params:
         input_season: 2022
 ---
 
-```{r setup}
+```{r setup, include=F}
 
 knitr::opts_chunk$set(echo = F,
                       error = F,
@@ -662,7 +661,7 @@ elo_input = list(teams = c(adjusted_teams,
 
 This notebook details the results of simulating the `r params$input_season` college football season before any actual games are played. 
 
-# Week 0 Team Power Ratings
+# `r params$input_season` Week 0 Team Ratings
 
 The following table displays each team's **Rating**, which is a combination of their previous season's Elo Rating, offensive efficiency, defensive efficiency, and a moving average of their composite recruiting score. These ratings are **Week 0** ratings because they rely only on information from previous seasons. As the season progresses, these ratings will update for each team as we gain new information based on the results of games (with the exception of recruiting, which is computed at the yearly level).
 
@@ -779,49 +778,49 @@ preseason_ratings %>%
 
 ```
 
-The following visualization shows the distribution of team ratings at the start of the season.
+<!-- The following visualization shows the distribution of team ratings at the start of the season. -->
 
-```{r graph of preseason rankings, fig.height=8}
+<!-- ```{r graph of preseason rankings, fig.height=8} -->
 
-preseason_ratings %>%
-        ggplot(., aes(x = "1",
-                      label = TEAM_ABBREVIATION,
-                      fill = TEAM,
-                      y = RATING))+
-        # geom_point(position = 'auto',
-        #            jitter.width = 0.05)+
-        geom_label_repel(position = position_auto(seed = 1,
-                                                  jitter.width=0.5,
-                                            scale =T),
-                         max.overlaps = 100,
-                   color = 'white',
-                   size = 3,
-                   alpha = 0.8)+
-        custom_fill_teams+
-        guides(fill = 'none')+
-        theme_phil()+
-        xlab("This axis has no meaning")+
-        theme(axis.ticks.x=element_blank(),
-              axis.text.x = element_blank())+
-  #      facet_wrap(SEASON + CONFERENCE + metric~.)+
-        xlab("This axis has no meaning")+
-        ylab("Team Rating")+
-        geom_hline(yintercept = 1520,
-                   linetype = 'dashed',
-                   color = 'grey60')+
-        theme(plot.title = element_text(hjust = 0.5,
-                                                size = 16),
-                      plot.subtitle =  element_text(hjust = 0.5),
-                      strip.text.x = element_text(size = 12,
-                                                  hjust = 0.5))+
-                ggtitle(paste(params$input_season, "Week 0 Team Ratings"),
-                subtitle = "Displaying preseason team ratings for all teams. Grey line indicates FBS median.")
+<!-- preseason_ratings %>% -->
+<!--         ggplot(., aes(x = "1", -->
+<!--                       label = TEAM_ABBREVIATION, -->
+<!--                       fill = TEAM, -->
+<!--                       y = RATING))+ -->
+<!--         # geom_point(position = 'auto', -->
+<!--         #            jitter.width = 0.05)+ -->
+<!--         geom_label_repel(position = position_auto(seed = 1, -->
+<!--                                                   jitter.width=0.5, -->
+<!--                                             scale =T), -->
+<!--                          max.overlaps = 100, -->
+<!--                    color = 'white', -->
+<!--                    size = 3, -->
+<!--                    alpha = 0.8)+ -->
+<!--         custom_fill_teams+ -->
+<!--         guides(fill = 'none')+ -->
+<!--         theme_phil()+ -->
+<!--         xlab("This axis has no meaning")+ -->
+<!--         theme(axis.ticks.x=element_blank(), -->
+<!--               axis.text.x = element_blank())+ -->
+<!--   #      facet_wrap(SEASON + CONFERENCE + metric~.)+ -->
+<!--         xlab("This axis has no meaning")+ -->
+<!--         ylab("Team Rating")+ -->
+<!--         geom_hline(yintercept = 1520, -->
+<!--                    linetype = 'dashed', -->
+<!--                    color = 'grey60')+ -->
+<!--         theme(plot.title = element_text(hjust = 0.5, -->
+<!--                                                 size = 16), -->
+<!--                       plot.subtitle =  element_text(hjust = 0.5), -->
+<!--                       strip.text.x = element_text(size = 12, -->
+<!--                                                   hjust = 0.5))+ -->
+<!--                 ggtitle(paste(params$input_season, "Week 0 Team Ratings"), -->
+<!--                 subtitle = "Displaying preseason team ratings for all teams. Grey line indicates FBS median.") -->
 
-```
+<!-- ``` -->
 
 ## Conferences
 
-The following visualization shows the distribution of team ratings by each conference.
+The following visualization shows the distribution of team ratings for each conference.
 
 ```{r conference ratings, fig.height=8}
 
@@ -864,7 +863,7 @@ preseason_ratings %>%
 
 # Simulations
 
-```{r simulate}
+```{r simulate, include=F}
 
 # simulate season from the start
 # set.seed(1999)
@@ -1221,22 +1220,8 @@ source(here::here("functions", "table_conference_championship.R"))
 
 ```
 
-## Team Predictions
 
-### Win Total Probabilities
-
-```{r table of win probabilities}
-
-source(here::here("functions", "table_wins_season.R"))
-
-table_wins_season(season_simulations %$%
-                          team_outcomes,
-                  games,
-                  2022)
-
-```
-
-### Strength of Schedule and Record
+## Strength of Schedule and Predicted Record
 
 ```{r schedule difficulty and record}
 
@@ -1397,9 +1382,22 @@ preseason_predictions %>%
 
 ```
 
-## Conference Championship Probabilities
+## Win Total Probabilities
 
-### SEC 
+```{r table of win probabilities}
+
+source(here::here("functions", "table_wins_season.R"))
+
+table_wins_season(season_simulations %$%
+                          team_outcomes,
+                  games,
+                  2022)
+
+```
+
+# Conference Championship Probabilities
+
+## SEC 
 
 ```{r conf champ sec}
 
@@ -1408,7 +1406,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### Big Ten
+## Big Ten
 
 ```{r conf champ big ten}
 
@@ -1417,7 +1415,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### Big 12
+## Big 12
 
 ```{r conference championship tables big 12}
 
@@ -1426,7 +1424,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### ACC
+## ACC
 
 ```{r conference champs acc}
 
@@ -1435,7 +1433,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### Pac-12
+## Pac-12
 
 ```{r conference champs pac 12}
 
@@ -1453,8 +1451,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-
-### Sun Belt
+## Sun Belt
 
 ```{r conference championship tables conf usa}
 
@@ -1463,7 +1460,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### Mountain West
+## Mountain West
 
 ```{r conference champs mountain west}
 
@@ -1472,7 +1469,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### Mid-American
+## Mid-American
 
 ```{r conference champs mid america}
 
@@ -1481,7 +1478,7 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-### Conference USA
+## Conference USA
 
 ```{r conference champs conf usa}
 
@@ -1490,47 +1487,47 @@ table_conference_championship(conference_championship_probs,
 
 ```
 
-# One Simulated Season
+<!-- # One Simulated Season -->
 
-```{r randomly sample and look at results}
+<!-- ```{r randomly sample and look at results} -->
 
-set.seed(1999)
-samp = sample(1:1000, 1)
-max_week = max(season_simulations$game_outcomes$WEEK)
+<!-- set.seed(1999) -->
+<!-- samp = sample(1:1000, 1) -->
+<!-- max_week = max(season_simulations$game_outcomes$WEEK) -->
 
-set.seed(1999)
-season_simulations %$%
-        game_outcomes %>%
-        filter(.id == samp) %>%
-        rename(HOME_MARGIN = HOME_SIM_MARGIN,
-               sim = .id) %>%
-        mutate(CONFERENCE_GAME = case_when(HOME_CONFERENCE == AWAY_CONFERENCE ~ T,
-                                           TRUE ~ F)) %>%
-        select(sim, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_MARGIN) %>%
-        bind_rows(.,
-                  conference_championship_results %>%
-                          filter(.id == samp) %>%
-                          rename(HOME_TEAM = TEAM_HOME,
-                                 AWAY_TEAM = TEAM_AWAY,
-                                 HOME_MARGIN = HOME_SIM_MARGIN,
-                                 sim = .id) %>%
-                          mutate(WEEK = max_week + 1) %>%
-                          mutate(CONFERENCE_GAME = T) %>%
-                          select(sim, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_MARGIN)) %>%
-        
-        mutate(WINNER = case_when(HOME_MARGIN > 0 ~ HOME_TEAM,
-                                  HOME_MARGIN < 0 ~ AWAY_TEAM)) %>%
-        rename(Sim = sim,
-               Season = SEASON,
-               Week = WEEK,
-               Home = HOME_TEAM,
-               Away = AWAY_TEAM,
-               Margin = HOME_MARGIN,
-               Winner = WINNER) %>%
-         datatable(escape=F,
-                  rownames = F)
+<!-- set.seed(1999) -->
+<!-- season_simulations %$% -->
+<!--         game_outcomes %>% -->
+<!--         filter(.id == samp) %>% -->
+<!--         rename(HOME_MARGIN = HOME_SIM_MARGIN, -->
+<!--                sim = .id) %>% -->
+<!--         mutate(CONFERENCE_GAME = case_when(HOME_CONFERENCE == AWAY_CONFERENCE ~ T, -->
+<!--                                            TRUE ~ F)) %>% -->
+<!--         select(sim, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_MARGIN) %>% -->
+<!--         bind_rows(., -->
+<!--                   conference_championship_results %>% -->
+<!--                           filter(.id == samp) %>% -->
+<!--                           rename(HOME_TEAM = TEAM_HOME, -->
+<!--                                  AWAY_TEAM = TEAM_AWAY, -->
+<!--                                  HOME_MARGIN = HOME_SIM_MARGIN, -->
+<!--                                  sim = .id) %>% -->
+<!--                           mutate(WEEK = max_week + 1) %>% -->
+<!--                           mutate(CONFERENCE_GAME = T) %>% -->
+<!--                           select(sim, SEASON, WEEK, HOME_TEAM, AWAY_TEAM, HOME_MARGIN)) %>% -->
 
-```
+<!--         mutate(WINNER = case_when(HOME_MARGIN > 0 ~ HOME_TEAM, -->
+<!--                                   HOME_MARGIN < 0 ~ AWAY_TEAM)) %>% -->
+<!--         rename(Sim = sim, -->
+<!--                Season = SEASON, -->
+<!--                Week = WEEK, -->
+<!--                Home = HOME_TEAM, -->
+<!--                Away = AWAY_TEAM, -->
+<!--                Margin = HOME_MARGIN, -->
+<!--                Winner = WINNER) %>% -->
+<!--          datatable(escape=F, -->
+<!--                   rownames = F) -->
+
+<!-- ``` -->
 
 ```{r save output}
 
