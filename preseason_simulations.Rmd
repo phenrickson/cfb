@@ -818,7 +818,7 @@ preseason_ratings %>%
 
 <!-- ``` -->
 
-## Conferences
+## Team Ratings by Conference
 
 The following visualization shows the distribution of team ratings for each conference.
 
@@ -866,7 +866,6 @@ preseason_ratings %>%
 ```{r simulate, include=F}
 
 # simulate season from the start
-# set.seed(1999)
 set.seed(1999)
 season_simulations = sim_rest_of_season(games,
                                                  season = params$input_season,
@@ -1220,6 +1219,216 @@ source(here::here("functions", "table_conference_championship.R"))
 
 ```
 
+## Playoff and National Championship
+
+```{r take season resutls and conference championship results}
+
+# playoff priority order goes like this
+# P5, undefeated, and \
+max_week = season_simulations %$% 
+        game_outcomes %>%
+        filter(WEEK == max(WEEK)) %>%
+        pull(WEEK) %>%
+        head(1)
+
+set.seed(1999)
+regular_and_conference_games = season_simulations %$%
+        game_outcomes %>%
+        mutate(CONFERENCE_GAME = case_when(HOME_CONFERENCE == AWAY_CONFERENCE ~ T,
+                                           TRUE ~ F)) %>%
+        mutate(SEASON_TYPE = 'regular') %>%
+        select(.id, GAME_ID, SEASON, GAME_DATE, HOME_CONFERENCE, AWAY_CONFERENCE, SEASON_TYPE, WEEK, HOME_TEAM, AWAY_TEAM, HOME_SIM_MARGIN, AWAY_SIM_MARGIN, HOME_SIM_OUTCOME, AWAY_SIM_OUTCOME, HOME_PREGAME_ELO, AWAY_PREGAME_ELO, HOME_POSTGAME_ELO, AWAY_POSTGAME_ELO) %>%
+        bind_rows(.,
+                  conference_championship_results %>%
+                          rename(HOME_TEAM = TEAM_HOME,
+                                 AWAY_TEAM = TEAM_AWAY,
+                                 HOME_PREGAME_ELO = PREGAME_ELO_HOME,
+                                 AWAY_PREGAME_ELO = PREGAME_ELO_AWAY,
+                                 HOME_POSTGAME_ELO = POSTGAME_ELO_HOME,
+                                 AWAY_POSTGAME_ELO = POSTGAME_ELO_AWAY,
+                                 HOME_SIM_MARGIN = HOME_SIM_MARGIN) %>%
+                          mutate(AWAY_SIM_MARGIN = -HOME_SIM_MARGIN) %>%
+                          mutate(WEEK = max_week + 1) %>%
+                          mutate(CONFERENCE_GAME = T) %>%
+                          mutate(HOME_CONFERENCE = CONFERENCE,
+                                 AWAY_CONFERENCE = CONFERENCE) %>%
+                          mutate(SEASON_TYPE = 'conference_championship') %>%
+                          select(.id, SEASON, HOME_CONFERENCE, AWAY_CONFERENCE, SEASON_TYPE, WEEK, HOME_TEAM, AWAY_TEAM, HOME_SIM_MARGIN, AWAY_SIM_MARGIN, HOME_PREGAME_ELO, AWAY_PREGAME_ELO, HOME_POSTGAME_ELO, AWAY_POSTGAME_ELO)  %>%
+        mutate(HOME_SIM_OUTCOME = case_when(HOME_SIM_MARGIN > 0 ~ 'win',
+                                  HOME_SIM_MARGIN < 0 ~ 'loss'),
+               AWAY_SIM_OUTCOME = case_when(HOME_SIM_MARGIN > 0 ~ 'loss',
+                                            HOME_SIM_MARGIN < 0 ~ 'win')))
+
+# flip
+regular_and_conference_teams = regular_and_conference_games %>%
+        select(.id, 
+               GAME_ID, 
+               SEASON,
+               SEASON_TYPE,
+               WEEK,
+               GAME_DATE,
+               HOME_TEAM,
+               HOME_CONFERENCE,
+               HOME_SIM_MARGIN,
+               HOME_SIM_OUTCOME,
+               HOME_PREGAME_ELO,
+               HOME_POSTGAME_ELO,
+               AWAY_PREGAME_ELO,
+               AWAY_POSTGAME_ELO,
+               AWAY_TEAM) %>%
+        rename(OPPONENT = AWAY_TEAM,
+               OPPONENT_PREGAME_ELO = AWAY_PREGAME_ELO,
+               OPPONENT_POSTGAME_ELO = AWAY_POSTGAME_ELO) %>%
+        set_names(., gsub("HOME_", "", names(.))) %>%
+        bind_rows(.,
+                  regular_and_conference_games %>% 
+                          select(.id,
+                                 GAME_ID, 
+                                 SEASON,
+                                 SEASON_TYPE,
+                                 WEEK,
+                                 GAME_DATE,
+                                 AWAY_TEAM,
+                                 AWAY_CONFERENCE,
+                                 AWAY_SIM_MARGIN,
+                                 AWAY_SIM_OUTCOME,
+                                 AWAY_PREGAME_ELO,
+                                 HOME_PREGAME_ELO,
+                                 AWAY_POSTGAME_ELO,
+                                 HOME_POSTGAME_ELO,
+                                 HOME_TEAM) %>%
+                          rename(OPPONENT = HOME_TEAM,
+                                 OPPONENT_PREGAME_ELO = HOME_PREGAME_ELO,
+                                 OPPONENT_POSTGAME_ELO = HOME_POSTGAME_ELO) %>%
+                          set_names(., gsub("AWAY_", "", names(.)))) %>%
+        arrange(GAME_DATE, WEEK) %>%
+        left_join(., team_conference_season %>%
+                          select(SEASON, TEAM, CONFERENCE, DIVISION),
+                  by = c("SEASON", "TEAM", "CONFERENCE")) %>%
+        filter(DIVISION == 'fbs')
+               
+
+# combine
+playoff_resumes = regular_and_conference_teams %>%
+        group_by(.id, SEASON, SEASON_TYPE, TEAM, CONFERENCE, SIM_OUTCOME) %>%
+        count() %>%
+        spread(SIM_OUTCOME, n) %>%
+        mutate_at(c("loss", "win"),
+                  ~ replace_na(., 0)) %>%
+        mutate(P5 = case_when(CONFERENCE %in% c("SEC", "Big Ten", "Pac-12", "Big 12", "ACC") ~ 1,
+                                                TRUE ~ 0)) %>%
+        mutate(UNDEFEATED_REGULAR = case_when(SEASON_TYPE == 'regular' & loss == 0 & win > 1 ~ 1,
+                                              TRUE ~ 0)) %>%
+        mutate(CONFERENCE_CHAMPION = case_when(SEASON_TYPE == 'conference_championship' & win == 1 ~ 1,
+                                               TRUE ~ 0)) %>%
+        mutate(CONFERENCE_RUNNER_UP = case_when(SEASON_TYPE == 'conference_championship' & win == 0 ~ 1,
+                                                TRUE ~ 0)) %>%
+        ungroup() %>%
+        group_by(.id, SEASON, TEAM, CONFERENCE, P5) %>%
+        summarize(WINS = sum(win),
+                  LOSSES = sum(loss),
+                  UNDEFEATED_REGULAR = sum(UNDEFEATED_REGULAR),
+                  CONFERENCE_CHAMPION = sum(CONFERENCE_CHAMPION),
+                  CONFERENCE_RUNNER_UP = sum(CONFERENCE_RUNNER_UP),
+                  .groups = 'drop') %>%
+        # get each team's final elo in each sim
+        left_join(.,
+                  regular_and_conference_teams %>%
+                          group_by(.id, TEAM) %>%
+                          filter(WEEK == max(WEEK)) %>%
+                          select(.id, TEAM, POSTGAME_ELO) %>%
+                          group_by(.id)  %>%
+                          arrange(desc(POSTGAME_ELO)) %>%
+                          mutate(ELO_RANK = row_number()) %>%
+                          ungroup(),
+                  by = c(".id", "TEAM")) %>%
+        # now get the average of each team's opponent's final Elo
+        left_join(.,
+                  regular_and_conference_teams %>%
+                          left_join(., 
+                          regular_and_conference_teams %>%
+                                  group_by(.id, TEAM) %>%
+                                  filter(WEEK == max(WEEK)) %>%
+                                  mutate(LAST_ELO = POSTGAME_ELO) %>%
+                                  select(.id, SEASON, TEAM, LAST_ELO) %>%
+                                  rename(OPPONENT = TEAM,
+                                         OPPONENT_LAST_ELO = LAST_ELO),
+                        by = c(".id", "SEASON", "OPPONENT")) %>%
+                          filter(DIVISION == 'fbs') %>%
+                          group_by(.id, SEASON, TEAM) %>%
+                          summarize(SCHEDULE = mean(OPPONENT_LAST_ELO, na.rm=T),
+                                  .groups = 'drop') %>%
+                          group_by(.id, SEASON) %>%
+                          arrange(desc(SCHEDULE)) %>%
+                          mutate(DIFFICULTY = row_number()) %>%
+                          ungroup(),
+                  by = c(".id", "SEASON", "TEAM"))
+
+```
+
+```{r determine playoff participants via priority}
+
+# bind_rows
+playoff_participants = playoff_resumes %>%
+        # p5 teams that went undefeated and were conference champions
+        filter(UNDEFEATED_REGULAR == 1 & P5 == 1 & CONFERENCE_CHAMPION == 1) %>%
+        mutate(playoff_priority = 1) %>%
+        # independent P5 teams that went undefeated (ie, notre dame)
+        bind_rows(.,
+                  playoff_resumes %>%
+                          filter(UNDEFEATED_REGULAR == 1 & P5 == 1 & CONFERENCE == 'FBS Independents') %>% 
+                          mutate(playoff_priority = 2) 
+                  ) %>%
+        # p5 teams that won their conference with less than one loss
+        bind_rows(.,
+                  playoff_resumes %>%
+                          filter(P5 == 1 & CONFERENCE_CHAMPION == 1 & LOSSES < 2) %>%
+                          mutate(playoff_priority = 3)
+                  ) %>%
+        # p5 teams that won their conference with less than three losses
+        bind_rows(.,
+                  playoff_resumes %>%
+                          filter(P5 == 1 & LOSSES < 3 & ELO_RANK < 5) %>%
+                          mutate(playoff_priority = 4)
+                  ) %>%
+        # undefeated teams that were also conference champions and have a high elo
+        bind_rows(.,
+                  playoff_resumes %>%
+                          filter(UNDEFEATED_REGULAR == 1 & CONFERENCE_CHAMPION == 1 & ELO_RANK < 8) %>%
+                          mutate(playoff_priority = 5)
+                  ) %>%
+        bind_rows(.,
+                  playoff_resumes %>%
+                          filter(P5 == 1 & LOSSES < 2) %>%
+                          mutate(playoff_priority = 6)
+                  ) %>%
+        # priority 6
+        arrange(desc(POSTGAME_ELO)) %>%
+        group_by(.id, TEAM) %>%
+        filter(playoff_priority == min(playoff_priority)) %>%
+        select(.id, SEASON, TEAM, CONFERENCE, CONFERENCE_CHAMPION, WINS, LOSSES, SCHEDULE, DIFFICULTY, ELO_RANK, POSTGAME_ELO, playoff_priority) %>%
+        rename(RATING = POSTGAME_ELO,
+               RANK = ELO_RANK) %>%
+        arrange(playoff_priority, desc(CONFERENCE_CHAMPION), RANK, desc(RATING), DIFFICULTY, desc(SCHEDULE)) %>%
+        mutate(SCHEDULE = round(SCHEDULE, 0),
+               RATING = round(RATING, 0)) %>%
+        arrange(.id) %>%
+        group_by(.id) %>%
+        mutate(playoff_rank = row_number()) %>%
+        filter(playoff_rank <= 4) %>%
+        ungroup()
+
+playoff_participants %>%
+        mutate(sims = n_distinct(.id)) %>%
+        group_by(SEASON, TEAM, CONFERENCE, sims) %>% 
+        count() %>%
+        ungroup() %>%
+        mutate(perc = n /sims) %>%
+        rename(`Pr(Playoff)` = perc) %>%
+        select(SEASON, TEAM, CONFERENCE, `Pr(Playoff)`) %>%
+        arrange(desc(`Pr(Playoff)`))
+
+```
 
 ## Strength of Schedule and Predicted Record
 
