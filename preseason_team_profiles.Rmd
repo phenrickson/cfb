@@ -1,6 +1,6 @@
 ---
 title: "College Football Team Predictions"
-#author: "Phil Henrickson"
+author: "Phil Henrickson"
 date: "`r Sys.Date()`"
 output: 
   html_document:
@@ -11,7 +11,7 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        team: "Texas"
+        team: "Baylor"
         input_season: 2022
 ---
 
@@ -340,7 +340,10 @@ url_pattern <- "http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-
 
 # make color function
 team_color = team_mapping %>%
-                filter(TEAM == team) %>%
+        mutate(COLOR = case_when(TEAM == 'West Virginia' |
+                                         TEAM == 'LSU' ~ ALT_COLOR,
+                                 TRUE ~ COLOR)) %>%
+        filter(TEAM == team) %>%
                 pull(COLOR)
 
 # team logo
@@ -391,36 +394,20 @@ This notebook displays `r params$input_season` predictions and historical data f
 
 ```{r proejction for teams}
 
-# preseason_ratings %>%
-#         arrange(desc(RATING)) %>%
-#         mutate(RANK = row_number()) %>%
-#         select(SEASON, CONFERENCE, TEAM, RANK, RATING, OFFENSE, DEFENSE, RECRUITING) %>%
-#         mutate(RATING = round(RATING, 0),
-#                RECRUITING = round(RECRUITING, 0)) %>%
-#         mutate(SEASON = factor(SEASON),
-#                CONFERENCE = factor(CONFERENCE)) %>%
-#         rename(Season = SEASON,
-#                Conference = CONFERENCE,
-#                Team = TEAM,
-#                Rank = RANK,
-#                Rating = RATING,
-#                Offense = OFFENSE,
-#                Defense = DEFENSE,
-#                Recruiting = RECRUITING) %>%
-#         filter(Team == params$team) %>%
-#         flextable() %>%
-#         autofit()
-#  
-
-library(webshot)
 team_preds = preseason_predictions %>%
         arrange(desc(TEAM_ELO)) %>%
         mutate(RANK = row_number()) %>%
         filter(TEAM == params$team) %>%
         mutate(TEAM_ELO = round(TEAM_ELO, 0)) %>%
                 mutate(SEASON = factor(SEASON)) %>%
-        mutate_at(c("CHAMPION"),
-                  ~ replace_na(.,0)) %>%
+        mutate_at(c("win", "loss"), 
+                  ~ format(., nsmall = 2)) %>%
+        mutate_at(c("BOWL",
+                    "WIN_CONF",
+                    "PLAYOFF",
+                    "MAKE_NC",
+                    "WIN_NC"),
+                  ~ format(., nsmall = 3)) %>%
         select(
                 #TEAM,
                SEASON,
@@ -431,7 +418,10 @@ team_preds = preseason_predictions %>%
                win,
                loss,
                BOWL,
-               CHAMPION) %>%
+               WIN_CONF,
+               PLAYOFF,
+               MAKE_NC,
+               WIN_NC) %>%
        # mutate(record = paste(win, loss, sep='-')) %>%
         rename(Season = SEASON,
              #  Team = TEAM,
@@ -442,7 +432,10 @@ team_preds = preseason_predictions %>%
                `Predicted Wins` = win,
                `Predicted Losses` = loss,
                `Pr(Bowl Game)` = BOWL,
-               `Pr(Conf Champ)` = CHAMPION) %>%
+               `Pr(Conf Champ)` = WIN_CONF,
+             `Pr(Make Playoff)` = PLAYOFF,
+             `Pr(Make National Champ)` = MAKE_NC,
+             `Pr(Win  National Champ)` = WIN_NC) %>%
         gather() %>%
         mutate(key = str_pad(key, max(nchar(key))+1, pad=" ", side = "right")) %>%
         mutate(value = str_pad(value, max(nchar(value))+1, pad = " ", side = "left"))
@@ -495,7 +488,7 @@ team_preds = preseason_predictions %>%
 # make text
 team_text = c(teams_raw %>%
                           filter(TEAM == params$team) %>%                 
-                          mutate(name = paste(TEAM,TEAM_MASCOT)) %>%
+                          mutate(name = paste(TEAM, "\n", TEAM_MASCOT)) %>%
                           pull(name))
 
 library(cowplot)
@@ -504,25 +497,15 @@ p1 = ggdraw() + draw_image(team_logos$logo_1,
                            x=-0.1)+
         draw_label(teams_raw %>%
                           filter(TEAM == params$team) %>%                 
-                          mutate(name = paste(TEAM,TEAM_MASCOT)) %>%
+                          mutate(name = paste(TEAM, "\n", TEAM_MASCOT)) %>%
                           pull(name),
                   hjust = 0.5,
+                  size = 16,
                   fontfamily = 'mono',
                   fontface = 'bold',
-                  size = 14,
                   color = muted(team_color),
+                  x = 0.4,
                   y = 0.1)
-                  
-# p2 <- ggdraw() + draw_label(team_preds,
-#                             color = team_color,
-#                             fontfamily = 'mono',
-#                          #   fontface = 'bold',
-#                             size = 12,
-#                             hjust = 0,
-#                             x = -0.05)
-# 
-# p2 = ggplot() + theme_void()+
-#         annotation_custom(rasterGrob(team_preds), xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf)
 
 p2 = ggdraw() +
         draw_label(team_preds %>%
@@ -537,7 +520,7 @@ p2 = ggdraw() +
 plot_grid(p1, p2,
           nrow=1,
           ncol = 2,
-          rel_widths = c(0.8, 1.2),
+          rel_widths = c(0.9, 1.3),
           rel_heights = c(1, 0.5))
 
 ```
@@ -695,11 +678,11 @@ if(smooth == T ) {p = p + geom_line(data =team_data,
                         # hjust = -1.2,
                       #  segment.size = .7,
                        # segment.alpha = .5,
-                        segment.linetype = "dotted",
-                        box.padding = .4,
-                        segment.curvature = -0.1,
-                        segment.ncp = 3,
-                        segment.angle = 20
+                        # segment.linetype = "dotted",
+                        # box.padding = .4,
+                        # segment.curvature = -0.1,
+                        # segment.ncp = 3,
+                        # segment.angle = 20
                 ) +
                   geom_text_repel(data = team_data %>%
                                         filter(POSTGAME_ELO == max(POSTGAME_ELO)),
@@ -712,11 +695,11 @@ if(smooth == T ) {p = p + geom_line(data =team_data,
                         # hjust = -1.2,
                       #  segment.size = .7,
                        # segment.alpha = .5,
-                        segment.linetype = "dotted",
-                        box.padding = .4,
-                        segment.curvature = -0.1,
-                        segment.ncp = 3,
-                        segment.angle = 20
+                        # segment.linetype = "dotted",
+                        # box.padding = .4,
+                        # segment.curvature = -0.1,
+                        # segment.ncp = 3,
+                        # segment.angle = 20
                 ) +
                         
                 geom_point(data = team_data,

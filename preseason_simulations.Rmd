@@ -831,7 +831,7 @@ Note: for teams that are new to FBS this year, we do not have information on the
 
 The following visualization shows the distribution of each team's Week 0 rating by conference.
 
-```{r conference ratings, fig.height=8}
+```{r conference ratings, fig.height=8.5}
 
 preseason_ratings %>%
         # hacky fix for james madison
@@ -840,16 +840,18 @@ preseason_ratings %>%
                           filter(TEAM == 'James Madison') %>%
                           mutate(CONFERENCE = 'Sun Belt') %>%
                           mutate(RATING = base_teams$`James Madison`)) %>%
+        mutate(RATING = plyr::round_any(RATING, 5)) %>%
         ggplot(., aes(x = "1",
                       label = TEAM_ABBREVIATION,
                       fill = TEAM,
                       y = RATING))+
         # geom_point(position = 'auto',
         #            jitter.width = 0.05)+
-        geom_label_repel(position = position_auto(seed = 5,
-                                                  jitter.width=0.15,
+        geom_label(position = position_auto(seed = 1,
+                                                  jitter.width=0.46,
                                             scale =T),
                          max.overlaps = 100,
+                   direction = "x",
                    color = 'white',
                    size = 3,
                    alpha = 0.8)+
