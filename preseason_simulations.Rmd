@@ -221,6 +221,8 @@ season_team_rankings = DBI::dbGetQuery(myconn,
 
 ### combine datasets to get games
 games = games_raw %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP == F) %>%
         mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
                                          TRUE ~ HOME_DIVISION)) %>%
         mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
@@ -1403,7 +1405,7 @@ playoff_priorities =
         # p5 teams that won their conference with less than three losses
         bind_rows(.,
                   playoff_resumes %>%
-                          filter(P5 == 1 & LOSSES < 3 & ELO_RANK < 5) %>%
+                          filter(P5 == 1 & LOSSES < 2 & ELO_RANK < 5) %>%
                           mutate(playoff_priority = 4)
                   ) %>%
         # undefeated teams that were also conference champions and have a high elo
@@ -1414,7 +1416,7 @@ playoff_priorities =
                   ) %>%
         bind_rows(.,
                   playoff_resumes %>%
-                          filter(P5 == 1 & LOSSES < 2 & ELO_RANK < 5) %>%
+                          filter(P5 == 1 & LOSSES < 3 & ELO_RANK < 5) %>%
                           mutate(playoff_priority = 6)
                   ) %>%
         bind_rows(.,
