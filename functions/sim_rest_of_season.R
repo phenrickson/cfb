@@ -5,7 +5,7 @@ function(games,
                               elo_pars,
                               nsims = 100,
                               sim_start_week = 0,
-                              season_start_only = F,
+                              season_start_only = T,
                               points_model,
                               aggregate = T) {
         
@@ -32,7 +32,7 @@ function(games,
         # # loop over weeks
         game_simulations = foreach(i = 1:weeks_to_sim,
                                    .combine = bind_rows) %do% {
-
+                                           
                                            # get the rest of the games from that season
                                            games_to_simulate = games %>%
                                                    filter(SEASON_TYPE == 'regular') %>%
@@ -42,6 +42,7 @@ function(games,
                                                              by = c("SEASON", "WEEK", "SEASON_TYPE")) %>%
                                                    filter(SEASON == season_weeks[i,]$SEASON) %>%
                                                    filter(WEEK_NUM >= season_weeks[i,]$WEEK_NUM)
+                                           
                                            # simulate that week
                                            # simulate the reast of the season
                                            sims_season =  future_replicate(nsims,
