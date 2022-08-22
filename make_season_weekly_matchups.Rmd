@@ -1,0 +1,699 @@
+---
+title: "Predicting `r params$input_season` CFB Games"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+params:
+        input_season: 2018
+        sim_week: 0
+        nsims: 0
+---
+
+```{r setup, include=F}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+options(knitr.duplicate.label = "allow")
+options(scipen=999)
+
+```
+
+```{r packages, include=F}
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+library(TTR)
+library(flextable)
+conflict_prefer("lag", "dplyr")
+
+# parallelization
+library(future.apply)
+library(furrr)
+plan(multisession, workers = 7)
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=10,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+### connect to DBS
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+
+```{r data sources}
+
+### get data sources
+# teams raw
+teams_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble() %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        # logic for flagging conference championship games
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
+        ungroup() %>%
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | 
+                                                                    is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome' |
+                                                                    HOME_CONFERENCE == 'Sun Belt' |
+                                                                    HOME_CONFERENCE == 'American Athletic') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                           HOME_POINTS < AWAY_POINTS ~ 'no',
+                                           HOME_POINTS == AWAY_POINTS ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# get team conference mapping
+team_conference_season = DBI::dbGetQuery(myconn,
+                                         paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_TEAM_CONFERENCE_SEASON')) %>%
+        as_tibble()
+
+# team mapping function
+team_mapping = teams_raw %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", TEAM))) %>%
+        select(TEAM, TEAM_ABBR, TEAM_ABBREVIATION, COLOR, ALT_COLOR) %>%
+        mutate(COLOR = case_when(TEAM == 'Toledo' ~ '#003E7E',
+                                 TRUE ~ COLOR))
+
+### get historical elo
+# games
+elo_games = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ACTIVE_ELO_GAMES')) %>%
+        as_tibble()
+
+# teams
+elo_teams = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ACTIVE_ELO_TEAMS')) %>%
+        as_tibble() %>%
+        select(-LOAD_DATE)
+
+### recruiting 
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                                       paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS ')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+# expand
+recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
+                               YEAR = seq(min(recruiting_teams_raw$YEAR),
+                                          max(recruiting_teams_raw$YEAR))) %>%
+        left_join(., recruiting_teams_raw,
+                  by = c("YEAR", "TEAM")) %>%
+        mutate(RECRUITING_POINTS = replace_na(RECRUITING_POINTS, 0)) %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                               TRUE ~ EMA)) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR)  %>%
+        mutate(SEASON = YEAR) %>%
+        ungroup() %>%
+        select(TEAM, SEASON, CONFERENCE, DIVISION, RANK, RECRUITING_POINTS, EMA)
+
+# get what we need
+recruiting = recruiting_teams %>%
+        select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
+        rename(RECRUITING_SCORE = EMA)
+
+
+### efficiency
+# season level efficiency rankings
+season_team_rankings = DBI::dbGetQuery(myconn,
+                                       paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.EFFICIENCY_TEAM_SEASON')) %>%
+        as_tibble()
+
+### combine datasets to get games
+games = games_raw %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ HOME_DIVISION)) %>%
+        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ AWAY_DIVISION)) %>%
+        mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
+        filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               CONFERENCE_GAME,
+               CONFERENCE_CHAMPIONSHIP,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "AWAY_TEAM"))
+
+
+# data sources
+load(file=here::here("data", "season_team_rankings_type.Rdata"))
+
+```
+
+```{r load games}
+
+# get files from season folder
+files = list.files(here::here("simulations",
+                      "season",
+                      params$input_season))
+
+# get objects from each week
+files_weeks =  files[grepl("sims_week", files)]
+
+# load in simulations
+week_list = foreach(i = 1:length(files_weeks)) %do% {
+        
+        load(here::here("simulations",
+                        "season",
+                        params$input_season,
+                        files_weeks[i]))
+        
+        foo = all_simulations
+        
+        rm(all_simulations)
+        
+        foo
+        
+}
+
+rm(foo)
+
+```
+
+```{r join up}
+
+# pull predictions table
+team_predictions = do.call(rbind, lapply(week_list, function (x) x$team_predictions)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# pull game predictions
+game_predictions = do.call(rbind, lapply(week_list, function (x) x$game_predictions)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# pull remaining games
+sim_remaining_games = do.call(rbind, lapply(week_list, function (x) x$sim_remaining_games)) %>%
+        filter(SIM_FROM_WEEK == params$sim_week)
+
+```
+
+
+```{r get what we need for tables and assessment}
+
+games_and_outcomes = games %>%
+        filter(SEASON == params$input_season) %>%
+        mutate(HOME_POINTS = case_when(WEEK > params$sim_week ~ NA_real_,
+                                       TRUE~  HOME_POINTS),
+               AWAY_POINTS = case_when(WEEK > params$sim_week ~ NA_real_,
+                                       TRUE ~ AWAY_POINTS)) %>%
+        left_join(., game_predictions %>%
+                          group_by(GAME_ID) %>%
+                          filter(SIM_FROM_WEEK == max(SIM_FROM_WEEK)),
+                          by = c("GAME_ID")) %>%
+    #    select(WEEK, SIM_FROM_WEEK, SEASON, NEUTRAL_SITE, HOME_TEAM, AWAY_TEAM, HOME_SIM_PROB, HOME_SIM_MARGIN, HOME_PREGAME_ELO, AWAY_PREGAME_ELO, 
+              # HOME_POINTS, AWAY_POINTS) %>%
+        mutate(QUALITY = case_when(NEUTRAL_SITE == T ~ 2 / ((1/(HOME_PREGAME_ELO+75) + (1/AWAY_PREGAME_ELO))),
+                                   NEUTRAL_SITE == F ~ 2 / ((1/(HOME_PREGAME_ELO) + (1/AWAY_PREGAME_ELO))))) %>%
+        mutate(QUALITY = round(100*((QUALITY - min(QUALITY)) / ((max(QUALITY) - min(QUALITY)))),0)) %>%
+      #  mutate(QUALITY = 2 / ((1/HOME_PREGAME_ELO) + (1/AWAY_PREGAME_ELO))) %>%
+        rename(HOME = HOME_TEAM,
+               AWAY = AWAY_TEAM) %>%
+        mutate(HOME_SIM = case_when(HOME_SIM_PROB >=.5 ~ 'win',
+                                     HOME_SIM_PROB < .5 ~ 'loss')) %>%
+        mutate(HOME_OUTCOME = case_when(WEEK > params$sim_week ~ NA_character_,
+                                        HOME_POINTS > AWAY_POINTS ~ 'win',
+                                        HOME_POINTS < AWAY_POINTS ~ 'loss'),
+               HOME_MARGIN = HOME_POINTS - AWAY_POINTS) %>%
+        mutate(PRED = case_when(HOME_SIM == 'win' ~ paste(HOME, "by", abs(HOME_SIM_MARGIN)),
+                                HOME_SIM == 'loss' ~paste(AWAY, "by", abs(HOME_SIM_MARGIN)))) %>%
+        mutate(OUTCOME = case_when(WEEK > params$sim_week ~ NA_character_,
+                                   HOME_OUTCOME == 'win' ~ paste(HOME, "by", abs(HOME_MARGIN)),
+                                   HOME_OUTCOME == 'loss' ~ paste(AWAY, "by", abs(HOME_MARGIN)))) %>%
+        mutate(HOME_PROB = HOME_SIM_PROB) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                           HOME_POINTS < AWAY_POINTS ~ 'no'),
+                                 levels = c('no', 'yes'))) %>%
+        mutate(HOME_PRED = factor(case_when(HOME_SIM_PROB >= .5 ~ 'yes',
+                                            HOME_SIM_PROB < 5 ~ 'no'),
+                                  levels = c("no", "yes"))) %>%
+        mutate(yes = HOME_SIM_PROB)
+
+qualityColorRamp = colorRampPalette(c("orange", "white", "dodgerblue4"))
+homeColorRamp = colorRampPalette(c("white", "deepskyblue1"))
+homeColor = homeColorRamp(5)[3]
+
+```
+
+# What is this? {.unnumbered}
+
+This page displays predictions for games in the `r params$input_season` CFB season. These predictions come from a model built on historical college football play by play and game data in order to simulate upcoming games. All data is from collegefootballdata.com. 
+
+<!-- To see regular season win projections and conference championship / playoff / national championship probabilities for all teams as of this week, go to:  -->
+
+# Week `r params$sim_week+1` Predictions 
+
+This table displays the results of simulating week `r params$sim_week+1` of the `r params$input_season` CFB season `r `params$nsims` times. These simulations are run one week in advance, using information available in the lead up to `r params$sim_week+1` - for the first week of the season, team ratings are based solely on information from previous seasons. Quality is the (harmonic) mean of the two team's overall rating, with 100 indicating a game between highly rated opponents. Pr(HomeWin) is the percentage of times that the home team won the game across every simulation.
+
+```{r get predictions for upcoming week}
+
+# show last week's results
+games_and_outcomes %>%
+        filter(WEEK == params$sim_week+1) %>%
+        mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
+                                   TRUE ~ 'No')) %>%
+        mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
+                                   TRUE ~ 0)) %>%
+      #  mutate(Name = paste('<a href="https://boardgamegeek.com/boardgame/', ID, '">', Name, '</a>', sep="")) %>%
+        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
+        arrange(WEEK, desc(QUALITY)) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
+                                     TRUE ~ HOME_PROB)) %>%
+        mutate(HOME_PROB = format(HOME_PROB, nsmall = 3)) %>%
+        rename(Season = SEASON,
+               Week = WEEK,
+               Quality = QUALITY,
+               Home = HOME,
+               Away = AWAY,
+               `Pr(HomeWin)` = HOME_PROB,
+               Prediction = PRED,
+               Result = OUTCOME) %>%
+        mutate(Quality = as.integer(Quality)) %>%
+        datatable(escape=F,
+                  rownames = F,
+                  filter = list(position = 'top'),
+                  class = list(stripe =F),
+                  options = list(pageLength = 25,
+                                 editable =T,
+                                 initComplete = htmlwidgets::JS(
+                                         "function(settings, json) {",
+                                         paste0("$(this.api().table().container()).css({'font-size': '", '8pt', "'});"),
+                                         "}"),
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(
+                                         list(className = 'dt-center',
+                                              visible=T,
+                                              targets=c("Season", "Week", "Quality", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result", "Correct")),
+                                         list(className = 'dt-center',
+                                                        visible=F,
+                                                        targets=c("correct"))))) %>%
+        formatStyle(c("Quality"),
+                  #  color = 'white',
+                     backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                     qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
+        formatStyle(c("Pr(HomeWin)"),
+                     backgroundColor = styleInterval(seq(0, 1.8, .01),
+                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%    
+        formatStyle('Result',
+                    'correct',
+                    backgroundColor = styleEqual(levels = c(1, 0),
+                                                 c(homeColor,
+                                                   'lightcoral')))
+
+```
+
+# Results Through Week `r params$sim`
+
+How has the model performed so far in `r params$input_season`? 
+
+## Assessment
+
+The model predicts the probability that the home team will win and their expected margin of victory (or defeat). I assess the model's performance by assessing the accuracy of its predictions (win/loss), the logloss of its probabilities, and the mean absolute error of the margin.
+
+```{r assess via week}
+
+if (params$sim_week==0) {
+        
+         weekly_assess = 
+        tibble(Season = vector(),
+               Week = vector(),
+               N = vector(),
+               Accuracy = vector(),
+               LogLoss = vector())
+         
+         season_assess = 
+                 tibble(accuracy = vector(),
+                        mn_log_loss = vector(),
+                        mae = vector())
+               } else {
+                
+assess_metrics = metric_set(yardstick::mn_log_loss,
+                            yardstick::accuracy)
+
+weekly_assess = 
+games_and_outcomes %>%
+        group_by(SIM_FROM_WEEK, WEEK, SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SIM_FROM_WEEK, WEEK, SEASON, games) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        bind_rows(.,
+                  games_and_outcomes %>%
+                          group_by(SIM_FROM_WEEK, WEEK, SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SIM_FROM_WEEK, WEEK, SEASON, games) %>%
+                          yardstick::mae(truth = HOME_MARGIN,
+                                         estimate = HOME_SIM_MARGIN,
+                                         event_level = 'second'))
+
+season_assess = 
+        games_and_outcomes %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        bind_rows(.,
+                  games_and_outcomes %>%
+                          group_by(SEASON) %>%
+                          yardstick::mae(truth = HOME_MARGIN,
+                                         estimate = HOME_SIM_MARGIN,
+                                         event_level = 'second')) %>%
+        select(-.estimator) %>%
+        spread(.metric, .estimate) %>%
+        mutate(accuracy = format(round(accuracy, 2), nsmall = 2),
+               mn_log_loss = format(round(mn_log_loss, 2), nsmall = 2),
+               mae = format(round(mae, 1), nsmall=1))
+
+
+#games_and_outcomes 
+weekly_assess %>%
+        filter(WEEK <= params$sim_week) %>%
+        select(games, SEASON, WEEK, .metric, .estimate) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        rename(Season = SEASON,
+               Week = WEEK) %>%
+        spread(.metric, .estimate) %>%
+        arrange(Week) %>%
+        mutate(accuracy = format(round(accuracy, 2), nsmall = 2),
+               mn_log_loss = format(round(mn_log_loss, 2), nsmall = 2),
+               mae = format(round(mae, 1), nsmall=1)) %>%
+        rename(Accuracy = accuracy,
+               LogLoss = mn_log_loss,
+               MAE = mae,
+               N = games) %>%
+        select(Season, Week, N, Accuracy, LogLoss, MAE) %>%
+        flextable() %>%
+        autofit() %>%
+        flextable::add_header_row(values = c("","", "", "Outcome", "Margin"),
+                                  colwidths = c(1,1, 1, 2, 1)) %>%
+        add_footer_row(values = c("Season Average:", 
+                                  season_assess$accuracy,
+                                  season_assess$mn_log_loss, 
+                                  season_assess$mae),
+                       colwidths = c(3, 1, 1, 1)) %>%
+        flextable::align(part = 'all',
+                         align = 'center')
+}
+ 
+```
+
+```{r plot}
+
+source(here::here("functions", "theme_phil.R"))
+
+if(params$sim_week == 0) { foo = vector()} else {
+games_and_outcomes %>%
+        filter(WEEK <= params$sim_week) %>%
+        mutate(correct = HOME_PRED == HOME_WIN) %>%
+        mutate(LABEL = paste(
+                paste(HOME, "vs", AWAY),
+                paste(HOME_POINTS, "-", AWAY_POINTS),
+                sep="\n")) %>%
+        # mutate(HOME_SIM_MARGIN = case_when(HOME_SIM_MARGIN > 75 ~ 75,
+        #                                    HOME_SIM_MARGIN < -75 ~ 75,
+        #                                    TRUE ~ HOME_SIM_MARGIN)) %>%
+        ggplot(., aes(x=HOME_SIM_MARGIN,
+                      label = LABEL,
+                      color = correct,
+                      y = HOME_MARGIN))+
+        geom_point()+
+        geom_text(check_overlap = T,
+                  vjust = -0.5,
+                  size = 2)+
+        coord_cartesian(xlim =c(-85, 85),
+                        ylim = c(-85, 85))+
+        geom_vline(xintercept = 0,
+                   alpha = 0.8,
+                   linetype = 'dotted')+
+        geom_hline(yintercept = 0,
+                   linetype = 'dotted',
+                   alpha = 0.8)+
+        theme_phil()+
+        guides(color = 'none',
+               label = 'none')+
+        scale_color_manual(values = c("red", 'deepskyblue3'))+
+        xlab("Predicted Home Margin")+
+        ylab("Actual Home Margin")+
+        facet_wrap(SEASON ~ .)
+}
+
+```
+
+## Results
+
+The following table shows the results of games played in previous weeks next to the model's predictions.
+
+```{r show results of games so far}
+
+games_and_outcomes %>%
+        filter(WEEK <= params$sim_week) %>%
+        mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 'Yes',
+                                   TRUE ~ 'No')) %>%
+        mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
+                                   TRUE ~ 0)) %>%
+      #  mutate(Name = paste('<a href="https://boardgamegeek.com/boardgame/', ID, '">', Name, '</a>', sep="")) %>%
+        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
+        arrange(desc(WEEK), desc(QUALITY)) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
+                                     TRUE ~ HOME_PROB)) %>%
+        mutate(HOME_PROB = format(HOME_PROB, nsmall = 3)) %>%
+        rename(Season = SEASON,
+               Week = WEEK,
+               Quality = QUALITY,
+               Home = HOME,
+               Away = AWAY,
+               `Pr(HomeWin)` = HOME_PROB,
+               Prediction = PRED,
+               Result = OUTCOME) %>%
+        mutate(Quality = as.integer(Quality)) %>%
+        mutate(Correct = factor(Correct)) %>%
+        datatable(escape=F,
+                  rownames = F,
+                  filter = list(position = 'top'),
+                  class = list(stripe =F),
+                  options = list(pageLength = 25,
+                                 editable =T,
+                                 initComplete = htmlwidgets::JS(
+                                         "function(settings, json) {",
+                                         paste0("$(this.api().table().container()).css({'font-size': '", '8pt', "'});"),
+                                         "}"),
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(
+                                         list(className = 'dt-center',
+                                              visible=T,
+                                              targets=c("Season", "Week", "Quality", "Home", "Away", "Pr(HomeWin)", "Prediction", "Result", "Correct")),
+                                         list(className = 'dt-center',
+                                                        visible=F,
+                                                        targets=c("correct"))))) %>%
+        formatStyle(c("Quality"),
+                  #  color = 'white',
+                     backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                     qualityColorRamp(length(seq(-30, 130, 1))+1)))%>%     
+        formatStyle(c("Pr(HomeWin)"),
+                     backgroundColor = styleInterval(seq(0, 1.8, .01),
+                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%    
+        formatStyle('Result',
+                    'correct',
+                    backgroundColor = styleEqual(levels = c(1, 0),
+                                                 c(homeColor,
+                                                   'lightcoral')))
+
+```
+
+# Predicting the Rest of the Season
+
+This table displays the results of simulating the rest of the `r params$input_season` season `r params$nsims` times. These simulations are run weeks in advance, where the remainder of the season is simulated using only the information as of week `r params$sim_week`. 
+
+For example, we simulate the entire season before any games are played by simulating week two based on the (simulated) results of week one, then simulating week three based on the (simulated) results from week two. As a result, predictions for future weeks tend to be less accurate than predictions made one week in advance and are likely to change as we get closer to the actual game.
+
+```{r get predictinos for past weeks}
+
+# show last week's results
+games_and_outcomes %>%
+        filter(WEEK > params$sim_week) %>%
+        mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
+                                   TRUE ~ 'No')) %>%
+        mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
+                                   TRUE ~ 0)) %>%
+      #  mutate(Name = paste('<a href="https://boardgamegeek.com/boardgame/', ID, '">', Name, '</a>', sep="")) %>%
+        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
+        arrange(WEEK, desc(QUALITY)) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
+                                     TRUE ~ HOME_PROB)) %>%
+        mutate(HOME_PROB = format(HOME_PROB, nsmall = 3)) %>%
+        rename(Season = SEASON,
+               Week = WEEK,
+               Quality = QUALITY,
+               Home = HOME,
+               Away = AWAY,
+               `Pr(HomeWin)` = HOME_PROB,
+               Prediction = PRED,
+               Result = OUTCOME) %>%
+        mutate(Quality = as.integer(Quality)) %>%
+        datatable(escape=F,
+                  rownames = F,
+                  filter = list(position = 'top'),
+                  class = list(stripe =F),
+                  options = list(pageLength = 25,
+                                 editable =T,
+                                 initComplete = htmlwidgets::JS(
+                                         "function(settings, json) {",
+                                         paste0("$(this.api().table().container()).css({'font-size': '", '8pt', "'});"),
+                                         "}"),
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(
+                                         list(className = 'dt-center',
+                                              visible=T,
+                                              targets=c("Season", "Week", "Quality", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result", "Correct")),
+                                         list(className = 'dt-center',
+                                                        visible=F,
+                                                        targets=c("correct"))))) %>%
+        formatStyle(c("Quality"),
+                  #  color = 'white',
+                     backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                     qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
+        formatStyle(c("Pr(HomeWin)"),
+                     backgroundColor = styleInterval(seq(0, 1.8, .01),
+                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%    
+        formatStyle('Result',
+                    'correct',
+                    backgroundColor = styleEqual(levels = c(1, 0),
+                                                 c(homeColor,
+                                                   'lightcoral')))
+
+```

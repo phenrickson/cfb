@@ -1,0 +1,1078 @@
+---
+title: "Simulating the `r params$input_season` CFB Season"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: TRUE #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+params:
+        input_season: 2018
+        sim_week: 11
+        nsims: 1000
+---
+
+```{r setup, include=F}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+options(knitr.duplicate.label = "allow")
+options(scipen=999)
+
+```
+
+```{r packages, include=F}
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+library(TTR)
+library(flextable)
+conflict_prefer("lag", "dplyr")
+
+# parallelization
+library(future.apply)
+library(furrr)
+plan(multisession, workers = 7)
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=10,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+### connect to DBS
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r functions and colors}
+
+### functions
+source(here::here("functions/get_expected_score.R"))
+source(here::here("functions/get_new_elos.R"))
+source(here::here("functions/calc_elo_ratings.R"))
+source(here::here("functions", "simulateX.R"))
+source(here::here("functions", "sim_game_margin.R"))
+source(here::here("functions", "calc_elo_ratings.R"))
+source(here::here("functions", "sim_elo_ratings.R"))
+source(here::here("functions", "sim_rest_of_season.R"))
+source(here::here("functions", "theme_phil.R"))
+source(here::here("functions", "span_func.R"))
+source(here::here("functions", "get_conference_championships.R"))
+source(here::here("functions", "get_playoffs.R"))
+
+# color palettes
+load(here::here("data", "team_colors.Rdata"))
+custom_color_teams <- scale_colour_manual(name = "TEAM", values = team_colors)
+custom_fill_teams <- scale_fill_manual(name = "TEAM", values = team_colors)
+
+```
+
+```{r data sources}
+
+### get data sources
+# teams raw
+teams_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble() %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        # logic for flagging conference championship games
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
+        ungroup() %>%
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | 
+                                                                    is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome' |
+                                                                    HOME_CONFERENCE == 'Sun Belt' |
+                                                                    HOME_CONFERENCE == 'American Athletic') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                           HOME_POINTS < AWAY_POINTS ~ 'no',
+                                           HOME_POINTS == AWAY_POINTS ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# get team conference mapping
+team_conference_season = DBI::dbGetQuery(myconn,
+                                         paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_TEAM_CONFERENCE_SEASON')) %>%
+        as_tibble()
+
+# team mapping function
+team_mapping = teams_raw %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", TEAM))) %>%
+        select(TEAM, TEAM_ABBR, TEAM_ABBREVIATION, COLOR, ALT_COLOR) %>%
+        mutate(COLOR = case_when(TEAM == 'Toledo' ~ '#003E7E',
+                                 TRUE ~ COLOR))
+
+### get historical elo
+# games
+elo_games = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ACTIVE_ELO_GAMES')) %>%
+        as_tibble()
+
+# teams
+elo_teams = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ACTIVE_ELO_TEAMS')) %>%
+        as_tibble() %>%
+        select(-LOAD_DATE)
+
+### recruiting 
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                                       paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS ')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+# expand
+recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
+                               YEAR = seq(min(recruiting_teams_raw$YEAR),
+                                          max(recruiting_teams_raw$YEAR))) %>%
+        left_join(., recruiting_teams_raw,
+                  by = c("YEAR", "TEAM")) %>%
+        mutate(RECRUITING_POINTS = replace_na(RECRUITING_POINTS, 0)) %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                               TRUE ~ EMA)) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR)  %>%
+        mutate(SEASON = YEAR) %>%
+        ungroup() %>%
+        select(TEAM, SEASON, CONFERENCE, DIVISION, RANK, RECRUITING_POINTS, EMA)
+
+# get what we need
+recruiting = recruiting_teams %>%
+        select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
+        rename(RECRUITING_SCORE = EMA)
+
+### efficiency
+# season level efficiency rankings
+season_team_rankings = DBI::dbGetQuery(myconn,
+                                       paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.EFFICIENCY_TEAM_SEASON')) %>%
+        as_tibble()
+
+### combine datasets to get games
+games = games_raw %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+        filter(SEASON == params$input_season) %>%
+        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ HOME_DIVISION)) %>%
+        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ AWAY_DIVISION)) %>%
+        mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
+        filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               CONFERENCE_GAME,
+               CONFERENCE_CHAMPIONSHIP,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "AWAY_TEAM"))
+
+# data sources
+load(file=here::here("data", "season_team_rankings_type.Rdata"))
+
+```
+
+```{r functions for turning elo to list}
+
+## functions for converting elo to list from specified year
+teams_to_list = function(x) {
+        
+        setNames(unlist(x$ELO) %>%
+                         split(., seq(nrow(x))),
+                 rownames(x))
+}
+
+team_seasons_to_list = function(x) {
+        
+        setNames(unlist(x$SEASON) %>%
+                         split(., seq(nrow(x))),
+                 rownames(x))
+}
+
+```
+
+```{r conference divisions}
+
+# set up conference divisions
+load(here::here("data", "season_conference_divisions.Rdata"))
+
+# for this season
+conference_divisions = season_conference_divisions %>%
+        filter(SEASON == params$input_season)
+
+```
+
+```{r create data for simulating, include=F}
+
+# season
+future_seasons = expand.grid(TEAM = season_team_rankings  %>%
+                                     select(TEAM) %>%
+                                     distinct(TEAM) %>%
+                                     pull(),
+                             TYPE = c('raw', 'adjusted'),
+                             SEASON = params$input_season) %>%
+        as_tibble()
+
+# get efficiency and elo for historical + future season
+teams_data = season_team_rankings %>%
+        filter(SEASON < params$input_season) %>%
+        bind_rows(., future_seasons) %>%
+        filter(TYPE == 'adjusted') %>%
+        select(-TYPE) %>%
+        # add in season end elo ratings
+        left_join(.,
+                  elo_teams %>%
+                          group_by(SEASON, TEAM) %>%
+                          arrange(GAME_DATE) %>%
+                          mutate(WEEK = row_number()) %>%
+                          mutate(LAST_GAME = GAME_DATE == max(GAME_DATE)) %>%
+                          filter(LAST_GAME ==T) %>%
+                          select(SEASON, TEAM, POSTGAME_ELO) %>%
+                          rename(ELO = POSTGAME_ELO),
+                  by = c("SEASON", "TEAM")) %>%
+        # add in season recruiting data
+        left_join(., 
+                  recruiting %>%
+                          select(TEAM, SEASON, RECRUITING_SCORE),
+                  by = c("SEASON", "TEAM")) %>%
+        arrange(SEASON, TEAM) %>%
+        group_by(TEAM) %>%
+        mutate(PREVIOUS_OVERALL = lag(OVERALL, 1),
+               PREVIOUS_OFFENSE = lag(OFFENSE, 1),
+               PREVIOUS_DEFENSE = lag(DEFENSE, 1),
+               PREVIOUS_ELO = lag(ELO, 1)) %>%
+        ungroup() %>%
+        filter(SEASON > 2007)
+
+
+# split into training and test
+teams_train  = teams_data %>%
+        filter(SEASON < params$input_season)
+
+teams_test = teams_data %>%
+        filter(SEASON == params$input_season)
+
+# create recipe
+teams_recipe =      
+        recipe(ELO ~.,
+               data = teams_train) %>%
+        update_role(all_predictors(),
+                    new_role = "id") %>%
+        update_role(PREVIOUS_OFFENSE,
+                    PREVIOUS_DEFENSE,
+                    PREVIOUS_ELO,
+                    RECRUITING_SCORE,
+                    new_role = 'predictor') %>%
+        # manual missingness
+        step_mutate(RECRUITING_SCORE = replace_na(RECRUITING_SCORE, 0),
+                    PREVIOUS_ELO = replace_na(PREVIOUS_ELO, 1200),
+                    PREVIOUS_OFFENSE = replace_na(PREVIOUS_OFFENSE,-0.1),
+                    PREVIOUS_DEFENSE = replace_na(PREVIOUS_DEFENSE, -0.1)) %>%
+        step_normalize(all_predictors())
+
+# linear model
+lm_mod = linear_reg(mode = "regression",
+                    engine = "lm")
+
+# create workflow
+teams_workflow = workflow() %>%
+        add_recipe(teams_recipe) %>%
+        add_model(lm_mod)
+
+# run workflow
+adjusted_teams_test = 
+        teams_workflow %>%
+        fit(bind_rows(teams_train)) %>%
+        augment(bind_rows(teams_test %>%
+                                  mutate(dataset = 'test'))) %>%
+        select(SEASON, dataset, TEAM, starts_with("PREVIOUS"),
+               ELO, .pred) %>%
+        mutate_if(is.numeric, round, 3)
+
+# set season to simulate
+# set initial games
+initial_games = games %>%
+        filter(SEASON < params$input_season)
+
+# elo pars
+elo_pars = tibble(k = 35,
+                  v = 400,
+                  reversion = 0,
+                  home_field_advantage = 75,
+                  recruiting_weight =0)
+
+# train points model
+points_model = elo_games %>%
+        filter(SEASON >=1970) %>% 
+        filter(SEASON < params$input_season) %>%
+        mutate(HOME_ELO_DIFF = case_when(NEUTRAL_SITE == F ~ 
+                                                 HOME_PREGAME_ELO + 
+                                                 elo_pars$home_field_advantage -
+                                                 AWAY_PREGAME_ELO,
+                                         TRUE ~ HOME_PREGAME_ELO - AWAY_PREGAME_ELO)) %>%
+        mutate(HOME_SCORE_DIFF = HOME_POINTS-AWAY_POINTS) %>%
+        nest() %>%
+        # now fit linear models, i'll do so using stan
+        mutate(lm = map(data, ~ lm(HOME_SCORE_DIFF ~ HOME_ELO_DIFF +0,
+                                   data = .x))) %>%
+        pluck("lm",1)
+
+```
+
+```{r workflow and set up}
+
+# base elo, from historical games
+base_teams_elo = elo_teams %>%
+        filter(SEASON < params$input_season) %>%
+        group_by(TEAM) %>%
+        filter(GAME_DATE == max(GAME_DATE)) %>%
+        slice_max(POSTGAME_ELO, n=1, with_ties = F) %>%
+        ungroup() %>%
+        select(TEAM, POSTGAME_ELO) %>%
+        rename(ELO = POSTGAME_ELO) %>%
+        column_to_rownames("TEAM")
+
+# now adjusted
+# get computed elo as input
+adjusted_teams_elo = adjusted_teams_test %>%
+        filter(SEASON == params$input_season) %>%
+        select(TEAM, .pred) %>%
+        rename(ELO = .pred) %>%
+        column_to_rownames("TEAM")
+
+# get team seasons
+team_elo_seasons = elo_teams %>%
+        filter(SEASON < params$input_season) %>%
+        group_by(TEAM) %>%
+        slice_max(., order_by = SEASON, n=1, with_ties =F) %>%
+        ungroup() %>%
+        select(TEAM, SEASON) %>%
+        column_to_rownames("TEAM")
+
+# convert to list
+base_teams = teams_to_list(base_teams_elo)
+adjusted_teams = teams_to_list(adjusted_teams_elo)
+team_seasons = team_seasons_to_list(team_elo_seasons)
+
+# get elo input
+elo_input = list(teams = c(adjusted_teams,
+                           base_teams[!(names(base_teams) %in% names(adjusted_teams))]),
+                         team_seasons = team_seasons)
+        
+
+# rm
+rm(base_teams_elo,
+   adjusted_teams_elo,
+   adjusted_teams_test,
+   recruiting_teams_raw,
+   recruiting_teams,
+   recruiting,
+   initial_games,
+   elo_games,
+   elo_teams,
+   teams_test,
+   teams_train,
+   teams_recipe,
+   teams_workflow,
+   teams_raw,
+   future_seasons)
+
+```
+
+
+# What is this? {.unnumbered}
+
+Which teams are most likely to win their conference in `r params$input_season`? Make the playoff? Win the national championship?
+
+This page displays the results from simulating all remaining games in the `r params$input_season` college football season `r params$nsims` times. These simulations come from an (adjusted) Elo model that I developed using historical game and play by data - the current iteration of the model uses historical game outcomes, team offensive and defensive efficiency metrics, and recruiting composites in order to estimate a team's relative rating compared to other teams. 
+
+All data is from collegefootballdata.com. Any errors in the model are my own.
+
+# Predicting the `r params$input_season` Season
+
+The following table shows each team's rating, predicted record (for the regular season), and probabilities of making a bowl, winning a conference championship, making the playoff and/or winning the national championship.
+
+These results are based on simulating the `r params$input_season` season **`r params$nsims`** times and finding the number of simulations in which a team achieved each outcome. These simulations are run after every week of the regular season - in the table below, click on the filter below 'Week' in the table below to examine the model's predictions after each week of the season.
+
+```{r load predictions}
+
+# get files from season folder
+files = list.files(here::here("simulations",
+                      "season",
+                      params$input_season))
+
+# get objects from each week
+files_weeks =  files[grepl("sims_week", files)]
+
+```
+
+```{r load in previous weeks}
+
+# load in simulations
+week_list = foreach(i = 1:length(files_weeks)) %do% {
+        
+        load(here::here("simulations",
+                        "season",
+                        params$input_season,
+                        files_weeks[i]))
+        
+        foo = all_simulations
+        
+        rm(all_simulations)
+        
+        foo
+        
+}
+
+rm(foo)
+```
+
+```{r now combine from multiple weeks}
+
+# pull predictions table
+team_predictions = do.call(rbind, lapply(week_list, function (x) x$team_predictions)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# pull game predictions
+game_predictions = do.call(rbind, lapply(week_list, function (x) x$game_predictions)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# pull remaining games
+sim_remaining_games = do.call(rbind, lapply(week_list, function (x) x$sim_remaining_games)) %>%
+        filter(SIM_FROM_WEEK == params$sim_week)
+
+# conference championships
+sim_conference_championship_games = do.call(rbind, lapply(week_list, function (x) x$sim_conference_championship_games)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# playoff games
+sim_playoff_games = do.call(rbind, lapply(week_list, function (x) x$sim_playoff_games)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# playoff games
+sim_nc_games= do.call(rbind, lapply(week_list, function (x) x$sim_nc_games)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+```
+
+```{r make table for team predictions}
+
+# color formats for data table probs
+probs_df = data.frame(breaks = seq(0, 1, 0.01))
+
+# color formats for ratings
+elo_df = data.frame(outcome = 'Rating',
+                    breaks = quantile(c(2100, 2200, do.call(rbind, adjusted_teams) %>%
+                                              as.data.frame() %>%
+                                              rownames_to_column("TEAM") %>% 
+                                              rename(RATING = V1) %>%
+                                              pull(RATING)), 
+                                      probs = seq(0, 1, .01), na.rm=T) %>%
+                            as.vector)
+
+# color ramps
+blueColorRamp = colorRampPalette(c("white", "deepskyblue1"))
+blueRedColorRamp = colorRampPalette(c("red", "white", "deepskyblue1"))
+
+# get table ready
+team_predictions %>%
+        mutate(TEAM = factor(TEAM),
+               CONFERENCE = factor(CONFERENCE),
+               RATING = round(RATING, 0)) %>%
+        mutate(pred_win = format(round(mean_wins, 1), nsmall =1),
+               pred_loss = format(round(mean_loss, 1), nsmall = 1)) %>%
+        mutate(Record = paste(pred_win, pred_loss, sep=" - ")) %>%
+        group_by(SIM_FROM_WEEK) %>%
+        arrange(desc(RATING)) %>%
+        mutate(Rank = row_number()) %>%
+        # select(SEASON, SIM_FROM_WEEK, CONFERENCE, TEAM, RATING,
+        #        everything()) %>%
+        rename(Week = SIM_FROM_WEEK,
+               Season = SEASON,
+               Team = TEAM,
+               Rating = RATING,
+               Conference = CONFERENCE,
+               Bowl = made_bowl,
+               Make_CC = made_conf,
+               Win_CC = win_conf,
+               Playoff = made_playoff,
+               NC = made_nc,
+               Win_NC = win_nc) %>%
+        mutate_at(c("Bowl",
+                    "Make_CC",
+                    "Win_CC",
+                    "Playoff",
+                    "NC",
+                    "Win_NC"),
+                ~  format(., nsmall = 2)) %>%
+        mutate(Week = factor(Week)) %>%
+        rename(Win_Conf = Win_CC) %>%
+        rename(Conf = Conference) %>%
+        select(Week,
+               Conf, 
+               Team, 
+               Record,
+               Rating,
+         #      Bowl,
+           #    Make_CC,
+               Win_Conf,
+               Playoff,
+               NC, 
+           Win_NC) %>%
+        arrange(desc(Week), 
+                #desc(Win_NC),
+               # desc(Make_NC), 
+              #  desc(Playoff), 
+                desc(Rating)) %>%
+        datatable(escape=F,
+                  rownames = F,
+                  filter = list(position = 'top'),
+                  options = list(pageLength = 25,
+                                 initComplete = htmlwidgets::JS(
+                                         "function(settings, json) {",
+                                         paste0("$(this.api().table().container()).css({'font-size': '", '8pt', "'});"),
+                                         "}"),
+                                         scrollX=F,
+                                         autowidth=T,
+                                         columnDefs = list(list(className = 'dt-center',
+                                                                targets="_all")))) %>%
+        formatStyle(c(
+                #"Bowl", 
+                     # "Make_CC",
+                      "Win_Conf", "Playoff", "NC", "Win_NC"), 
+                    backgroundColor = styleInterval(probs_df %>%
+                                                            pull(breaks),
+                                                    blueColorRamp(probs_df %>%
+                                                                          pull(breaks) %>%
+                                                                          length()+1))) %>%
+        formatStyle(c("Rating"), 
+                    backgroundColor = styleInterval(elo_df %>%
+                                                            pull(breaks),
+                                                    blueRedColorRamp(elo_df %>%
+                                                                          pull(breaks) %>%
+                                                                          length()+1)))
+
+```
+
+# Playoff Probabilities
+
+How has each team's chances of making the playoff changed throughout the year? The following visualizations displays the probability of making the playoff for teams that have at any point achieved a probability of at least 1% of making the playoff.
+
+```{r display playoff probabilities}
+
+my_caption = list(labs(caption = paste("data from collegefootballdata.com",
+                                       "analysis and model by Phil Henrickson",
+                                       "github.com/phenrickson/cfb",
+                                       sep = "\n")))
+
+# set plot max
+max_week = max(sim_playoff_games$SIM_FROM_WEEK)
+
+# season
+season = max(sim_playoff_games$SEASON)
+
+# create data
+dat = conference_divisions %>%
+        mutate(CONFERENCE_DIVISION = replace_na(CONFERENCE_DIVISION, "No Divisions")) %>%
+       # filter(CONFERENCE != 'FBS Independents') %>%
+        nest(-SEASON) %>%
+        bind_cols(., tibble(SIM_FROM_WEEK = seq(0, max_week))) %>%
+        unnest()  %>%
+        left_join(.,
+                  sim_playoff_games %>%
+                          group_by(SEASON,
+                                   SIM_FROM_WEEK,
+                                   CONFERENCE,
+                                   TEAM,
+                                   SIM_OUTCOME) %>%
+                          count() %>%
+                          spread(SIM_OUTCOME, n) %>%
+                          mutate_at(c("win", "loss"),
+                                    ~ replace_na(., 0)),
+                  by = c("SEASON", "TEAM", "SIM_FROM_WEEK", "CONFERENCE")) %>%
+        mutate(SEASON_TYPE = "Playoff") %>%
+        mutate_at(c("win", "loss"),
+                  ~ replace_na(.,0)) %>%
+        mutate(perc = (win + loss) / params$nsims) %>%
+        group_by(TEAM) %>%
+        mutate(max_perc = max(perc)) %>%
+        ungroup() %>%
+        filter(max_perc >=0.01) %>%
+      mutate(TEAM_LABEL = case_when(SIM_FROM_WEEK == max(SIM_FROM_WEEK) & perc >=0.1 ~ 
+                                            paste(TEAM, "-", paste(round(perc*100,0),"%", sep=""))))
+
+p = dat %>%
+        ggplot(., aes(x=SIM_FROM_WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y=perc))+
+        geom_point(size=2)+
+        geom_line(stat = 'smooth',
+                  method = span_func(max_week)$method,
+                  se = F,
+                  formula = 'y ~ x',
+                  lwd = 1,
+                 span = span_func(max_week)$span,
+                  alpha = 0.85)+
+        geom_text_repel(
+                fontface = "bold",
+                size = 3,
+                direction = "y",
+                hjust = -1.2,
+                segment.size = .7,
+                segment.alpha = .5,
+                segment.linetype = "dotted",
+                box.padding = .4,
+                segment.curvature = -0.1,
+                segment.ncp = 3,
+                segment.angle = 20)+
+        custom_color_teams+
+        guides(color = "none")+
+        coord_cartesian(xlim = c(-3, 18),
+                        ylim = c(0,1))+
+        theme_phil()+
+        xlab("Season Week")+
+        ggtitle(paste(params$input_season, "Playoff Probabilities as of Week", max_week),
+                subtitle = str_wrap(paste("Displaying the percentage of times each team made the playoff in simulations of the remaining season. Simulations run at the beginning of the season and after every week of regular season games."), 120))+
+        theme(plot.title = element_text(hjust = 0.5, size = 16),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12))+
+        ylab("Pr(Making Playoff)")+
+        my_caption
+
+if(max_week > 4) {
+        p + 
+                geom_text_repel(
+                        data = dat %>%
+                                filter(SIM_FROM_WEEK == 0) %>%
+                                mutate(TEAM_LABEL = case_when(perc > 0.05 ~ TEAM)),
+                        fontface = "bold",
+                        size = 3,
+                        direction = "y",
+                        hjust = 1.4,
+                        #   hjust = 0.1,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20) } else {p}
+
+rm(p,
+   dat)
+
+```
+
+# National Championship Probabilities
+
+How has each team's chances of winning the national championship changed throughout the year? The following visualizations displays the probability of winning the national championship by week for teams that have at any point achieved a probability of at least 1% of winning the NC.
+
+```{r display nc probabilities}
+
+# set plot max
+max_week = max(sim_nc_games$SIM_FROM_WEEK)
+
+# season
+season = max(sim_nc_games$SEASON)
+
+# create data
+dat = conference_divisions %>%
+        mutate(CONFERENCE_DIVISION = replace_na(CONFERENCE_DIVISION, "No Divisions")) %>%
+       # filter(CONFERENCE != 'FBS Independents') %>%
+        nest(-SEASON) %>%
+        bind_cols(., tibble(SIM_FROM_WEEK = seq(0, max_week))) %>%
+        unnest()  %>%
+        left_join(.,
+                  sim_nc_games %>%
+                          group_by(SEASON,
+                                   SIM_FROM_WEEK,
+                                   CONFERENCE,
+                                   TEAM,
+                                   SIM_OUTCOME) %>%
+                          count() %>%
+                          spread(SIM_OUTCOME, n) %>%
+                          mutate_at(c("win", "loss"),
+                                    ~ replace_na(., 0)),
+                  by = c("SEASON", "TEAM", "SIM_FROM_WEEK", "CONFERENCE")) %>%
+        mutate(SEASON_TYPE = "Playoff") %>%
+        mutate_at(c("win", "loss"),
+                  ~ replace_na(.,0)) %>%
+        mutate(perc = (win) / params$nsims) %>%
+        group_by(TEAM) %>%
+        mutate(max_perc = max(perc)) %>%
+        ungroup() %>%
+        filter(max_perc >=0.01) %>%
+      mutate(TEAM_LABEL = case_when(SIM_FROM_WEEK == max(SIM_FROM_WEEK) & perc >=0.05 ~ 
+                                            paste(TEAM, "-", paste(round(perc*100,0),"%", sep=""))))
+
+
+p = dat %>%
+        ggplot(., aes(x=SIM_FROM_WEEK,
+                      label = TEAM_LABEL,
+                      color = TEAM,
+                      y=perc))+
+                geom_point(size=2)+
+        geom_line(stat = 'smooth',
+                  method = span_func(max_week)$method,
+                  se = F,
+                  formula = 'y ~ x',
+                  lwd = 1,
+                 span = span_func(max_week)$span,
+                  alpha = 0.85)+
+        geom_text_repel(
+                fontface = "bold",
+                size = 3,
+                direction = "y",
+                hjust = -1.2,
+                segment.size = .7,
+                segment.alpha = .5,
+                segment.linetype = "dotted",
+                box.padding = .4,
+                segment.curvature = -0.1,
+                segment.ncp = 3,
+                segment.angle = 20)+
+        custom_color_teams+
+        guides(color = "none")+
+        coord_cartesian(xlim = c(-3, 18),
+                        ylim = c(0,1))+
+        theme_phil()+
+        xlab("Season Week")+
+        ggtitle(paste(params$input_season, "National Championship Probabilities as of Week", max_week),
+                subtitle = str_wrap(paste("Displaying the percentage of times each team won the national championship in simulations of the remaining season. Simulations run at the beginning of the season and after every week of regular season games."), 120))+
+        theme(plot.title = element_text(hjust = 0.5, size = 16),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12))+
+        ylab("Pr(Win National Championship)")+my_caption
+
+if(max_week > 4) {
+        p + 
+                geom_text_repel(
+                        data = dat %>%
+                                filter(SIM_FROM_WEEK == 0) %>%
+                                mutate(TEAM_LABEL = case_when(perc > 0.05 ~ TEAM)),
+                        fontface = "bold",
+                        size = 3,
+                        direction = "y",
+                        hjust = 1.4,
+                        #   hjust = 0.1,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20) } else {p}
+
+
+rm(p,
+   dat)
+
+```
+
+# Conference Championship Probabilities
+
+```{r create function to plot conference champ probs}
+
+plot_conference_championship_prob = function(sim_conference_championship_games,
+                                             conference) {
+        
+        # set 
+    my_caption = list(labs(caption = paste("data from collegefootballdata.com",
+                                       "analysis and model by Phil Henrickson",
+                                       "github.com/phenrickson/cfb",
+                                       sep = "\n")))
+
+
+        # set plot max
+        max_week = max(sim_conference_championship_games$SIM_FROM_WEEK)
+        
+        # season
+        season = max(sim_conference_championship_games$SEASON)
+        
+        # create data
+        dat = conference_divisions %>%  
+                filter(CONFERENCE == conference) %>%
+                mutate(CONFERENCE_DIVISION = replace_na(CONFERENCE_DIVISION, "No Divisions")) %>%
+                filter(CONFERENCE != 'FBS Independents') %>%
+                nest(-SEASON) %>%
+                bind_cols(., tibble(SIM_FROM_WEEK = seq(0, max_week))) %>%
+                unnest()  %>%
+                left_join(.,
+                          sim_conference_championship_games %>%
+                                  mutate(CONFERENCE_DIVISION = replace_na(CONFERENCE_DIVISION, "No Divisions")) %>%
+                                  group_by(SEASON,
+                                           SIM_FROM_WEEK,
+                                           CONFERENCE,
+                                           CONFERENCE_DIVISION,
+                                           TEAM,
+                                           SIM_OUTCOME) %>%
+                                  count() %>%
+                                  spread(SIM_OUTCOME, n) %>%
+                                  mutate_at(c("win", "loss"),
+                                            ~ replace_na(., 0)),
+                          by = c("SEASON", "TEAM", "SIM_FROM_WEEK", "CONFERENCE", "CONFERENCE_DIVISION")) %>%
+                mutate_at(c("win"),
+                          ~ replace_na(.,0)) %>%
+                mutate(perc = win / params$nsims) %>%
+                mutate(TEAM_LABEL = case_when(SIM_FROM_WEEK == max(SIM_FROM_WEEK) & perc >=0.01 ~ 
+                                            paste(TEAM, "-", paste(round(perc*100,0),"%", sep=""))))
+        
+        
+        p = dat %>%
+                ggplot(., aes(x=SIM_FROM_WEEK,
+                              label = TEAM_LABEL,
+                              color = TEAM,
+                              y=perc))+
+                        geom_point(size=2)+
+                geom_line(stat = 'smooth',
+                          method = span_func(max_week)$method,
+                          se = F,
+                          formula = 'y ~ x',
+                          lwd = 1,
+                          span = span_func(max_week)$span,
+                          alpha = 0.85)+
+                #  span = 0.25)+
+                geom_text_repel(
+                        fontface = "bold",
+                        size = 3,
+                        direction = "y",
+                        hjust = -1.2,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20)+
+                custom_color_teams+
+                facet_wrap(CONFERENCE + CONFERENCE_DIVISION ~.)+
+                guides(color = "none")+
+                coord_cartesian(xlim = c(-3, 18),
+                        ylim = c(0,1))+
+                theme_phil()+
+                xlab("Season Week")+
+                ggtitle(paste(season, conference, "Conference Championship Probabilities as of Week", max_week),
+                        subtitle = str_wrap(paste("Displaying the percentage of times each team won their conference in simulations of the remaining season and conference championship games."), 90))+
+                theme(plot.title = element_text(hjust = 0.5, size = 16),
+                      plot.subtitle =  element_text(hjust = 0.5),
+                      strip.text.x = element_text(size = 12))+
+                ylab("Pr(Conference Champions)")+
+                my_caption
+        
+        
+ if(max_week > 4) {
+        p + 
+                geom_text_repel(
+                        data = dat %>%
+                                filter(SIM_FROM_WEEK == 0) %>%
+                                mutate(TEAM_LABEL = case_when(perc > 0.05 ~ TEAM)),
+                        fontface = "bold",
+                        size = 3,
+                        direction = "y",
+                        hjust = 1.4,
+                        #   hjust = 0.1,
+                        segment.size = .7,
+                        segment.alpha = .5,
+                        segment.linetype = "dotted",
+                        box.padding = .4,
+                        segment.curvature = -0.1,
+                        segment.ncp = 3,
+                        segment.angle = 20) } else {p}
+        
+}
+
+```
+
+## SEC
+
+```{r plot sec champ probs, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'SEC')
+
+```
+
+## Big Ten
+
+```{r plot big ten chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'Big Ten')
+
+```
+
+## Big 12
+
+```{r plot big twelve chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'Big 12')
+
+```
+
+## Pac-12
+
+```{r plot pac 12 chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'Pac-12')
+
+```
+
+## ACC
+
+```{r plot acc chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'ACC')
+
+```
+
+## Mountain West
+
+```{r plot mountain west chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'Mountain West')
+
+```
+
+## Mid-American
+
+```{r plot mac hances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'Mid-American')
+
+```
+
+## American Athletic
+
+```{r plot aac hances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'American Athletic')
+
+```
+
+## Sun Belt
+
+```{r plot sun belt chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+'Sun Belt')
+
+```
+
+## Conference USA
+
+```{r plot c usa chances, fig.height=6}
+
+plot_conference_championship_prob(sim_conference_championship_games,
+                                  'Conference USA' )
+
+```

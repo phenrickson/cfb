@@ -1,0 +1,361 @@
+---
+title: "`r params$input_season` CFB Team Profiles"
+date: "`r Sys.Date()`"
+output: 
+        html_document:
+        toc: TRUE #adds a Table of Contents
+theme: cerulean
+number_sections: TRUE #number your headings/sections
+toc_float: TRUE #let your ToC follow you as you scroll
+keep_md: no
+fig.caption: yes
+params:
+        input_season: 2022
+        input_team: "Texas A&M"
+        sim_week: 0
+---
+        
+```{r setup, include=F}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+options(knitr.duplicate.label = "allow")
+options(scipen=999)
+
+```
+
+```{r packages, include=F}
+
+source(here::here("scripts/load_packages.R"))
+library(jsonlite)
+library(forcats)
+library(TTR)
+library(flextable)
+conflict_prefer("lag", "dplyr")
+
+# parallelization
+library(future.apply)
+library(furrr)
+plan(multisession, workers = 7)
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=10,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+```
+
+```{r connect to snowflake}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+### connect to DBS
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+
+```{r data sources}
+
+### get data sources
+# teams raw
+teams_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.TEAMS')) %>%
+        as_tibble() %>%
+        rename(TEAM = SCHOOL,
+               TEAM_ID = ID,
+               TEAM_MASCOT = MASCOT,
+               TEAM_ABBREVIATION = ABBREVIATION)
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        mutate(CONFERENCE_GAME = case_when(CONFERENCE_GAME == 'true' ~ T,
+                                           CONFERENCE_GAME == 'false' ~ F)) %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        mutate(START_DATE = as_datetime(START_DATE)) %>%
+        arrange(START_DATE) %>%
+        # logic for flagging conference championship games
+        group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
+        mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
+        ungroup() %>%
+        mutate(CONFERENCE_CHAMPIONSHIP = case_when(CONFERENCE_GAME == T & 
+                                                           (HOME_CONFERENCE != 'FBS Independents') & 
+                                                           (HOME_CONFERENCE != 'FCS Independents') &
+                                                           !(HOME_CONFERENCE %in% 'Big Ten' & SEASON < 2014) &
+                                                           !(HOME_CONFERENCE %in% 'Western Athletic') &
+                                                           (NEUTRAL_SITE == T | 
+                                                                    is.na(VENUE) |
+                                                                    VENUE == 'Glass Bowl' |
+                                                                    VENUE == 'Bright House Networks Stadium' |
+                                                                    VENUE == 'Alamodome' |
+                                                                    VENUE == 'Georgia Dome' |
+                                                                    HOME_CONFERENCE == 'Sun Belt' |
+                                                                    HOME_CONFERENCE == 'American Athletic') &
+                                                           SEASON > 2000 &
+                                                           SEASON_TYPE == 'regular' &
+                                                           WEEK > 13 &
+                                                           LAST_GAME == T ~ T,
+                                                   TRUE ~ F)) %>%
+        mutate(HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'yes',
+                                           HOME_POINTS < AWAY_POINTS ~ 'no',
+                                           HOME_POINTS == AWAY_POINTS ~ 'no'),
+                                 levels = c("no", "yes"))) %>%
+        mutate(HOME_DIVISION  = replace_na(HOME_DIVISION, "missing"),
+               AWAY_DIVISION = replace_na(AWAY_DIVISION, "missing")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("HOME_TEAM")) %>%
+        left_join(., teams_raw %>%
+                          select(TEAM, TEAM_ABBREVIATION) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_TEAM_ABBR = TEAM_ABBREVIATION),
+                  by = c("AWAY_TEAM"))
+
+# get team conference mapping
+team_conference_season = DBI::dbGetQuery(myconn,
+                                         paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_TEAM_CONFERENCE_SEASON')) %>%
+        as_tibble()
+
+# team mapping function
+team_mapping = teams_raw %>%
+        mutate(TEAM_ABBR = gsub(" ", "\\.", gsub("[[:punct:]]", "\\.", TEAM))) %>%
+        select(TEAM, TEAM_ABBR, TEAM_ABBREVIATION, COLOR, ALT_COLOR) %>%
+        mutate(COLOR = case_when(TEAM == 'Toledo' ~ '#003E7E',
+                                 TRUE ~ COLOR))
+
+### get historical elo
+# games
+elo_games = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ACTIVE_ELO_GAMES')) %>%
+        as_tibble()
+
+# teams
+elo_teams = DBI::dbGetQuery(myconn,
+                            paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.ACTIVE_ELO_TEAMS')) %>%
+        as_tibble() %>%
+        select(-LOAD_DATE)
+
+### recruiting 
+recruiting_teams_raw = DBI::dbGetQuery(myconn,
+                                       paste('SELECT * FROM CFB_DEMO.CFD_RAW.RECRUITING_TEAMS ')) %>%
+        as_tibble() %>%
+        mutate(POINTS = as.numeric(POINTS)) %>%
+        rename(RECRUITING_POINTS = POINTS)
+
+# expand
+recruiting_teams = expand.grid(TEAM = unique(recruiting_teams_raw$TEAM),
+                               YEAR = seq(min(recruiting_teams_raw$YEAR),
+                                          max(recruiting_teams_raw$YEAR))) %>%
+        left_join(., recruiting_teams_raw,
+                  by = c("YEAR", "TEAM")) %>%
+        mutate(RECRUITING_POINTS = replace_na(RECRUITING_POINTS, 0)) %>%
+        filter(YEAR > 2001) %>%
+        left_join(., team_conference_season,
+                  by = c("YEAR"="SEASON", "TEAM")) %>%
+        filter(DIVISION == 'fbs') %>%
+        group_by(TEAM) %>%
+        mutate(n = n()) %>%
+        filter(n > 4) %>%
+        group_by(TEAM) %>%
+        select(-n) %>%
+        mutate(EMA = EMA(RECRUITING_POINTS, n =4)) %>%
+        # now fill with actual in the event that a team doesn't have yet have enough data
+        mutate(EMA = case_when(is.na(EMA) & !is.na(RECRUITING_POINTS) ~ RECRUITING_POINTS,
+                               TRUE ~ EMA)) %>%
+        # mutate_at(c("EMA", "WMA"),
+        #           replace_na, 0) %>%
+        arrange(TEAM, YEAR)  %>%
+        mutate(SEASON = YEAR) %>%
+        ungroup() %>%
+        select(TEAM, SEASON, CONFERENCE, DIVISION, RANK, RECRUITING_POINTS, EMA)
+
+# get what we need
+recruiting = recruiting_teams %>%
+        select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
+        rename(RECRUITING_SCORE = EMA)
+
+
+### efficiency
+# season level efficiency rankings
+season_team_rankings = DBI::dbGetQuery(myconn,
+                                       paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.EFFICIENCY_TEAM_SEASON')) %>%
+        as_tibble()
+
+### combine datasets to get games
+games = games_raw %>%
+        filter(SEASON_TYPE == 'regular') %>%
+        filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ HOME_DIVISION)) %>%
+        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
+                                         TRUE ~ AWAY_DIVISION)) %>%
+        mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
+        filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
+        arrange(GAME_DATE) %>%
+        select(GAME_ID, 
+               SEASON, 
+               WEEK,
+               SEASON_TYPE,
+               START_DATE,
+               GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME_TEAM,
+               AWAY_TEAM,
+               CONFERENCE_GAME,
+               CONFERENCE_CHAMPIONSHIP,
+               HOME_CONFERENCE,
+               AWAY_CONFERENCE,
+               HOME_DIVISION,
+               AWAY_DIVISION,
+               HOME_POINTS,
+               AWAY_POINTS) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(HOME_TEAM = TEAM,
+                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "HOME_TEAM")) %>%
+        left_join(.,
+                  recruiting %>%
+                          select(SEASON,
+                                 TEAM,
+                                 RECRUITING_SCORE) %>%
+                          rename(AWAY_TEAM = TEAM,
+                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
+                  by = c("SEASON",
+                         "AWAY_TEAM"))
+
+
+# data sources
+load(file=here::here("data", "season_team_rankings_type.Rdata"))
+
+```
+
+```{r load games}
+
+# get files from season folder
+files = list.files(here::here("simulations",
+                              "midseason",
+                              params$input_season))
+
+# get objects from each week
+files_weeks =  files[grepl("sims_week", files)]
+
+# load in simulations
+week_list = foreach(i = 1:length(files_weeks)) %do% {
+        
+        load(here::here("simulations",
+                        "midseason",
+                        params$input_season,
+                        files_weeks[i]))
+        
+        foo = all_simulations
+        
+        rm(all_simulations)
+        
+        foo
+        
+}
+
+rm(foo)
+
+# pull predictions table
+team_predictions = do.call(rbind, lapply(week_list, function (x) x$team_predictions)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# pull game predictions
+game_predictions = do.call(rbind, lapply(week_list, function (x) x$game_predictions)) %>%
+        filter(SIM_FROM_WEEK <= params$sim_week)
+
+# load game predictions
+game_predictions = do.call(rbind, 
+                           lapply(week_list, function (x) x$game_predictions))
+
+```
+
+
+```{r make team}
+
+game_outcomes= games %>%
+        filter(SEASON == params$input_season) %>%
+        left_join(., game_predictions,
+                  by = c("GAME_ID")) %>%
+        mutate(HOME_SIM_OUTCOME = case_when(HOME_POINTS > AWAY_POINTS ~ 'win',
+                                            HOME_POINTS < AWAY_POINTS ~ 'loss'),
+               AWAY_SIM_OUTCOME = case_when(HOME_POINTS > AWAY_POINTS ~ 'loss',
+                                            HOME_POINTS < AWAY_POINTS ~ 'win'),
+               AWAY_SIM_MARGIN = -HOME_SIM_MARGIN) %>%
+        filter(WEEK == SIM_FROM_WEEK + 1) %>%
+        mutate(HOME_MARGIN = HOME_POINTS - AWAY_POINTS,
+               HOME_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'win',
+                                           HOME_POINTS < AWAY_POINTS ~ 'loss'),
+                                 levels = c('loss', 'win')),
+               AWAY_WIN = factor(case_when(HOME_POINTS > AWAY_POINTS ~ 'loss',
+                                           HOME_POINTS < AWAY_POINTS ~ 'win'),
+                                 levels = c('loss', 'win')))
+
+game_outcomes %>%
+        select(GAME_ID, 
+                       SEASON,
+                       SEASON_TYPE,
+                       WEEK,
+                       GAME_DATE,
+                       HOME_TEAM,
+                       HOME_CONFERENCE,
+                       HOME_DIVISION,
+                       HOME_SIM_MARGIN,
+                       HOME_SIM_OUTCOME,
+                       HOME_PREGAME_ELO,
+                       HOME_POSTGAME_ELO,
+                       AWAY_TEAM,
+                       AWAY_POINTS) %>%
+                rename(OPPONENT = AWAY_TEAM,
+                       OPPONENT_POINTS = AWAY_POINTS) %>%
+                set_names(., gsub("HOME_", "", names(.))) %>%
+                bind_rows(.,
+                          game_outcomes %>% 
+                                  select(GAME_ID, 
+                                         SEASON,
+                                         SEASON_TYPE,
+                                         WEEK,
+                                         GAME_DATE,
+                                         AWAY_TEAM,
+                                         AWAY_CONFERENCE,
+                                         AWAY_DIVISION,
+                                         AWAY_SIM_MARGIN,
+                                         AWAY_SIM_OUTCOME,
+                                         AWAY_PREGAME_ELO,
+                                         AWAY_POSTGAME_ELO,
+                                         HOME_TEAM,
+                                         HOME_POINTS) %>%
+                                  rename(OPPONENT = HOME_TEAM,
+                                         OPPONENT_POINTS = HOME_POINTS) %>%
+                                  set_names(., gsub("AWAY_", "", names(.)))) %>%
+                arrange(GAME_DATE)
+        
+
+```
+
