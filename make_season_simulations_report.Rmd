@@ -1,6 +1,6 @@
 ---
 title: "Simulating the `r params$input_season` CFB Season"
-date: "`r Sys.Date()`"
+#date: "`r Sys.Date()`"
 output: 
   html_document:
     toc: TRUE #adds a Table of Contents
@@ -10,8 +10,8 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        input_season: 2018
-        sim_week: 11
+        input_season: 2022
+        sim_week: 0
         nsims: 1000
 ---
 
@@ -482,7 +482,6 @@ rm(base_teams_elo,
 
 ```
 
-
 # What is this? {.unnumbered}
 
 Which teams are most likely to win their conference in `r params$input_season`? Make the playoff? Win the national championship?
@@ -493,9 +492,11 @@ All data is from collegefootballdata.com. Any errors in the model are my own.
 
 # Predicting the `r params$input_season` Season
 
-The following table shows each team's rating, predicted record (for the regular season), and probabilities of making a bowl, winning a conference championship, making the playoff and/or winning the national championship.
+The following table shows each team's rating, predicted record (for the regular season), and probabilities of making a bowl, winning a conference championship, making the playoff and/or winning the national championship. 
 
-These results are based on simulating the `r params$input_season` season **`r params$nsims`** times and finding the number of simulations in which a team achieved each outcome. These simulations are run after every week of the regular season - in the table below, click on the filter below 'Week' in the table below to examine the model's predictions after each week of the season.
+To go to a mmore detailed report for an individual team, click on the Team's name.
+
+These results are based on simulating the `r params$input_season` season **`r params$nsims`** times and finding the number of simulations in which a team achieved each outcome. These simulations are run after every week of the regular season - in the table below, use the filter below 'Week' in the table below to examine the model's predictions after each week of the season.
 
 ```{r load predictions}
 
@@ -565,7 +566,7 @@ probs_df = data.frame(breaks = seq(0, 1, 0.01))
 
 # color formats for ratings
 elo_df = data.frame(outcome = 'Rating',
-                    breaks = quantile(c(2100, 2200, do.call(rbind, adjusted_teams) %>%
+                    breaks = quantile(c(2100, do.call(rbind, adjusted_teams) %>%
                                               as.data.frame() %>%
                                               rownames_to_column("TEAM") %>% 
                                               rename(RATING = V1) %>%
@@ -579,8 +580,8 @@ blueRedColorRamp = colorRampPalette(c("red", "white", "deepskyblue1"))
 
 # get table ready
 team_predictions %>%
-        mutate(TEAM = factor(TEAM),
-               CONFERENCE = factor(CONFERENCE),
+        mutate(TEAM = paste('<a href="https://phenrickson.github.io/cfb/team_profiles/season/', params$input_season, "/", TEAM, '.html','">', TEAM, '</a>', sep="")) %>%
+        mutate(CONFERENCE = factor(CONFERENCE),
                RATING = round(RATING, 0)) %>%
         mutate(pred_win = format(round(mean_wins, 1), nsmall =1),
                pred_loss = format(round(mean_loss, 1), nsmall = 1)) %>%
