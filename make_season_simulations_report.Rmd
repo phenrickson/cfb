@@ -494,7 +494,7 @@ All data is from collegefootballdata.com. Any errors in the model are my own.
 
 The following table shows each team's rating, predicted record (for the regular season), and probabilities of making a bowl, winning a conference championship, making the playoff and/or winning the national championship. 
 
-To go to a mmore detailed report for an individual team, click on the Team's name.
+<!-- To go to a more detailed report for an individual team, click on the Team's name. To see a  -->
 
 These results are based on simulating the `r params$input_season` season **`r params$nsims`** times and finding the number of simulations in which a team achieved each outcome. These simulations are run after every week of the regular season - in the table below, use the filter below 'Week' in the table below to examine the model's predictions after each week of the season.
 
@@ -580,7 +580,8 @@ blueRedColorRamp = colorRampPalette(c("red", "white", "deepskyblue1"))
 
 # get table ready
 team_predictions %>%
-        mutate(TEAM = paste('<a href="https://phenrickson.github.io/cfb/team_profiles/season/', params$input_season, "/", TEAM, '.html','">', TEAM, '</a>', sep="")) %>%
+        mutate(TEAM = case_when(params$input_season == 2022 ~ paste('<a href="https://phenrickson.github.io/cfb/team_profiles/preseason/', params$input_season, "/", TEAM, '.html','">', TEAM, '</a>', sep=""),
+                                TRUE ~ TEAM)) %>%
         mutate(CONFERENCE = factor(CONFERENCE),
                RATING = round(RATING, 0)) %>%
         mutate(pred_win = format(round(mean_wins, 1), nsmall =1),

@@ -565,6 +565,9 @@ team_preds = team_predictions %>%
                     "made_nc",
                     "win_nc"),
                   ~ format(., nsmall = 3)) %>%
+        mutate(CONFERENCE = case_when(CONFERENCE == 'American Athletic' ~ 'AAC',
+                                      CONFERENCE == 'FBS Independents' ~ 'Independent',
+                                      TRUE ~ CONFERENCE)) %>%
         select(SIM_FROM_WEEK,
                TEAM,
                SEASON,
@@ -669,7 +672,7 @@ team_preds = team_predictions %>%
 
 ```
 
-```{r make score card scorecard, fig.height=3.5, fig.width=8}
+```{r make score card scorecard, fig.height=3.5, fig.width=8.5}
 
 # make text
 team_text = c(teams_raw %>%
@@ -799,7 +802,7 @@ p+
 
 ## Rating vs Preseason Expectations
 
-How is `r params$team` performing compared to preseason expectations? The visualization below shows the team's rating so far compared to simulated ratings for the team from the start of the season. The simulated paths from the beginning of the season are shown in **grey** while the team's actual rating so far is shown in the team's color. Teams that are outperforming preseason expectations will be above the the majority of the simulated paths; teams that are under performing will be below.
+How is `r params$team` performing compared to preseason expectations? The visualization below shows the team's rating so far compared to simulated ratings for the team from the start of the season. The simulated paths from the beginning of the season are shown in **grey** while the team's actual rating so far is shown in the team's color. Teams that are outperforming preseason expectations will be above the majority of the simulated paths; teams that are under performing will be below.
 
 ```{r plot from start}
 
@@ -1027,7 +1030,9 @@ min_date = as.Date(paste("1900-01-01"))
 min_year = year(min_date)
 #min_year = 1900
 
-smooth = T
+if(params$team == 'Florida State' |
+   params$team == 'Connecticut') {smooth = F}else 
+           {smooth =T}
 
 all_teams_data = elo_teams %>%
         filter(SEASON < params$input_season) %>%
