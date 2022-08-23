@@ -5,7 +5,7 @@ output:
   html_document:
     toc: TRUE #adds a Table of Contents
     theme: cerulean
-    number_sections: TRUE #number your headings/sections
+    number_sections: F #number your headings/sections
     toc_float: TRUE #let your ToC follow you as you scroll
     keep_md: no
     fig.caption: yes
@@ -494,9 +494,12 @@ All data is from collegefootballdata.com. Any errors in the model are my own.
 
 The following table shows each team's rating, predicted record (for the regular season), and probabilities of making a bowl, winning a conference championship, making the playoff and/or winning the national championship. 
 
-<!-- To go to a more detailed report for an individual team, click on the Team's name. To see a  -->
-
 These results are based on simulating the `r params$input_season` season **`r params$nsims`** times and finding the number of simulations in which a team achieved each outcome. These simulations are run after every week of the regular season - in the table below, use the filter below 'Week' in the table below to examine the model's predictions after each week of the season.
+
+To go to a more detailed report for an individual team, click on the Team's name in the table.
+
+To see predictions for individual games, [click here to go to a page with predictions for all upcoming matchups.](https://phenrickson.github.io/cfb/simulations/season/2022/matchups.html)
+
 
 ```{r load predictions}
 

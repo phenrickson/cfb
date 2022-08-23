@@ -1,6 +1,5 @@
 ---
 title: "Predicting `r params$input_season` CFB Games"
-date: "`r Sys.Date()`"
 output: 
   html_document:
     toc: TRUE #adds a Table of Contents
@@ -356,7 +355,9 @@ This page displays predictions for games in the `r params$input_season` CFB seas
 
 # Week `r params$sim_week+1` Predictions 
 
-This table displays the results of simulating week `r params$sim_week+1` of the `r params$input_season` CFB season `r `params$nsims` times. These simulations are run one week in advance, using information available in the lead up to `r params$sim_week+1` - for the first week of the season, team ratings are based solely on information from previous seasons. Quality is the (harmonic) mean of the two team's overall rating, with 100 indicating a game between highly rated opponents. Pr(HomeWin) is the percentage of times that the home team won the game across every simulation.
+This table displays the results of simulating week `r params$sim_week+1` of the `r params$input_season` CFB season `r params$nsims` times. These simulations are run one week in advance, using information available in the lead up to week `r params$sim_week+1`.  For the first week of the season, team ratings are based solely on information from previous seasons.
+
+**Quality** is the (harmonic) mean of the two team's overall rating, with 100 indicating a game between highly rated opponents. **Pr(HomeWin)** is the percentage of times that the home team won the game across every simulation.
 
 ```{r get predictions for upcoming week}
 
