@@ -68,13 +68,13 @@ run_weekly_matchups = function(input_season,
 }
 
 # set week
-weeks = 9
-year = 2021
+weeks = 1
+year = 2022
 
 # set teams
 teams = season_conference_divisions %>%
         filter(SEASON == year) %>%
-        filter(CONFERENCE == 'ACC') %>%
+       # filter(CONFERENCE == 'ACC') %>%
      #   filter(TEAM %in% c("Virginia", "Virginia Tech", "Wake Forest")) %>%
         #filter(TEAM == 'Duke') %>%
         # filter(CONFERENCE %in% c("American Athletic",
@@ -97,24 +97,6 @@ run_weekly_matchups(input_season = year,
                   input_week = weeks)
 
 # make team profiles
-run_team_profiles(input_team = 'Pittsburgh',
-                  input_season = 2021,
-                    input_week = 10)
-
-run_team_profiles(input_team = 'LSU',
-                  input_season = 2019,
-                  input_week = 12)
-
-run_team_profiles(input_team = 'Texas',
-                  input_season = 2021,
-                  input_week = 10)
-
-run_team_profiles(input_team = 'Arkansas',
-                  input_season = 2021,
-                  input_week = 10)
-
-run_team_profiles(input_team = 'Texas A&M',
-                  input_season = 2021,
-                  input_week = 11)
-
-
+run_team_profiles(input_team = teams,
+                  input_season = year,
+                  input_week = weeks)

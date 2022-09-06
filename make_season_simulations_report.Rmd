@@ -11,7 +11,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 0
+        sim_week: 1
         nsims: 1000
 ---
 
@@ -31,6 +31,7 @@ options(scipen=999)
 ```{r packages, include=F}
 
 source(here::here("scripts/load_packages.R"))
+library(cfbplotR)
 library(jsonlite)
 library(forcats)
 library(TTR)
@@ -234,6 +235,9 @@ games = games_raw %>%
         mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
         filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
         arrange(GAME_DATE) %>%
+        group_by(GAME_ID) %>%
+        slice_tail(n=1) %>%
+        ungroup() %>%
         select(GAME_ID, 
                SEASON, 
                WEEK,
@@ -274,6 +278,35 @@ games = games_raw %>%
 load(file=here::here("data", "season_team_rankings_type.Rdata"))
 
 ```
+
+```{r deal with problem ids issue}
+
+# games that for some damn reason the API swapped the home and away team
+problem_ids = games_raw %>%
+        filter(SEASON == params$input_season) %>% 
+        group_by(GAME_ID) %>%
+        summarize(home_teams = n_distinct(HOME_TEAM)) %>% 
+        arrange(desc(home_teams)) %>%
+        filter(home_teams > 1) %>%
+        pull(GAME_ID)
+
+# fix issue
+games = games %>%
+        filter(SEASON == params$input_season) %>%
+        filter(!(GAME_ID %in% problem_ids)) %>%
+        bind_rows(.,
+                  games %>%
+                          filter(GAME_ID %in% problem_ids) %>%
+                          select(-starts_with("AWAY_")) %>%
+                          set_names(., gsub("HOME_", "AWAY_", names(.))) %>%
+                          bind_cols(.,
+                                    games %>%
+                                            filter(GAME_ID %in% problem_ids) %>%
+                                            select(starts_with("AWAY")) %>%
+                                            set_names(., gsub("AWAY_", "HOME_", names(.)))))
+
+```
+
 
 ```{r functions for turning elo to list}
 
@@ -583,6 +616,9 @@ blueRedColorRamp = colorRampPalette(c("red", "white", "deepskyblue1"))
 
 # get table ready
 team_predictions %>%
+        group_by(TEAM, SIM_FROM_WEEK) %>%
+        slice_tail(n=1) %>%
+        ungroup() %>%
         mutate(TEAM = case_when(params$input_season == 2022 ~ paste('<a href="https://phenrickson.github.io/cfb/team_profiles/preseason/', params$input_season, "/", TEAM, '.html','">', TEAM, '</a>', sep=""),
                                 TRUE ~ TEAM)) %>%
         mutate(CONFERENCE = factor(CONFERENCE),
@@ -662,9 +698,71 @@ team_predictions %>%
 
 ```
 
+<!-- # Rankings -->
+
+<!-- This table shows the 25 teams with the highest rankings after each week of the season. -->
+
+<!-- ```{r make rankings, fig.height=8, fig.width=8} -->
+
+<!-- # caption with logos -->
+<!-- my_caption = list(labs(caption = paste("data from collegefootballdata.com", -->
+<!--                                        "logos from cfbplotR", -->
+<!--                                        "analysis and model by Phil Henrickson", -->
+<!--                                        "github.com/phenrickson/cfb", -->
+<!--                                        sep = "\n"))) -->
+
+<!-- team_info <- cfbfastR::cfbd_team_info() -->
+<!-- team_info <- team_info %>%  -->
+<!--   select(team = school,conference,mascot)  -->
+
+<!-- plot_dat = expand.grid(SEASON = params$input_season, -->
+<!--                        SIM_FROM_WEEK = seq(0, 15), -->
+<!--                        TEAM = unique(team_predictions$TEAM)) %>% -->
+<!--         left_join(.,  -->
+<!--                   team_predictions %>% -->
+<!--                           group_by(TEAM, SIM_FROM_WEEK) %>% -->
+<!--                           slice_tail(n=1) %>% -->
+<!--                           ungroup() %>% -->
+<!--                             left_join(team_info %>% -->
+<!--                                               mutate(TEAM = team) -->
+<!--                                       ,by = "TEAM") %>% -->
+<!--                           # left_join(., team_mapping %>% -->
+<!--                           #                   select(TEAM, TEAM_ABBREVIATION, COLOR), -->
+<!--                           #           by = c("TEAM")) %>% -->
+<!--                           group_by(SIM_FROM_WEEK) %>% -->
+<!--                           arrange(desc(RATING)) %>% -->
+<!--                           mutate(RANK = row_number()) %>% -->
+<!--                           slice_min(n = 25, order_by = RANK, with_ties = F), -->
+<!--                   by = c("SIM_FROM_WEEK", "TEAM", "SEASON")) -->
+
+
+<!-- plot_dat %>% -->
+<!--         ggplot(., aes(x = SIM_FROM_WEEK, -->
+<!--                       y=RANK)) + -->
+<!--            geom_cfb_logos(aes(team = TEAM), -->
+<!--                           width = 0.025)+ -->
+<!--            scale_color_identity() + -->
+<!--         scale_alpha_identity() + -->
+<!--         theme_phil()+ -->
+<!--         theme(panel.grid.minor = element_blank(), -->
+<!--               panel.grid.major = element_blank())+ -->
+<!--         scale_y_reverse(breaks = 25:1, -->
+<!--                         limits = c(25, 1))+ -->
+<!--         scale_x_continuous(breaks = 0:15)+ -->
+<!--         xlab("Season Week")+ -->
+<!--         ggtitle(paste(params$input_season, "Top 25 Teams as of Week", params$sim_week))+ -->
+<!--         theme(plot.title = element_text(hjust = 0.5, size = 16), -->
+<!--               plot.subtitle =  element_text(hjust = 0.5), -->
+<!--               strip.text.x = element_text(size = 12))+ -->
+<!--         ylab("Rank")+ -->
+<!--         my_caption -->
+
+<!-- ``` -->
+
+
 # Playoff Probabilities
 
-How has each team's chances of making the playoff changed throughout the year? The following visualizations displays the probability of making the playoff for teams that have at any point achieved a probability of at least 1% of making the playoff.
+How has each team's chances of making the playoff changed throughout the year? The following visualizations displays the probability of making the playoff for teams that have at any point achieved a probability of at least 1% of making the playoff and labeling teams that currently have above a 10% probability.
 
 ```{r display playoff probabilities}
 
@@ -753,7 +851,7 @@ if(max_week > 4) {
                 geom_text_repel(
                         data = dat %>%
                                 filter(SIM_FROM_WEEK == 0) %>%
-                                mutate(TEAM_LABEL = case_when(perc > 0.05 ~ TEAM)),
+                                mutate(TEAM_LABEL = case_when(perc > 0.1 ~ TEAM)),
                         fontface = "bold",
                         size = 3,
                         direction = "y",
@@ -774,7 +872,7 @@ rm(p,
 
 # National Championship Probabilities
 
-How has each team's chances of winning the national championship changed throughout the year? The following visualizations displays the probability of winning the national championship by week for teams that have at any point achieved a probability of at least 1% of winning the NC.
+How has each team's chances of winning the national championship changed throughout the year? The following visualizations displays the probability of winning the national championship by week for teams that have at any point achieved a probability of at least 1% of winning the NC and labeling teams that currently have above a 5% probability.
 
 ```{r display nc probabilities}
 
@@ -923,7 +1021,7 @@ plot_conference_championship_prob = function(sim_conference_championship_games,
                 mutate_at(c("win"),
                           ~ replace_na(.,0)) %>%
                 mutate(perc = win / params$nsims) %>%
-                mutate(TEAM_LABEL = case_when(SIM_FROM_WEEK == max(SIM_FROM_WEEK) & perc >=0.01 ~ 
+                mutate(TEAM_LABEL = case_when(SIM_FROM_WEEK == max(SIM_FROM_WEEK) & perc >=0.02 ~ 
                                             paste(TEAM, "-", paste(round(perc*100,0),"%", sep=""))))
         
         
@@ -945,7 +1043,7 @@ plot_conference_championship_prob = function(sim_conference_championship_games,
                         fontface = "bold",
                         size = 3,
                         direction = "y",
-                        hjust = -1.2,
+                        hjust = -1,
                         segment.size = .7,
                         segment.alpha = .5,
                         segment.linetype = "dotted",

@@ -10,9 +10,9 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        team: "LSU"
+        team: "Iowa"
         input_season: 2021
-        sim_week: 0
+        sim_week: 13
         nsims: 1000
 ---
 
@@ -713,6 +713,7 @@ plot_grid(p1, p2,
           rel_heights = c(1, 0.5))
 
 ```
+Note: a team's predicted win/loss total is the **average** number of wins they achieve across all simulations of games in the **regular season**.
 
 ## `r params$input_season` Game Predictions
 
@@ -749,6 +750,9 @@ games_schedule %>%
         arrange(GAME_DATE) %>%
         mutate(GAME_DATE = format(GAME_DATE, format="%b %d")) %>%
         mutate(GAME_DATE = factor(GAME_DATE)) %>%
+        mutate(SIM_PROB = case_when(SIM_PROB == 1 ~ .999,
+                                    SIM_PROB == 0 ~ .001,
+                                    TRUE ~ SIM_PROB)) %>%
         select(-SIM_MARGIN) %>%
         rename(Season = SEASON,
                Week = WEEK,
@@ -776,7 +780,112 @@ games_schedule %>%
 
 ```
 
-It's important to note that within each simulation the results of each game are not independent. The (simulated) results of each week are used to update each team's rating going into the next week, which will then influence how likely they are to win games in the rest of the season. This means that a shocking upset early on in a simulation can have ramifications for other teams on the remaining schedule.
+It's important to note that within each simulation the results of each game are not independent. The (simulated) results of each week are used to update each team's rating going into the next week, which will then influence how likely they are to win games in the rest of the season. This means that in some simulations a team will overperform/underperform early and end up with a very good/poor season. A team's predicted win total is the average number of wins they achieve across all simulations.
+
+## Predicted Win Totals
+
+The visualization below shows how `r params$team`'s predicted win total has changed after each week of the regular season so far.
+
+```{r remaining wins, message=F, warning=F}
+
+if(params$sim_week == 0) {
+        outcomes_so_far = tibble(TEAM = params$team,
+                                 wins = 0,
+                                 loss = 0)
+} else {
+        outcomes_so_far = games_schedule %>%
+        filter(TEAM == params$team) %>%
+        filter(WEEK <= params$sim_week) %>%
+        mutate(win = case_when(OUTCOME == 'win' ~ 1,
+                               OUTCOME == 'lose' ~ 0),
+               lose = case_when(OUTCOME == 'win' ~ 0,
+                                OUTCOME == 'lose' ~ 1)) %>%
+        group_by(SEASON, TEAM) %>%
+        summarize(wins = sum(win, na.rm=T),
+                  loss = sum(lose, na.rm=T),
+                  .groups = 'drop')
+}
+
+# plot expected wins
+a = team_predictions %>%
+        filter(TEAM == params$team) %>%
+        ggplot(., aes(x=SIM_FROM_WEEK,
+                      label = round(mean_wins, 1),
+                      y=mean_wins))+
+        geom_text(check_overlap = T,
+                  vjust = 2,
+                  size = 2.5,
+                  color = team_color)+
+        geom_point(color = team_color)+
+        geom_line(color = team_color)+
+        coord_cartesian(xlim = c(0, 15),
+                        ylim = c(0, 13))+
+        theme_phil()+
+        xlab("Week of Simulation")+
+        ylab("Predicted Win Total")+
+        ggtitle("Predicted Win Total by Week of Simulation")+
+        theme(plot.title = element_text(hjust = 0.5))+
+        facet_wrap("Mean win total" ~.)
+
+# plot
+if (nrow(sim_remaining_games %>%
+             filter(TEAM == params$team)) == 0) {
+                     b = ggdraw()
+             } else {
+         
+b = sim_remaining_games %>%
+        filter(TEAM == params$team) %>%
+        group_by(GAME_ID) %>%
+        filter(SIM_FROM_WEEK == max(SIM_FROM_WEEK)) %>%
+        mutate(win = case_when(SIM_OUTCOME == 'win' ~ 1,
+                               SIM_OUTCOME == 'loss' ~ 0),
+               lose = case_when(SIM_OUTCOME == 'win' ~ 0,
+                                SIM_OUTCOME == 'loss' ~ 1)) %>%
+        group_by(SEASON, TEAM, .id) %>%
+        summarize(wins = sum(win)+outcomes_so_far$wins,
+                  loss = sum(lose)+outcomes_so_far$loss,
+                  .groups = 'drop') %>%
+        mutate(mean_wins = mean(wins),
+               median_wins = median(wins)) %>%
+        group_by(SEASON, TEAM, wins, mean_wins, median_wins) %>%
+        count() %>%
+        mutate(TEAM_LABEL = paste(paste("Mean:", round(mean_wins, 1)),
+                                          paste("Median:", round(median_wins, 1)),
+                                          sep = "\n")) %>%
+        mutate(perc = n/params$nsims) %>%
+        ggplot(., aes(x=wins,
+                      y = perc,
+                      label = paste(wins,
+                                    format(perc,nsmall = 2),
+                                    sep = "\n")))+
+        geom_col(fill = team_color)+
+        geom_text(vjust = -0.75,
+                  color = team_color,
+                  size = 2.5)+
+        xlab("Predicted Win Total")+
+        coord_cartesian(xlim = c(0, 13),
+                        ylim = c(0,1))+
+        theme_phil()+
+        facet_wrap(TEAM_LABEL ~.)+
+        ylab("Percentage of Simulations")+
+        ggtitle("Distribution of Predicted Win Totals from Current Week")+
+        theme(plot.title = element_text(hjust = 0.5))
+
+}
+
+p = cowplot::plot_grid(a, b) +
+        ggtitle(paste("Predicted Win Total for", params$team, params$input_season, "as of Week", params$sim_week),
+                subtitle = "")+
+        theme(plot.title = element_text(hjust = 0.5, size = 16),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12))+
+        my_caption
+
+rm(a, b)
+
+suppressMessages({print(p)})
+
+```
 
 ## Simulated Rating for Rest of Season
 
@@ -796,7 +905,8 @@ p = plot_elo_team_season(sim_remaining_games %>%
 
 p+
           ggtitle(paste("Simulated Elo Ratings for" , params$team, params$input_season, "as of Week", params$sim_week),
-                        subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))
+                        subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
+        my_caption
 
 ```
 
@@ -1013,10 +1123,11 @@ p
 
 ```
 
+---
 
 # Historical Team Data
 
-Simulations for an upcoming season make use of an (adjusted) Elo rating, which is a rating assigned to each team based on wins and losses in previous games. After wins, a team's rating will go up; after losses, a team's rating will go down. The magnitude of these increases/decreases will vary depend on the scoreline and strength of the opponent.
+The simulations for an upcoming season make use of an (adjusted) Elo rating, which is a rating assigned to each team based on wins and losses in previous games. After wins, a team's rating will go up; after losses, a team's rating will go down. The magnitude of these increases/decreases will vary depend on the scoreline and strength of the opponent.
 
 ## Elo Rating
 

@@ -10,9 +10,9 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        input_season: 2021
-        sim_week: 0
-        nsims: 100
+        input_season: 2022
+        sim_week: 1
+        nsims: 1000
 ---
 
 ```{r setup, include=F}
@@ -227,6 +227,10 @@ games = games_raw %>%
         filter(SEASON_TYPE == 'regular') %>%
         filter(CONFERENCE_CHAMPIONSHIP == F) %>%
         filter(SEASON == params$input_season) %>%
+        # get most recent
+        group_by(GAME_ID) %>%
+        slice_tail(n =1) %>%
+        ungroup() %>%
         mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
                                          TRUE ~ HOME_DIVISION)) %>%
         mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
@@ -269,6 +273,30 @@ games = games_raw %>%
                                  AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
                   by = c("SEASON",
                          "AWAY_TEAM"))
+
+# games that for some damn reason the API swapped the home and away team
+problem_ids = games_raw %>%
+        filter(SEASON == params$input_season) %>% 
+        group_by(GAME_ID) %>%
+        summarize(home_teams = n_distinct(HOME_TEAM)) %>% 
+        arrange(desc(home_teams)) %>%
+        filter(home_teams > 1) %>%
+        pull(GAME_ID)
+
+# fix issue
+games = games %>%
+        filter(SEASON == params$input_season) %>%
+        filter(!(GAME_ID %in% problem_ids)) %>%
+        bind_rows(.,
+                  games %>%
+                          filter(GAME_ID %in% problem_ids) %>%
+                          select(-starts_with("AWAY_")) %>%
+                          set_names(., gsub("HOME_", "AWAY_", names(.))) %>%
+                          bind_cols(.,
+                                    games %>%
+                                            filter(GAME_ID %in% problem_ids) %>%
+                                            select(starts_with("AWAY")) %>%
+                                            set_names(., gsub("AWAY_", "HOME_", names(.)))))
 
 # data sources
 load(file=here::here("data", "season_team_rankings_type.Rdata"))
@@ -583,7 +611,7 @@ if (params$sim_week == 0) {
                 # calculate elo
                 elo_input = calc_elo_ratings(games %>%
                                                        filter(SEASON == params$input_season) %>%
-                                                       filter(WEEK <= params$sim_week),
+                                                       filter(WEEK <= params$sim_week & !is.na(HOME_POINTS)),
                                                teams = elo_input$teams,
                                                team_seasons = elo_input$teams,
                                                reversion = elo_pars$reversion,
@@ -632,7 +660,7 @@ if (params$sim_week == 0) {
 ```{r simulate from each week, include=F}
 
 # simulate rest of regular season from starting week
-set.seed(1999)
+set.seed(52)
 season_simulations = sim_rest_of_season(games,
                                            season = params$input_season,
                                            elo_initial = elo_input,
@@ -654,7 +682,7 @@ season_simulations = sim_rest_of_season(games,
 # simulates playoffs 
 # simulates national championship
 
-set.seed(1999)
+set.seed(52)
 # get simulated outcomes for remaining games
 sim_remaining_games  = 
         season_simulations %$% 
@@ -681,7 +709,7 @@ sim_remaining_games  =
 
 ### conference championships
 # get conferece championship matchups for each simulation
-set.seed(1999)
+set.seed(13)
 conference_championship_matchups = sim_remaining_games %>%
         mutate(type = 'sim') %>%
         nest(-.id, -SIM_FROM_WEEK) %>%
@@ -704,7 +732,7 @@ conference_championship_matchups = sim_remaining_games %>%
         unnest()
 
 # simulate the results of each conference championship matchup
-set.seed(1999)
+set.seed(13)
 sim_conference_championships = 
         conference_championship_matchups %>%
         pivot_wider(id_cols = c(".id", "SIM_FROM_WEEK", "SEASON", "CONFERENCE"),
@@ -774,7 +802,7 @@ sim_conference_championships =
                                             HOME_SIM_MARGIN < 0 ~ 'win'))
 
 # flip to team level for analysis
-set.seed(1999)
+set.seed(13)
 sim_conference_championship_games = sim_conference_championships %>%
         select(.id, 
                SEASON,
@@ -819,7 +847,6 @@ sim_conference_championship_games = sim_conference_championships %>%
                   by = c("SEASON", "TEAM", "CONFERENCE"))
 
 rm(conference_championship_matchups,
-   conference_championship_games,
    sim_conference_championships)
 
 playoff_matchups = sim_remaining_games %>%

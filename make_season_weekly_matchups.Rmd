@@ -9,9 +9,9 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        input_season: 2018
-        sim_week: 0
-        nsims: 0
+        input_season: 2022
+        sim_week: 1
+        nsims: 1000
 ---
 
 ```{r setup, include=F}
@@ -92,6 +92,9 @@ games_raw = DBI::dbGetQuery(myconn,
         mutate(GAME_DATE = as.Date(START_DATE)) %>%
         mutate(START_DATE = as_datetime(START_DATE)) %>%
         arrange(START_DATE) %>%
+        # # get first game
+        # group_by(GAME_ID) %>%
+        # slice_tail(n =1) %>%
         # logic for flagging conference championship games
         group_by(SEASON, SEASON_TYPE, HOME_CONFERENCE) %>%
         mutate(LAST_GAME = START_DATE == max(START_DATE)) %>% 
@@ -212,6 +215,11 @@ games = games_raw %>%
         mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
         filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
         arrange(GAME_DATE) %>%
+        arrange(START_DATE) %>%
+        # hacky fix to deal with issue
+        group_by(GAME_ID) %>%
+        slice_tail(n =1) %>%
+        ungroup() %>%
         select(GAME_ID, 
                SEASON, 
                WEEK,
@@ -303,13 +311,35 @@ sim_remaining_games = do.call(rbind, lapply(week_list, function (x) x$sim_remain
 
 ```{r get what we need for tables and assessment}
 
+# problem ids
+# games that for some damn reason the API swapped the home and away team
+problem_ids = games_raw %>%
+        filter(SEASON == params$input_season) %>% 
+        group_by(GAME_ID) %>%
+        summarize(home_teams = n_distinct(HOME_TEAM)) %>% 
+        arrange(desc(home_teams)) %>%
+        filter(home_teams > 1) %>%
+        pull(GAME_ID)
+
 games_and_outcomes = games %>%
         filter(SEASON == params$input_season) %>%
+        filter(!(GAME_ID %in% problem_ids)) %>%
+        bind_rows(.,
+                  games %>%
+                          filter(GAME_ID %in% problem_ids) %>%
+                          select(-starts_with("AWAY_")) %>%
+                          set_names(., gsub("HOME_", "AWAY_", names(.))) %>%
+                          bind_cols(.,
+                                    games %>%
+                                            filter(GAME_ID %in% problem_ids) %>%
+                                            select(starts_with("AWAY")) %>%
+                                            set_names(., gsub("AWAY_", "HOME_", names(.))))) %>%
         mutate(HOME_POINTS = case_when(WEEK > params$sim_week ~ NA_real_,
                                        TRUE~  HOME_POINTS),
                AWAY_POINTS = case_when(WEEK > params$sim_week ~ NA_real_,
                                        TRUE ~ AWAY_POINTS)) %>%
         left_join(., game_predictions %>%
+                          # address issue with the damn api flipping the home and away teams
                           group_by(GAME_ID) %>%
                           filter(SIM_FROM_WEEK == max(SIM_FROM_WEEK)),
                           by = c("GAME_ID")) %>%
@@ -451,6 +481,7 @@ assess_metrics = metric_set(yardstick::mn_log_loss,
 
 weekly_assess = 
 games_and_outcomes %>%
+        filter(!is.na(HOME_POINTS)) %>%
         group_by(SIM_FROM_WEEK, WEEK, SEASON) %>%
         mutate(games = n_distinct(GAME_ID)) %>%
         group_by(SIM_FROM_WEEK, WEEK, SEASON, games) %>%
@@ -460,6 +491,7 @@ games_and_outcomes %>%
                        event_level = 'second') %>%
         bind_rows(.,
                   games_and_outcomes %>%
+                                  filter(!is.na(HOME_POINTS)) %>%
                           group_by(SIM_FROM_WEEK, WEEK, SEASON) %>%
                           mutate(games = n_distinct(GAME_ID)) %>%
                           group_by(SIM_FROM_WEEK, WEEK, SEASON, games) %>%
@@ -469,6 +501,7 @@ games_and_outcomes %>%
 
 season_assess = 
         games_and_outcomes %>%
+        filter(!is.na(HOME_POINTS)) %>%
         group_by(SEASON) %>%
         mutate(games = n_distinct(GAME_ID)) %>%
         assess_metrics(truth = HOME_WIN,
@@ -477,6 +510,7 @@ season_assess =
                        event_level = 'second') %>%
         bind_rows(.,
                   games_and_outcomes %>%
+                          filter(!is.na(HOME_POINTS)) %>%
                           group_by(SEASON) %>%
                           yardstick::mae(truth = HOME_MARGIN,
                                          estimate = HOME_SIM_MARGIN,
