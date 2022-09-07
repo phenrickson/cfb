@@ -10,9 +10,9 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        team: "Iowa"
-        input_season: 2021
-        sim_week: 13
+        team: "Cincinnati"
+        input_season: 2022
+        sim_week: 1
         nsims: 1000
 ---
 
@@ -33,9 +33,12 @@ options(scipen=999)
 
 source(here::here("scripts/load_packages.R"))
 library(jsonlite)
+library(cfbplotR)
+library(gt)
 library(forcats)
 library(TTR)
 library(flextable)
+library(gtExtras)
 conflict_prefer("lag", "dplyr")
 
 # parallelization
@@ -232,6 +235,9 @@ games = games_raw %>%
         mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
         filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
         arrange(GAME_DATE) %>%
+        group_by(GAME_ID) %>%
+        slice_tail(n=1) %>%
+        ungroup() %>%
         select(GAME_ID, 
                SEASON, 
                WEEK,
@@ -267,6 +273,30 @@ games = games_raw %>%
                                  AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
                   by = c("SEASON",
                          "AWAY_TEAM"))
+
+# games that for some damn reason the API swapped the home and away team
+problem_ids = games_raw %>%
+        filter(SEASON == params$input_season) %>% 
+        group_by(GAME_ID) %>%
+        summarize(home_teams = n_distinct(HOME_TEAM)) %>% 
+        arrange(desc(home_teams)) %>%
+        filter(home_teams > 1) %>%
+        pull(GAME_ID)
+
+# fix issue
+games = games %>%
+        filter(SEASON == params$input_season) %>%
+        filter(!(GAME_ID %in% problem_ids)) %>%
+        bind_rows(.,
+                  games %>%
+                          filter(GAME_ID %in% problem_ids) %>%
+                          select(-starts_with("AWAY_")) %>%
+                          set_names(., gsub("HOME_", "AWAY_", names(.))) %>%
+                          bind_cols(.,
+                                    games %>%
+                                            filter(GAME_ID %in% problem_ids) %>%
+                                            select(starts_with("AWAY")) %>%
+                                            set_names(., gsub("AWAY_", "HOME_", names(.)))))
 
 
 # data sources
@@ -679,7 +709,6 @@ team_text = c(teams_raw %>%
                           filter(TEAM == params$team) %>%                 
                           mutate(name = paste(TEAM, "\n", TEAM_MASCOT)) %>%
                           pull(name))
-
 library(cowplot)
 p1 = ggdraw() + draw_image(team_logos$logo_1, 
                            scale = 0.5, 
@@ -695,7 +724,6 @@ p1 = ggdraw() + draw_image(team_logos$logo_1,
                   color = muted(team_color),
                   x = 0.4,
                   y = 0.15)
-
 p2 = ggdraw() +
         draw_label(team_preds %>%
                           mutate(together = paste(key, value, sep=" ")) %>%
@@ -705,13 +733,11 @@ p2 = ggdraw() +
                   fontface = 'bold',
                   hjust = 0.5,
                   color = muted(team_color))
-
 plot_grid(p1, p2,
           nrow=1,
           ncol = 2,
           rel_widths = c(0.8, 1.3),
           rel_heights = c(1, 0.5))
-
 ```
 Note: a team's predicted win/loss total is the **average** number of wins they achieve across all simulations of games in the **regular season**.
 
@@ -730,12 +756,18 @@ games_schedule %>%
                   games %>%
                           select(GAME_ID, HOME_TEAM, AWAY_TEAM),
                   by = c("GAME_ID")) %>%
-        left_join(., team_mapping %>%
-                          rename(OPPONENT = TEAM,
-                                 OPPONENT_ABBREVIATION = TEAM_ABBREVIATION),
+                left_join(., team_info %>%
+                          rename(TEAM = team,
+                                 mascot = mascot),
+                  by = c("TEAM")) %>%
+        left_join(., team_info %>%
+                          rename(OPPONENT = team,
+                                 OPPONENT_mascot = mascot),
                   by = c("OPPONENT")) %>%
-        mutate(OPPONENT = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT_ABBREVIATION),
-                                    OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT_ABBREVIATION))) %>%
+        mutate(HOME = case_when(OPPONENT == HOME_TEAM ~ '@',
+                                OPPONENT == AWAY_TEAM ~ 'vs')) %>%
+        # mutate(OPPONENT = case_when(OPPONENT == HOME_TEAM ~ paste("@", OPPONENT_ABBREVIATION),
+        #                             OPPONENT == AWAY_TEAM ~ paste("vs", OPPONENT_ABBREVIATION))) %>%
         mutate(PRED = case_when(SIM_OUTCOME == 'win' ~ paste("win", "by", abs(SIM_MARGIN)),
                                 SIM_OUTCOME == 'loss' ~paste("lose", "by", abs(SIM_MARGIN)))) %>%
         mutate(RESULT = case_when(OUTCOME == 'win' ~ paste("won", "by", abs(MARGIN)),
@@ -743,7 +775,8 @@ games_schedule %>%
         mutate(CORRECT = case_when(is.na(OUTCOME) ~ NA_character_,
                                    SIM_OUTCOME == OUTCOME ~ '\u2713',
                                    SIM_OUTCOME != OUTCOME ~ '\u2715')) %>%
-        select(SEASON, WEEK, GAME_DATE, TEAM, OPPONENT, SIM_PROB, SIM_MARGIN, PRED, RESULT, CORRECT) %>%
+        select(SEASON, WEEK, GAME_DATE, TEAM, HOME, OPPONENT, SIM_PROB, SIM_MARGIN, PRED, RESULT, CORRECT, 
+               OPPONENT_mascot) %>%
         #       PRED = expected_win) %>%
         mutate(SEASON = factor(SEASON)) %>%
         mutate(WEEK = factor(WEEK)) %>%
@@ -763,21 +796,40 @@ games_schedule %>%
                `Prediction` = PRED,
                `Result` = RESULT,
                `Correct?` = CORRECT) %>%
-        flextable() %>%
-        flextable::align(., j=c("Season", "Week", "Opponent", "Pr(Win)", "Prediction", "Result", "Correct?"),
-                         align = "center",
-                         part = "all") %>%
-        bg(., j=c("Pr(Win)"),
-           bg = team_col_func) %>%
-        color(part = "all",
-              color = "grey20") %>%
-        color(., j = 'Correct?',
-           i = ~ `Correct?` == '\u2713',
-           color = team_color) %>%
-                color(., j = 'Correct?',
-           i = ~ `Correct?` != '\u2713',
-           color = 'grey80')
-
+        select(-OPPONENT_mascot) %>%
+        rename(` ` = HOME) %>%
+        gt() %>%
+        data_color(
+                columns = "Pr(Win)",
+                colors = scales::col_numeric(
+                        palette = c("white", team_color),
+                        domain = range(c(0, 1)))) %>%
+        tab_header(
+                title = paste(params$input_season, "Schedule and Results for", params$team),
+                subtitle = paste("Upcoming win probabilities and predictions as of Week", params$sim_week)) %>%
+        tab_options(
+                table.font.size = 10,
+                table.width = pct(80)) %>%
+        gt_fmt_cfb_logo(columns = c("Team", "Opponent")) %>%
+        cols_align(align = c("center"),
+                   columns = everything()) %>%
+        sub_missing(columns = everything(),
+                    missing_text = "") %>%
+        tab_style(
+                style = list(
+                        cell_text(weight = "bold",
+                                  size = 14)
+                ),
+                locations = cells_body(
+                        columns = c("Correct?"))
+                ) %>%
+        data_color( # Update cell colors...
+                columns = "Correct?", # ...for supp column!
+                apply_to = c("text"),
+                colors = scales::col_factor( # <- bc it's a factor
+                        palette = c(
+                                team_color, "grey80"), # Two factor levels, two colors
+                        domain = c("\u2713","\u2715")))
 ```
 
 It's important to note that within each simulation the results of each game are not independent. The (simulated) results of each week are used to update each team's rating going into the next week, which will then influence how likely they are to win games in the rest of the season. This means that in some simulations a team will overperform/underperform early and end up with a very good/poor season. A team's predicted win total is the average number of wins they achieve across all simulations.
@@ -897,7 +949,13 @@ source(here::here("functions", "plot_elo_team_season.R"))
 
 p = plot_elo_team_season(sim_remaining_games %>%
                              filter(TEAM == params$team),
-                     games_raw,
+                     games %>%
+                             left_join(., games_raw %>%
+                                               select(HOME_TEAM,
+                                                      AWAY_TEAM,
+                                                      HOME_TEAM_ABBR,
+                                                      AWAY_TEAM_ABBR),
+                                       by = c("HOME_TEAM", "AWAY_TEAM")),
                      params$team,
                      team_color = team_color,
                      params$input_season,
@@ -918,7 +976,7 @@ How is `r params$team` performing compared to preseason expectations? The visual
 
 p = plot_elo_team_season(sim_from_start%>%
                              filter(TEAM == params$team),
-                     games_raw,
+                     games,
                      params$team,
                      team_color = 'grey70',
                      params$input_season,
@@ -1122,8 +1180,6 @@ p = dat %>%
 p
 
 ```
-
----
 
 # Historical Team Data
 
