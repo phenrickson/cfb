@@ -10,7 +10,7 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        team: "Cincinnati"
+        team: "Georgia"
         input_season: 2022
         sim_week: 1
         nsims: 1000
@@ -217,7 +217,6 @@ recruiting = recruiting_teams %>%
         select(TEAM, SEASON, CONFERENCE, RECRUITING_POINTS, EMA) %>%
         rename(RECRUITING_SCORE = EMA)
 
-
 ### efficiency
 # season level efficiency rankings
 season_team_rankings = DBI::dbGetQuery(myconn,
@@ -246,7 +245,9 @@ games = games_raw %>%
                GAME_DATE,
                NEUTRAL_SITE, 
                HOME_TEAM,
+               HOME_TEAM_ABBR,
                AWAY_TEAM,
+               AWAY_TEAM_ABBR,
                CONFERENCE_GAME,
                CONFERENCE_CHAMPIONSHIP,
                HOME_CONFERENCE,
@@ -476,6 +477,7 @@ games_and_outcomes = games %>%
         mutate(AWAY_OUTCOME = case_when(WEEK > params$sim_week ~ NA_character_,
                                         HOME_POINTS < AWAY_POINTS ~ 'win',
                                         HOME_POINTS > AWAY_POINTS ~ 'loss'))
+
 games_schedule = games_and_outcomes %>%
         select(GAME_ID,
                GAME_DATE,
@@ -490,7 +492,7 @@ games_schedule = games_and_outcomes %>%
                 AWAY,
                 HOME_PREGAME_ELO,
                 AWAY_PREGAME_ELO,
-                HOME_POSTGAME_ELO, 
+                HOME_POSTGAME_ELO,
                 AWAY_POSTGAME_ELO,
                HOME_SIM_PROB,
                HOME_MARGIN,
@@ -578,6 +580,8 @@ This notebook displays **`r params$input_season`** predictions (as of Week `r pa
 ```{r proejction for teams}
 
 team_preds = team_predictions %>%
+        group_by(TEAM, SIM_FROM_WEEK) %>%
+        slice_tail(n=1) %>%
         filter(SIM_FROM_WEEK == params$sim_week) %>%
         group_by(SEASON, SIM_FROM_WEEK) %>%
         arrange(desc(RATING)) %>%
@@ -739,6 +743,7 @@ plot_grid(p1, p2,
           rel_widths = c(0.8, 1.3),
           rel_heights = c(1, 0.5))
 ```
+
 Note: a team's predicted win/loss total is the **average** number of wins they achieve across all simulations of games in the **regular season**.
 
 ## `r params$input_season` Game Predictions
@@ -748,6 +753,10 @@ Using each team's rating, I simulate the result and margin of victory for each r
 The following table shows the percentage of times in which `r params$team` won each of the games on their upcoming schedule. The margin of victory is the median margin of victory across all simulations.
 
 ```{r team schedule}
+
+team_info <- cfbfastR::cfbd_team_info()
+team_info <- team_info %>% 
+  select(team = school,conference,mascot)
 
 # table
 games_schedule %>%
@@ -804,11 +813,11 @@ games_schedule %>%
                 colors = scales::col_numeric(
                         palette = c("white", team_color),
                         domain = range(c(0, 1)))) %>%
-        tab_header(
-                title = paste(params$input_season, "Schedule and Results for", params$team),
-                subtitle = paste("Upcoming win probabilities and predictions as of Week", params$sim_week)) %>%
+        # tab_header(
+        #         title = paste(params$input_season, "Schedule and Results for", params$team),
+        #         subtitle = paste("Upcoming win probabilities and predictions as of Week", params$sim_week)) %>%
         tab_options(
-                table.font.size = 10,
+                table.font.size = 14,
                 table.width = pct(80)) %>%
         gt_fmt_cfb_logo(columns = c("Team", "Opponent")) %>%
         cols_align(align = c("center"),
@@ -818,7 +827,7 @@ games_schedule %>%
         tab_style(
                 style = list(
                         cell_text(weight = "bold",
-                                  size = 14)
+                                  size = 16)
                 ),
                 locations = cells_body(
                         columns = c("Correct?"))
@@ -830,7 +839,10 @@ games_schedule %>%
                         palette = c(
                                 team_color, "grey80"), # Two factor levels, two colors
                         domain = c("\u2713","\u2715")))
+
 ```
+
+\vspace{12pt}
 
 It's important to note that within each simulation the results of each game are not independent. The (simulated) results of each week are used to update each team's rating going into the next week, which will then influence how likely they are to win games in the rest of the season. This means that in some simulations a team will overperform/underperform early and end up with a very good/poor season. A team's predicted win total is the average number of wins they achieve across all simulations.
 
@@ -949,20 +961,14 @@ source(here::here("functions", "plot_elo_team_season.R"))
 
 p = plot_elo_team_season(sim_remaining_games %>%
                              filter(TEAM == params$team),
-                     games %>%
-                             left_join(., games_raw %>%
-                                               select(HOME_TEAM,
-                                                      AWAY_TEAM,
-                                                      HOME_TEAM_ABBR,
-                                                      AWAY_TEAM_ABBR),
-                                       by = c("HOME_TEAM", "AWAY_TEAM")),
+                     games,
                      params$team,
                      team_color = team_color,
                      params$input_season,
                      alpha = 0.15)
 
 p+
-          ggtitle(paste("Simulated Elo Ratings for" , params$team, params$input_season, "as of Week", params$sim_week),
+          ggtitle(paste("Simulated Elo Ratings for" , params$team, params$input_season, "after Week", params$sim_week),
                         subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
         my_caption
 
@@ -981,22 +987,24 @@ p = plot_elo_team_season(sim_from_start%>%
                      team_color = 'grey70',
                      params$input_season,
                      alpha = 0.05)+
-        geom_line(data = games_schedule %>%
-                          filter(WEEK <= params$sim_week) %>%
+        geom_line(data = team_predictions %>%
                           filter(TEAM == params$team) %>%
                           group_by(SEASON, TEAM) %>%
                           mutate(GAME = row_number()) %>%
+                          ungroup() %>%
                           mutate(.id = params$nsims+1) %>%
+                          select(.id, GAME, SEASON, TEAM, RATING) %>%
+                          mutate(PREGAME_ELO = RATING) %>%
                           bind_rows(.,
-                                    games_schedule %>%
-                                            filter(WEEK <= params$sim_week) %>%
+                                    team_predictions %>%
                                             filter(TEAM == params$team) %>%
                                             group_by(SEASON, TEAM) %>%
                                             mutate(GAME = row_number()) %>%
-                                            filter(GAME_DATE == max(GAME_DATE)) %>%
-                                            mutate(GAME = GAME+1) %>%
+                                            ungroup() %>%
                                             mutate(.id = params$nsims+1) %>%
-                                            mutate(PREGAME_ELO = POSTGAME_ELO)),
+                                            select(.id, GAME, SEASON, TEAM, RATING) %>%
+                                            slice_tail(n=1)  %>%
+                                            mutate(PREGAME_ELO = RATING)),
                   color = team_color,
                   lwd = 1.3)
 

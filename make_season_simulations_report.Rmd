@@ -1,6 +1,6 @@
 ---
 title: "Simulating the `r params$input_season` CFB Season"
-#date: "`r Sys.Date()`"
+date: "Updated: `r Sys.Date()`"
 output: 
   html_document:
     toc: TRUE #adds a Table of Contents

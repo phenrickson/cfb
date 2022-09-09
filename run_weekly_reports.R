@@ -85,8 +85,8 @@ teams = season_conference_divisions %>%
         pull(TEAM)
 
 # run sims
-run_weekly_sims(input_season = year,
-                input_week = weeks)
+# run_weekly_sims(input_season = year,
+#                 input_week = weeks)
 
 # make report for predictions
 run_weekly_report(input_season = year,
