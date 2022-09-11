@@ -1,0 +1,341 @@
+---
+title: "Calculating Offensive & Defensive Efficiency"
+date: "Updated: `r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE #adds a Table of Contents
+    theme: cerulean
+    number_sections: F #number your headings/sections
+    toc_float: TRUE #let your ToC follow you as you scroll
+    keep_md: no
+    fig.caption: yes
+params:
+        input_season: 2022
+        sim_week: 1
+        nsims: 1000
+---
+
+```{r setup, include=F}
+
+knitr::opts_chunk$set(echo = F,
+                      error = F,
+                      warning=F,
+                      dev="png",
+                      fig.width = 10,
+                      fig.height = 6)
+options(knitr.duplicate.label = "allow")
+options(scipen=999)
+
+```
+
+```{r packages, include=F}
+
+source(here::here("scripts/load_packages.R"))
+library(cfbplotR)
+library(jsonlite)
+library(forcats)
+library(TTR)
+library(flextable)
+conflict_prefer("lag", "dplyr")
+conflict_prefer("filter", "dplyr")
+
+# parallelization
+library(future.apply)
+library(furrr)
+plan(multisession, workers = 7)
+
+set_flextable_defaults(theme_fun = theme_alafoli,
+                       font.color = "grey10",
+                       font.size=10,
+                       padding.bottom = 6, 
+                       padding.top = 6,
+                       padding.left = 6,
+                       padding.right = 6,
+                       background.color = "white")
+```
+
+```{r connect to snowflake, include=F}
+
+library(DBI)
+library(odbc)
+library(RODBC)
+library(keyring)
+
+### connect to DBS
+# connect to snowflake
+myconn <- DBI::dbConnect(odbc::odbc(),
+                         "SnowflakeDSII",
+                         Database = "CFB_DEMO",
+                         warehouse = "DEMO_WH",
+                         uid="phil.henrickson",
+                         pwd=keyring::key_get("AE_Snowflake"))
+
+```
+
+```{r functions and colors}
+
+### functions
+source(here::here("functions", "theme_phil.R"))
+source(here::here("functions", "get_drive_score_events.R"))
+source(here::here("functions", "expected_points_func.R"))
+source(here::here("functions/get_points_added_func.R"))
+source(here::here("functions/get_drive_score_events.R"))
+source(here::here("functions/assign_play_score_events.R"))
+source(here::here("functions", "span_func.R"))
+
+# color palettes
+load(here::here("data", "team_colors.Rdata"))
+custom_color_teams <- scale_colour_manual(name = "TEAM", values = team_colors)
+custom_fill_teams <- scale_fill_manual(name = "TEAM", values = team_colors)
+
+```
+
+```{r load previously scored plays}
+
+load(here::here("data/scored_plays.Rdata"))
+
+```
+
+```{r load previously trained expected points model, include=F}
+
+library(vetiver)
+library(pins)
+
+# get model board
+model_board = board_folder(path = here::here("models"),
+                          versioned = TRUE)
+
+# get active version
+version = pin_versions(model_board, "expected_points") %>%
+        arrange(created) %>%
+        slice_tail(n=1) %>%
+        pull(version)
+
+# load
+expected_points_model = vetiver_pin_read(model_board, 
+                                         "expected_points",
+                                         version = version)
+
+```
+
+
+```{r pull in plays, include=F}
+
+### pull from snowflake
+# get plays
+plays_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.PLAYS')) %>%
+        as_tibble() %>%
+        mutate(TIME = gsub('\\{|}|"', '', CLOCK)) %>%
+        separate(TIME, into=c("MINUTES", "SECONDS"), sep=",") %>%
+        mutate(MINUTES = as.numeric(gsub("minutes:", "", MINUTES))) %>% 
+        mutate(SECONDS = as.numeric(gsub("seconds:", "", SECONDS))) %>%
+        mutate(MINUTES_IN_HALF = case_when(PERIOD == 1 ~ MINUTES+ 15,
+                                           PERIOD == 2 ~ MINUTES,
+                                           PERIOD == 3 ~ MINUTES + 15,
+                                           PERIOD == 4 ~ MINUTES)) %>%
+        mutate(SECONDS_IN_HALF = MINUTES_IN_HALF*60 + SECONDS) %>%
+        # flag if seconds in half is invalid
+        mutate(FLAG_SECONDS_IN_HALF = case_when(SECONDS_IN_HALF > 1800 ~ 1,
+                                                TRUE ~ 0)) %>%
+        # convert IDs to numeric
+        mutate(ID = as.numeric(ID),
+               DRIVE_ID = as.numeric(DRIVE_ID)) %>%
+        rename(PLAY_ID = ID) %>%
+        group_by(GAME_ID) %>%
+        # sort each game by drive
+        arrange(PLAY_ID) %>% 
+        ungroup() %>%
+        # clean up PERIOD by game
+        mutate(STATUS_PERIOD = case_when(PERIOD == 0 & nchar(PLAY_TEXT) <=1 ~ 'Drop',
+                                        PERIOD == 0 ~ 'Take Previous Value',
+                                        TRUE ~ 'Valid')) %>%
+        filter(STATUS_PERIOD != 'Drop') %>%
+        mutate(PERIOD = case_when(STATUS_PERIOD == 'Take Previous Value' ~ lag(PERIOD, 1),
+                                  TRUE ~ PERIOD)) %>%
+        ungroup() %>% 
+        # make half feature
+        mutate(HALF = case_when(PERIOD == 1 ~ 'First Half',
+                                PERIOD == 2 ~ 'First Half',
+                                PERIOD == 3 ~ 'Second Half',
+                                PERIOD == 4 ~ 'Second Half',
+                                TRUE ~ 'OT')) %>%
+        # then clean up the down
+        mutate(FLAG_DOWN = case_when(DOWN %in% c(1, 2, 3, 4) ~ 0,
+                                       TRUE ~ 1)) %>%
+        mutate(DOWN = case_when(DOWN %in% c(1, 2, 3, 4) ~ DOWN,
+                                TRUE ~ -1)) %>%
+        # then flag the distance
+        mutate(FLAG_DISTANCE = case_when((DISTANCE < 0 | DISTANCE >=99) ~ 1,
+                                         TRUE ~ 0)) %>%
+        # flag yard lines that are outside correct
+        mutate(FLAG_YARD_LINE = case_when(YARD_LINE < 0 | YARD_LINE > 100 ~ 1,
+                                          TRUE ~ 0))
+
+# get games
+games_raw = DBI::dbGetQuery(myconn,
+                             paste('SELECT * FROM CFB_DEMO.CFD_RAW.ANALYSIS_GAMES')) %>%
+        as_tibble() %>%
+        group_by(GAME_ID) %>%
+        slice_tail(n=1) %>%
+        ungroup() %>%
+        mutate(GAME_DATE = as.Date(START_DATE)) %>%
+        arrange(START_DATE)
+        
+# get drives
+drives_raw = DBI::dbGetQuery(myconn,
+                              paste('SELECT * FROM "CFB_DEMO"."CFD_RAW"."DRIVES" WHERE GAME_ID in (SELECT DISTINCT GAME_ID FROM "CFB_DEMO"."CFD_RAW"."PLAYS")')) %>%
+        as_tibble() %>%
+        mutate(ID = as.numeric(ID),
+               GAME_ID = as.numeric(GAME_ID)) %>%
+        rename(DRIVE_ID = ID) %>%
+        # get drive time features
+        # start of drive
+        mutate(START_TIME = gsub('\\{|}|"', '', START_TIME)) %>%
+        separate(START_TIME, into=c("START_MINUTES", "START_SECONDS"), sep=",") %>%
+        mutate(START_MINUTES = as.numeric(gsub("minutes:", "", START_MINUTES))) %>% 
+        mutate(START_SECONDS = as.numeric(gsub("seconds:", "", START_SECONDS))) %>%
+        # end of drive
+        mutate(END_TIME = gsub('\\{|}|"', '', END_TIME)) %>%
+        separate(END_TIME, into=c("END_MINUTES", "END_SECONDS"), sep=",") %>%
+        mutate(END_MINUTES = as.numeric(gsub("minutes:", "", END_MINUTES))) %>% 
+        mutate(END_SECONDS = as.numeric(gsub("seconds:", "", END_SECONDS))) %>%
+        # duration of drive
+        mutate(ELAPSED = gsub('\\{|}|"', '', ELAPSED)) %>%
+        separate(ELAPSED, into=c("ELAPSED_MINUTES", "ELAPSED_SECONDS"), sep=",") %>%
+        mutate(ELAPSED_MINUTES = as.numeric(gsub("minutes:", "", ELAPSED_MINUTES))) %>% 
+        mutate(ELAPSED_SECONDS = as.numeric(gsub("seconds:", "", ELAPSED_SECONDS)))
+        
+```
+
+```{r apply clean up functions}
+
+# now get scoring events for the drives data
+drives_score_events = drives_raw %>%
+        # run through score events function
+        get_drive_score_events()
+
+# now join with plays
+plays_score_events = plays_raw %>%
+        left_join(.,
+                  drives_score_events %>%
+                          select(GAME_ID,
+                                 DRIVE_ID,
+                                 HOME, 
+                                 AWAY,
+                                 LAST_DRIVE_HALF,
+                                 END_HOME_SCORE,
+                                 END_AWAY_SCORE,
+                                 SCORE_EVENT,
+                                 NEXT_SCORE_EVENT),
+                  by = c("GAME_ID",
+                         "DRIVE_ID",
+                         "HOME", 
+                         "AWAY")) %>%
+        # now join with games to get seasons
+        left_join(.,
+                  games_raw %>%
+                          select(GAME_ID,
+                                 SEASON,
+                                 SEASON_TYPE,
+                                 HOME_TEAM,
+                                 AWAY_TEAM,
+                                 HOME_DIVISION,
+                                 AWAY_DIVISION),
+                  by = c("GAME_ID")) %>%
+        # now assign offense defense score events using function
+        assign_play_score_events()
+
+```
+
+```{r in format for workflow}
+
+plays_full = plays_score_events %>%
+        filter(PLAY_TYPE != 'Kickoff') %>%
+        arrange(SEASON, GAME_ID) %>%
+        ungroup() %>%
+        mutate(OFFENSE_DIVISION = case_when(HOME_TEAM == OFFENSE ~ HOME_DIVISION,
+                                            HOME_TEAM == DEFENSE ~ AWAY_DIVISION),
+               DEFENSE_DIVISION = case_when(AWAY_TEAM == DEFENSE ~ AWAY_DIVISION,
+                                            AWAY_TEAM == OFFENSE ~ HOME_DIVISION)) %>%
+        select(GAME_ID,
+               DRIVE_ID,
+               PLAY_ID,
+               SEASON,
+               SEASON_TYPE,
+               HOME,
+               AWAY,
+               OFFENSE,
+               DEFENSE,
+               OFFENSE_CONFERENCE,
+               DEFENSE_CONFERENCE,
+               OFFENSE_DIVISION,
+               DEFENSE_DIVISION,
+               OFFENSE_SCORE,
+               DEFENSE_SCORE,
+               # OFFENSE_PLAY_NUMBER,
+               # DEFENSE_PLAY_NUMBER,
+               SCORING,
+               PLAY_TEXT,
+               PLAY_TYPE,
+               NEXT_SCORE_EVENT_HOME,
+               NEXT_SCORE_EVENT_HOME_DIFF,
+               NEXT_SCORE_EVENT_OFFENSE,
+               NEXT_SCORE_EVENT_OFFENSE_DIFF,
+               YARD_LINE,
+               HALF,
+               PERIOD,
+               MINUTES_IN_HALF,
+               SECONDS_IN_HALF,
+               DOWN,
+               DISTANCE,
+               YARD_LINE,
+               YARDS_TO_GOAL) %>%
+        mutate(OFFENSE_ID = factor(case_when(OFFENSE_DIVISION == 'fbs' ~ OFFENSE,
+                                      TRUE ~ 'fcs')),
+               DEFENSE_ID = factor(case_when(DEFENSE_DIVISION == 'fbs' ~ DEFENSE,
+                                              TRUE ~ 'fcs'))) %>%
+        filter(DOWN %in% c(1, 2, 3, 4)) %>%
+        filter(PERIOD %in% c(1,2,3,4)) %>%
+        filter(!is.na(SECONDS_IN_HALF)) %>%
+        filter(DISTANCE >=0 & DISTANCE <=100) %>%
+        filter(!is.na(NEXT_SCORE_EVENT_OFFENSE)) %>%
+        mutate(NEXT_SCORE_EVENT_OFFENSE = factor(NEXT_SCORE_EVENT_OFFENSE,
+                                                 levels = c("No_Score",
+                                                            "TD",
+                                                            "FG",
+                                                            "Safety",
+                                                            "Opp_Safety",
+                                                            "Opp_FG",
+                                                            "Opp_TD"))) %>%
+        arrange(SEASON, GAME_ID, PLAY_ID)
+
+
+rm(plays_raw,
+   drives_score_events,
+   plays_score_events,
+   drives_raw,
+   games_raw)
+
+```
+
+
+```{r predict plays with workflow}
+
+library(recipes)
+predict(expected_points_model,
+        plays_full[10,])
+
+expected_points_model %>%
+        predict(., new_data = plays_full)
+
+
+        pluck(".predictions", 1) %>%
+        mutate(type = 'test') %>%
+        bind_cols(., plays_test %>%
+                          select(-NEXT_SCORE_EVENT_OFFENSE)) %>%
+        select(-.config, -.row)
+
+
+```
+
