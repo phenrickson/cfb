@@ -11,7 +11,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 1
+        sim_week: 2
         nsims: 1000
 ---
 
@@ -223,57 +223,6 @@ season_team_rankings = DBI::dbGetQuery(myconn,
                                        paste('SELECT * FROM CFB_DEMO.CFD_ANALYTICS.EFFICIENCY_TEAM_SEASON')) %>%
         as_tibble()
 
-### combine datasets to get games
-games = games_raw %>%
-        filter(SEASON_TYPE == 'regular') %>%
-        filter(CONFERENCE_CHAMPIONSHIP == F) %>%
-        filter(SEASON == params$input_season) %>%
-        mutate(HOME_DIVISION = case_when(is.na(HOME_DIVISION) & SEASON < 1900 ~ 'fbs',
-                                         TRUE ~ HOME_DIVISION)) %>%
-        mutate(AWAY_DIVISION = case_when(is.na(AWAY_DIVISION) & SEASON < 1900 ~ 'fbs',
-                                         TRUE ~ AWAY_DIVISION)) %>%
-        mutate(FBS = HOME_DIVISION == 'fbs' | AWAY_DIVISION == 'fbs') %>%
-        filter((FBS == T) | (FBS==F & SEASON < 1981)) %>%
-        arrange(GAME_DATE) %>%
-        group_by(GAME_ID) %>%
-        slice_tail(n=1) %>%
-        ungroup() %>%
-        select(GAME_ID, 
-               SEASON, 
-               WEEK,
-               SEASON_TYPE,
-               START_DATE,
-               GAME_DATE,
-               NEUTRAL_SITE, 
-               HOME_TEAM,
-               AWAY_TEAM,
-               CONFERENCE_GAME,
-               CONFERENCE_CHAMPIONSHIP,
-               HOME_CONFERENCE,
-               AWAY_CONFERENCE,
-               HOME_DIVISION,
-               AWAY_DIVISION,
-               HOME_POINTS,
-               AWAY_POINTS) %>%
-        left_join(.,
-                  recruiting %>%
-                          select(SEASON,
-                                 TEAM,
-                                 RECRUITING_SCORE) %>%
-                          rename(HOME_TEAM = TEAM,
-                                 HOME_RECRUITING_SCORE = RECRUITING_SCORE),
-                  by = c("SEASON",
-                         "HOME_TEAM")) %>%
-        left_join(.,
-                  recruiting %>%
-                          select(SEASON,
-                                 TEAM,
-                                 RECRUITING_SCORE) %>%
-                          rename(AWAY_TEAM = TEAM,
-                                 AWAY_RECRUITING_SCORE = RECRUITING_SCORE),
-                  by = c("SEASON",
-                         "AWAY_TEAM"))
-
 # data sources
 load(file=here::here("data", "season_team_rankings_type.Rdata"))
 
@@ -281,29 +230,7 @@ load(file=here::here("data", "season_team_rankings_type.Rdata"))
 
 ```{r deal with problem ids issue}
 
-# games that for some damn reason the API swapped the home and away team
-problem_ids = games_raw %>%
-        filter(SEASON == params$input_season) %>% 
-        group_by(GAME_ID) %>%
-        summarize(home_teams = n_distinct(HOME_TEAM)) %>% 
-        arrange(desc(home_teams)) %>%
-        filter(home_teams > 1) %>%
-        pull(GAME_ID)
-
-# fix issue
-games = games %>%
-        filter(SEASON == params$input_season) %>%
-        filter(!(GAME_ID %in% problem_ids)) %>%
-        bind_rows(.,
-                  games %>%
-                          filter(GAME_ID %in% problem_ids) %>%
-                          select(-starts_with("AWAY_")) %>%
-                          set_names(., gsub("HOME_", "AWAY_", names(.))) %>%
-                          bind_cols(.,
-                                    games %>%
-                                            filter(GAME_ID %in% problem_ids) %>%
-                                            select(starts_with("AWAY")) %>%
-                                            set_names(., gsub("AWAY_", "HOME_", names(.)))))
+source(here::here("scripts", "clean_games_2022.R"), local=T)
 
 ```
 
@@ -627,7 +554,7 @@ team_predictions %>%
                pred_loss = format(round(mean_loss, 1), nsmall = 1)) %>%
         mutate(Record = paste(pred_win, pred_loss, sep=" - ")) %>%
         group_by(SIM_FROM_WEEK) %>%
-        arrange(desc(RATING)) %>%
+        arrange(desc(made_playoff)) %>%
         mutate(Rank = row_number()) %>%
         # select(SEASON, SIM_FROM_WEEK, CONFERENCE, TEAM, RATING,
         #        everything()) %>%
@@ -667,7 +594,7 @@ team_predictions %>%
                 #desc(Win_NC),
                # desc(Make_NC), 
               #  desc(Playoff), 
-                desc(Rating)) %>%
+                desc(Playoff)) %>%
         datatable(escape=F,
                   rownames = F,
                   filter = list(position = 'top'),
@@ -813,12 +740,13 @@ p = dat %>%
                       color = TEAM,
                       y=perc))+
         geom_point(size=2)+
-        geom_line(stat = 'smooth',
-                  method = span_func(max_week)$method,
-                  se = F,
-                  formula = 'y ~ x',
+        geom_line(
+                #stat = 'smooth',
+              #    method = span_func(max_week)$method,
+               #   se = F,
+             #     formula = 'y ~ x',
                   lwd = 1,
-                 span = span_func(max_week)$span,
+            #     span = span_func(max_week)$span,
                   alpha = 0.85)+
         geom_text_repel(
                 fontface = "bold",
@@ -919,12 +847,13 @@ p = dat %>%
                       color = TEAM,
                       y=perc))+
                 geom_point(size=2)+
-        geom_line(stat = 'smooth',
-                  method = span_func(max_week)$method,
-                  se = F,
-                  formula = 'y ~ x',
+        geom_line(
+                #stat = 'smooth',
+                 # method = span_func(max_week)$method,
+               #   se = F,
+             #     formula = 'y ~ x',
                   lwd = 1,
-                 span = span_func(max_week)$span,
+             #    span = span_func(max_week)$span,
                   alpha = 0.85)+
         geom_text_repel(
                 fontface = "bold",
@@ -1031,12 +960,13 @@ plot_conference_championship_prob = function(sim_conference_championship_games,
                               color = TEAM,
                               y=perc))+
                         geom_point(size=2)+
-                geom_line(stat = 'smooth',
-                          method = span_func(max_week)$method,
-                          se = F,
-                          formula = 'y ~ x',
+                geom_line(
+                        #stat = 'smooth',
+                        #  method = span_func(max_week)$method,
+                       #   se = F,
+                         # formula = 'y ~ x',
                           lwd = 1,
-                          span = span_func(max_week)$span,
+                        #  span = span_func(max_week)$span,
                           alpha = 0.85)+
                 #  span = 0.25)+
                 geom_text_repel(
