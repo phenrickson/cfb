@@ -4,7 +4,7 @@ output:
   html_document:
     toc: TRUE #adds a Table of Contents
     theme: cerulean
-    number_sections: TRUE #number your headings/sections
+    number_sections: F #number your headings/sections
     toc_float: TRUE #let your ToC follow you as you scroll
     keep_md: no
     fig.caption: yes
@@ -349,11 +349,11 @@ This page displays predictions for games in the `r params$input_season` CFB seas
 
 This table displays the results of simulating week `r params$sim_week+1` of the `r params$input_season` CFB season `r params$nsims` times. These simulations are run one week in advance, using information available in the lead up to week `r params$sim_week+1`.  For the first week of the season, team ratings are based solely on information from previous seasons.
 
-**Quality** indicates the quality of the game based on the pre game ratings of the teams. This is the (harmonic) mean of the two team's rating and ranges from 0 to 100, with 100 indicating a game between highly rated opponents.
+**Quality** indicates the quality of the teams involved in the game. This is the (harmonic) mean of the two team's pregame ratings and is scaled to range from 0 to 100, with 100 indicating a game between highly rated opponents.
 
 <!-- **Competitive** indicates how competitive a matchup is expected to be based on the the pre game home win probability. This ranges from 0 to 100, with 100 indicating a game between teams with identical ratings and 0 indicating a game that that where the home team is extremely likely to win or lose.  -->
 
-**Interest** indicates the how interesting a matchup is expected to be based on the **Quality** of the teams and how competitive the game is expected to be. This ranges from 0 to 100, where 100 indicates a competitive game between two highly rated opponents.
+<!-- **Interest** indicates the how interesting a matchup is expected to be based on the **Quality** of the teams and how competitive the game is expected to be. This ranges from 0 to 100, where 100 indicates a competitive game between two highly rated opponents. -->
 
 **Pr(HomeWin)** is the percentage of times that the home team won the game across every simulation. 
 
@@ -362,17 +362,15 @@ This table displays the results of simulating week `r params$sim_week+1` of the 
 # show last week's results
 games_and_outcomes %>%
         filter(WEEK == params$sim_week+1) %>%
-                mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
+        mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 'Yes',
+                                   TRUE ~ 'No')) %>%
+        mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
                                    HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
                                    HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
                                    TRUE ~ 0)) %>%
-      #  mutate(Name = paste('<a href="https://boardgamegeek.com/boardgame/', ID, '">', Name, '</a>', sep="")) %>%
-        select(SEASON, WEEK, QUALITY, 
-               #COMPETITIVE, 
-               INTEREST, 
-               HOME, AWAY, HOME_PROB, PRED, OUTCOME, 
-               #Correct, 
-               correct) %>%
+        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
         arrange(WEEK, desc(QUALITY)) %>%
         mutate(SEASON = factor(SEASON),
                WEEK = factor(WEEK)) %>%
@@ -382,9 +380,6 @@ games_and_outcomes %>%
         rename(Season = SEASON,
                Week = WEEK,
                Quality = QUALITY,
-           #    Competitive = COMPETITIVE,
-           Interest = INTEREST,
-             #  Interest = INTEREST,
                Home = HOME,
                Away = AWAY,
                `Pr(HomeWin)` = HOME_PROB,
@@ -406,17 +401,22 @@ games_and_outcomes %>%
                                  columnDefs = list(
                                          list(className = 'dt-center',
                                               visible=T,
-                                              targets=c("Season", "Week", "Quality", "Interest", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result")),
+                                              targets=c("Season", "Week", "Quality", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result", "Correct")),
                                          list(className = 'dt-center',
                                                         visible=F,
                                                         targets=c("correct"))))) %>%
-        formatStyle(c("Quality", "Interest"),
+        formatStyle(c("Quality"),
                   #  color = 'white',
                      backgroundColor = styleInterval(seq(-30, 130, 1),
                                                      qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
         formatStyle(c("Pr(HomeWin)"),
                      backgroundColor = styleInterval(seq(0, 1.8, .01),
-                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) 
+                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%    
+        formatStyle('Result',
+                    'correct',
+                    backgroundColor = styleEqual(levels = c(1, 0),
+                                                 c(homeColor,
+                                                   'lightcoral')))
         # formatStyle('Result',
         #             'correct',
         #             backgroundColor = styleEqual(levels = c(1, 0),
@@ -587,14 +587,8 @@ games_and_outcomes %>%
                                    HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
                                    HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
                                    TRUE ~ 0)) %>%
-      #  mutate(Name = paste('<a href="https://boardgamegeek.com/boardgame/', ID, '">', Name, '</a>', sep="")) %>%
-       select(SEASON, WEEK, QUALITY, 
-               #COMPETITIVE, 
-               INTEREST, 
-               HOME, AWAY, HOME_PROB, PRED, OUTCOME, 
-               #Correct, 
-               correct) %>%
-        arrange(desc(WEEK), desc(QUALITY)) %>%
+        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
+        arrange(WEEK, desc(QUALITY)) %>%
         mutate(SEASON = factor(SEASON),
                WEEK = factor(WEEK)) %>%
         mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
@@ -603,9 +597,6 @@ games_and_outcomes %>%
         rename(Season = SEASON,
                Week = WEEK,
                Quality = QUALITY,
-           #    Competitive = COMPETITIVE,
-           Interest = INTEREST,
-             #  Interest = INTEREST,
                Home = HOME,
                Away = AWAY,
                `Pr(HomeWin)` = HOME_PROB,
@@ -627,11 +618,11 @@ games_and_outcomes %>%
                                  columnDefs = list(
                                          list(className = 'dt-center',
                                               visible=T,
-                                              targets=c("Season", "Week", "Quality", "Interest", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result")),
+                                              targets=c("Season", "Week", "Quality", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result", "Correct")),
                                          list(className = 'dt-center',
                                                         visible=F,
                                                         targets=c("correct"))))) %>%
-        formatStyle(c("Quality", "Interest"),
+        formatStyle(c("Quality"),
                   #  color = 'white',
                      backgroundColor = styleInterval(seq(-30, 130, 1),
                                                      qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
