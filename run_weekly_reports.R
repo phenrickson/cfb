@@ -68,7 +68,7 @@ run_weekly_matchups = function(input_season,
 }
 
 # set week
-weeks = 1
+weeks = 3
 year = 2022
 
 # set teams
@@ -84,9 +84,11 @@ teams = season_conference_divisions %>%
         distinct() %>%
         pull(TEAM)
 
+weeks = 3
+
 # run sims
-# run_weekly_sims(input_season = year,
-#                 input_week = weeks)
+run_weekly_sims(input_season = year,
+                input_week = weeks)
 
 # make report for predictions
 run_weekly_report(input_season = year,

@@ -83,4 +83,5 @@ games = games %>%
         #                                TRUE ~ HOME_POINTS)) %>%
         # mutate(AWAY_POINTS = case_when(GAME_ID == 401415214 ~ 31,
         #                                TRUE ~ AWAY_POINTS)) %>%
-        filter(GAME_ID != 401416593)
+        filter(GAME_ID != 401416593) %>%
+        arrange(START_DATE)
