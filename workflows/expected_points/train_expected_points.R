@@ -7,6 +7,10 @@ library(odbc)
 library(RODBC)
 library(keyring)
 
+# set years for split
+start_year = 2007
+valid_year = 2018
+
 # connect to snowflake
 myconn <- DBI::dbConnect(odbc::odbc(),
                          "SnowflakeDSII",
@@ -253,7 +257,7 @@ plays_train = plays_full %>%
                 DOWN_TO_GOAL
         ) %>%
         filter(SEASON_TYPE == 'regular') %>%
-        filter(SEASON >= 2007 & SEASON <2018)
+        filter(SEASON >= start_year & SEASON <valid_year)
 
 # valid
 plays_valid = plays_full %>%
@@ -269,7 +273,7 @@ plays_valid = plays_full %>%
                 DOWN_TO_GOAL
         ) %>%
         filter(SEASON_TYPE == 'regular') %>%
-        filter(SEASON > 2018)
+        filter(SEASON >= valid_year)
 
 # make an initial split based on previously defined splits
 valid_split = make_splits(list(analysis = seq(nrow(plays_train)),
@@ -358,7 +362,7 @@ predicted_plays_train =
         # add back in original features
         bind_cols(., plays_full %>%
                           filter(SEASON_TYPE == 'regular') %>%
-                          filter(SEASON >= 2007 & SEASON <2018) %>%
+                          filter(SEASON >= start_year & SEASON <valid_year) %>%
                           # remove features already present in recipe
                           select(-one_of(names(fit_train$pre$mold$blueprint$ptypes$predictors)),
                                  -one_of(names(fit_train$pre$mold$blueprint$ptypes$outcomes)),
@@ -371,7 +375,7 @@ predicted_plays_valid =
         mutate(type = 'valid') %>%
         bind_cols(., plays_full %>%
                           filter(SEASON_TYPE == 'regular') %>%
-                          filter(SEASON >2018) %>%
+                          filter(SEASON >=valid_year) %>%
                           # remove features already present in recipe
                           select(
                                  -one_of(names(fit_train$pre$mold$blueprint$ptypes$outcomes)),
@@ -399,9 +403,27 @@ predicted_plays = bind_rows(predicted_plays_train,
 # save these predicted plays
 save(predicted_plays,
      file = here::here("workflows",
-                "expected_points",
                 "data",
                 "predicted_plays.Rdata"))
+
+# score plays with function
+source(here::here("functions", "get_points_added_func.R"))
+
+scored_plays = predicted_plays %>%
+        expected_points_func() %>%
+        get_points_added_func() %>%
+        bind_cols(., predicted_plays %>%
+                          select(SEASON_TYPE,
+                                 SCORING, YARD_LINE,
+                                 OFFENSE_CONFERENCE, DEFENSE_CONFERENCE,
+                                 OFFENSE_DIVISION, DEFENSE_DIVISION,
+                                 OFFENSE_ID, DEFENSE_ID))
+
+# save scored plays
+save(scored_plays,
+     file = here::here("workflows",
+                       "data",
+                       "scored_plays.Rdata"))
 
 # final fit of workflow
 expected_points_wf = baseline_wf %>%
@@ -415,112 +437,75 @@ library(vetiver)
 expected_points_model <- vetiver_model(expected_points_wf, 
                                        "expected_points")
 
-# set model board to GCS
+# pin to local model board
 library(pins)
 
-# GCS board
-library(bigrquery)
-library(googleCloudStorageR)
-library(googleAuthR)
-
-Sys.setenv('GCS_AUTH_FILE'="/Users/Phil/Documents/gcp-analytics-326219-ffcd8f94e1b7.json",
-           'GAR_CLIENT_WEB_JSON' ="/Users/Phil/Documents/oauth.json")
-
-#R part
-library(googleCloudStorageR)
-library(googleAuthR)
-
-bq_auth()
-
-#set the scope
-gar_set_client(scopes = c("https://www.googleapis.com/auth/devstorage.read_write",
-                          "https://www.googleapis.com/auth/cloud-platform"))    
-
-
-
-# authenticate
-Sys.setenv('GCS_AUTH_FILE' = '/Users/Phil/Documents/gcp-analytics-326219-c76fe0dc89d8.json')
-Sys.setenv('GCLOUD_STORAGE_BUCKET' = 'phil_model_storage')
-location_of_json = Sys.getenv("GCS_AUTH_FILE")
-gcs_auth(location_of_json)
-
-service_token <- gar_auth_service(json_file=location_of_json)
-
-PROJECT_ID <- "gcp-analytics-326219"
-BUCKET_NAME <- "phil_model_storage"
-
-gcs_global_bucket(BUCKET_NAME)
-
-# bq_auth(email = "phil.henrickson@aebs.com")
-
-# register bucket
-board_register_gcloud(token = location_of_json,
-                      versioned = T)
+model_board <- board_folder(path = here::here("workflows", "model_board"),
+                            versioned = TRUE)
 
 # pin to board
-pin(expected_points_model,
-    board = "gcloud")
+model_board %>% 
+        vetiver_pin_write(expected_points_model)
 
-gcs_load(file = "bgg_user_owned_Phil_workflow.Rds",
-         bucket = 'phil_model_storage')
+# vetiver_pin_read(model_board,
+#                  "expected_points")
+
+# check on this model for sanity
+# define min and max for feature
+setting_1 = seq(1, 100, 5)
+setting_2 = c(1, 2, 3, 4)
+
+# loop over both
+pred_settings_12 = foreach(i = 1:length(setting_1),
+                           .combine = bind_rows) %:%
+        foreach(j = 1:length(setting_2)) %do% {
+
+                set.seed(1999)
+                expected_points_model %>%
+                        predict(new_data = bind_rows(plays_train,
+                                                     plays_valid) %>%
+                                        sample_n(10000) %>%
+                                        mutate(YARDS_TO_GOAL = setting_1[i],
+                                               DOWN = setting_2[j]),
+                                type = 'prob') %>%
+                        apply(., 2, mean) %>%
+                        as.data.frame() %>%
+                        rownames_to_column("outcome") %>%
+                        set_names(., c("outcome", ".pred")) %>%
+                        mutate(YARDS_TO_GOAL = setting_1[i],
+                               DOWN = setting_2[j])
+        }
 
 
-# # check on this model for sanity
-# # define min and max for feature
-# setting_1 = seq(1, 100, 5)
-# setting_2 = c(1, 2, 3, 4)
-# 
-# # loop over both
-# pred_settings_12 = foreach(i = 1:length(setting_1),
-#                            .combine = bind_rows) %:% 
-#         foreach(j = 1:length(setting_2)) %do% {
-#                 
-#                 set.seed(1999)
-#                 final_fit %>%
-#                         predict(new_data = bind_rows(plays_train,
-#                                                      plays_valid) %>% 
-#                                         sample_n(10000) %>%
-#                                         mutate(YARDS_TO_GOAL = setting_1[i],
-#                                                DOWN = setting_2[j]),
-#                                 type = 'prob') %>%
-#                         apply(., 2, mean) %>%
-#                         as.data.frame() %>%
-#                         rownames_to_column("outcome") %>% 
-#                         set_names(., c("outcome", ".pred")) %>%
-#                         mutate(YARDS_TO_GOAL = setting_1[i],
-#                                DOWN = setting_2[j])
-#         }
-# 
-# 
-# pred_settings_12 %>%
-#         mutate(outcome = paste(gsub(".pred_", "Pr(", outcome), ")", sep="")) %>%
-#         mutate(outcome = factor(outcome,
-#                                 levels = paste("Pr(", c("TD",
-#                                                         "FG",
-#                                                         "Safety",
-#                                                         "No_Score",
-#                                                         "Opp_Safety",
-#                                                         "Opp_FG",
-#                                                         "Opp_TD"),
-#                                                ")",
-#                                                sep =""))) %>%
-#         mutate(DOWN = factor(DOWN)) %>%
-#         ggplot(., 
-#                aes(x=YARDS_TO_GOAL,
-#                    y = .pred,
-#                    color = DOWN,
-#                    group = DOWN))+
-#         facet_wrap(outcome ~.,
-#                    ncol = 4)+
-#         geom_line(lwd=1.1)+
-#         scale_color_viridis_d(option = 'D',
-#                               begin = 0.2)+        
-#         theme_phil()+
-#         theme(legend.title = element_text())+
-#         guides(color = guide_legend(title = 'Down',
-#                                     title.position = 'top'))+
-#         xlab("Yards to Opponent End Zone")+
-#         ylab("Pr(Next Scoring Event)")
-# 
-# 
+pred_settings_12 %>%
+        mutate(outcome = paste(gsub(".pred_", "Pr(", outcome), ")", sep="")) %>%
+        mutate(outcome = factor(outcome,
+                                levels = paste("Pr(", c("TD",
+                                                        "FG",
+                                                        "Safety",
+                                                        "No_Score",
+                                                        "Opp_Safety",
+                                                        "Opp_FG",
+                                                        "Opp_TD"),
+                                               ")",
+                                               sep =""))) %>%
+        mutate(DOWN = factor(DOWN)) %>%
+        ggplot(.,
+               aes(x=YARDS_TO_GOAL,
+                   y = .pred,
+                   color = DOWN,
+                   group = DOWN))+
+        facet_wrap(outcome ~.,
+                   ncol = 4)+
+        geom_line(lwd=1.1)+
+        scale_color_viridis_d(option = 'D',
+                              begin = 0.2)+
+        theme_phil()+
+        theme(legend.title = element_text())+
+        guides(color = guide_legend(title = 'Down',
+                                    title.position = 'top'))+
+        xlab("Yards to Opponent End Zone")+
+        ylab("Pr(Next Scoring Event)")
+
+
 
