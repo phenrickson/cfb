@@ -10,7 +10,7 @@ run_weekly_sims = function(input_season,
         # run through
         foreach(i=1:length(input_week)) %do% {
                 
-                rmarkdown::render(here::here("season_simulations.Rmd"),
+                rmarkdown::render(here::here("run_season_simulations.Rmd"),
                                   params = list(sim_week = input_week[i],
                                                 input_season = input_season,
                                                 nsims = 1000),
@@ -68,7 +68,7 @@ run_weekly_matchups = function(input_season,
 }
 
 # set week
-weeks = 3
+weeks = 6
 year = 2022
 
 # set teams
@@ -83,8 +83,6 @@ teams = season_conference_divisions %>%
         select(TEAM) %>%
         distinct() %>%
         pull(TEAM)
-
-weeks = 3
 
 # run sims
 run_weekly_sims(input_season = year,
