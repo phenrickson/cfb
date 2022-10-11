@@ -10,7 +10,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 3
+        sim_week: 5
         nsims: 1000
 ---
 
@@ -375,8 +375,9 @@ games_and_outcomes %>%
         mutate(SEASON = factor(SEASON),
                WEEK = factor(WEEK)) %>%
         mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
+                                     HOME_PROB == 0 ~ .001,
                                      TRUE ~ HOME_PROB)) %>%
-        mutate(HOME_PROB = format(HOME_PROB, nsmall = 3)) %>%
+        mutate(HOME_PROB = formatC(HOME_PROB, digits=3, format="f")) %>%
         rename(Season = SEASON,
                Week = WEEK,
                Quality = QUALITY,

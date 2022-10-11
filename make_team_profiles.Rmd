@@ -10,9 +10,9 @@ output:
     keep_md: no
     fig.caption: yes
 params:
-        team: "Minnesota"
+        team: "Tennessee"
         input_season: 2022
-        sim_week: 2
+        sim_week: 5
         nsims: 1000
 ---
 
@@ -807,7 +807,7 @@ a = team_predictions %>%
                       y=mean_wins))+
         geom_text(check_overlap = T,
                   vjust = 2,
-                  size = 2.5,
+                  size = 4,
                   color = team_color)+
         geom_point(color = team_color)+
         geom_line(color = team_color)+
@@ -818,7 +818,7 @@ a = team_predictions %>%
         ylab("Predicted Win Total")+
         ggtitle("Predicted Win Total by Week of Simulation")+
         theme(plot.title = element_text(hjust = 0.5))+
-        facet_wrap("Mean win total" ~.)
+        facet_wrap("Average Wins in \n 1000 Simulations  " ~.)
 
 # plot
 if (nrow(sim_remaining_games %>%
@@ -849,20 +849,26 @@ b = sim_remaining_games %>%
         ggplot(., aes(x=wins,
                       y = perc,
                       label = paste(wins,
+                                    " ",
+                                    "(",
                                     format(perc,nsmall = 2),
-                                    sep = "\n")))+
-        geom_col(fill = team_color)+
-        geom_text(vjust = -0.75,
+                                    ")",
+                                    sep = "")))+
+        geom_col(aes(fill = perc))+
+        geom_text(hjust = -0.5,
                   color = team_color,
-                  size = 2.5)+
+                  size = 4)+
         xlab("Predicted Win Total")+
-        coord_cartesian(xlim = c(0, 13),
+        coord_flip(xlim = c(0, 13),
                         ylim = c(0,1))+
         theme_phil()+
+        scale_fill_gradient(low = 'grey80',
+                            high = team_color)+
         facet_wrap(TEAM_LABEL ~.)+
         ylab("Percentage of Simulations")+
         ggtitle("Distribution of Predicted Win Totals from Current Week")+
-        theme(plot.title = element_text(hjust = 0.5))
+        theme(plot.title = element_text(hjust = 0.5))+
+        guides(fill = "none")
 
 }
 
@@ -877,71 +883,6 @@ p = cowplot::plot_grid(a, b) +
 rm(a, b)
 
 suppressMessages({print(p)})
-
-```
-
-## Simulated Rating for Rest of Season
-
-The table above indicates the aggregated result of every simulated game for the selected team. The visualization below shows the simulated paths for **`r params$team`** as of Week `r params$sim_week` in the `r params$input_season` season. This illustrates the most common paths left in a team's season by showing how the result of one game tends to affect its future trajectory.
-
-```{r show simulated elo path for team}
-
-source(here::here("functions", "plot_elo_team_season.R"))
-
-p = plot_elo_team_season(sim_remaining_games %>%
-                             filter(TEAM == params$team),
-                     games,
-                     params$team,
-                     team_color = team_color,
-                     params$input_season,
-                     alpha = 0.15)
-
-p+
-          ggtitle(paste("Simulated Elo Ratings for" , params$team, params$input_season, "after Week", params$sim_week),
-                        subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
-        my_caption
-
-```
-
-## Rating vs Preseason Expectations
-
-How is `r params$team` performing compared to preseason expectations? The visualization below shows the team's rating so far compared to simulated ratings for the team from the start of the season. The simulated paths from the beginning of the season are shown in **grey** while the team's actual rating so far is shown in the team's color. Teams that are outperforming preseason expectations will be above the majority of the simulated paths; teams that are under performing will be below.
-
-```{r plot from start}
-
-p = plot_elo_team_season(sim_from_start%>%
-                             filter(TEAM == params$team),
-                     games,
-                     params$team,
-                     team_color = 'grey70',
-                     params$input_season,
-                     alpha = 0.05)+
-        geom_line(data = team_predictions %>%
-                          filter(TEAM == params$team) %>%
-                          group_by(SEASON, TEAM) %>%
-                          mutate(GAME = row_number()) %>%
-                          ungroup() %>%
-                          mutate(.id = params$nsims+1) %>%
-                          select(.id, GAME, SEASON, TEAM, RATING) %>%
-                          mutate(PREGAME_ELO = RATING) %>%
-                          bind_rows(.,
-                                    team_predictions %>%
-                                            filter(TEAM == params$team) %>%
-                                            group_by(SEASON, TEAM) %>%
-                                            mutate(GAME = row_number()) %>%
-                                            ungroup() %>%
-                                            mutate(.id = params$nsims+1) %>%
-                                            select(.id, GAME, SEASON, TEAM, RATING) %>%
-                                            slice_tail(n=1)  %>%
-                                            mutate(PREGAME_ELO = RATING)),
-                  color = team_color,
-                  lwd = 1.3)
-
-p+
-          ggtitle(paste(params$team, params$input_season, "Rating vs Preseason Simulations"),
-                        subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
-        my_caption
-
 
 ```
 
@@ -1119,6 +1060,77 @@ p
 
 ```
 
+## Simulated Rating for Rest of Season
+
+The visualization below shows the simulated paths for **`r params$team`** as of Week `r params$sim_week` in the `r params$input_season` season. This illustrates the most common paths left in a team's season by showing how the result of one game tends to affect its future trajectory.
+
+```{r show simulated elo path for team}
+
+source(here::here("functions", "plot_elo_team_season.R"))
+
+p = plot_elo_team_season(sim_remaining_games %>%
+                             filter(TEAM == params$team),
+                     games,
+                     params$team,
+                     team_color = team_color,
+                     params$input_season,
+                     alpha = 0.05)
+
+p+
+          ggtitle(paste("Simulated Elo Ratings for" , params$team, params$input_season, "after Week", params$sim_week),
+                        subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
+        my_caption
+
+```
+## Rating vs Preseason Expectations
+
+How is `r params$team` performing compared to preseason expectations? The visualization below shows the team's rating so far compared to simulated ratings for the team from the start of the season. The simulated paths from the beginning of the season are shown in **grey** while the team's actual rating so far is shown in the team's color. Teams that are outperforming preseason expectations will be above the majority of the simulated paths; teams that are under performing will be below.
+
+```{r plot from start}
+
+week_games = c(games %>% filter(HOME_TEAM == params$team | AWAY_TEAM == params$team) %>% 
+        filter(!is.na(HOME_POINTS)) %>% pull(WEEK),0)
+
+p = plot_elo_team_season(sim_from_start%>%
+                             filter(TEAM == params$team),
+                     games,
+                     params$team,
+                     team_color = 'grey70',
+                     params$input_season,
+                     alpha = 0.05)+
+        geom_line(data = team_predictions %>%
+                          filter(TEAM == params$team) %>%
+                          filter(SIM_FROM_WEEK %in% week_games) %>%
+                          group_by(SEASON, TEAM) %>%
+                          mutate(GAME = row_number()) %>%
+                          ungroup() %>%
+                          mutate(.id = params$nsims+1) %>%
+                          select(.id, GAME, SEASON, TEAM, RATING) %>%
+                          mutate(PREGAME_ELO = RATING) %>%
+                          bind_rows(.,
+                                    team_predictions %>%
+                                            filter(TEAM == params$team) %>%
+                                            filter(SIM_FROM_WEEK %in% week_games) %>%
+                                            group_by(SEASON, TEAM) %>%
+                                            mutate(GAME = row_number()) %>%
+                                            ungroup() %>%
+                                            mutate(.id = params$nsims+1) %>%
+                                            select(.id, GAME, SEASON, TEAM, RATING) %>%
+                                            slice_tail(n=1)  %>%
+                                            mutate(PREGAME_ELO = RATING)),
+                  color = team_color,
+                  lwd = 1.3)
+
+p+
+          ggtitle(paste(params$team, params$input_season, "Rating vs Preseason Simulations"),
+                        subtitle = str_wrap("Each line is one result from simulating a team's regular season. Win probabilities displayed above each matchup. Displaying results from 1000 simulations.", 120))+
+        my_caption
+
+
+```
+
+
+
 # Historical Team Data
 
 The simulations for an upcoming season make use of an (adjusted) Elo rating, which is a rating assigned to each team based on wins and losses in previous games. After wins, a team's rating will go up; after losses, a team's rating will go down. The magnitude of these increases/decreases will vary depend on the scoreline and strength of the opponent.
@@ -1135,9 +1147,11 @@ min_date = as.Date(paste("1900-01-01"))
 min_year = year(min_date)
 #min_year = 1900
 
-if(params$team == 'Florida State' |
-   params$team == 'Connecticut') {smooth = F}else 
-           {smooth =T}
+# if(params$team == 'Florida State' |
+#    params$team == 'Connecticut') {smooth = F}else 
+#            {smooth =T}
+
+smooth = F
 
 all_teams_data = elo_teams %>%
         filter(SEASON < params$input_season) %>%

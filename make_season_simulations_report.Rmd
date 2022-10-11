@@ -11,7 +11,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 2
+        sim_week: 4
         nsims: 1000
 ---
 
@@ -625,7 +625,156 @@ team_predictions %>%
 
 ```
 
-<!-- # Rankings -->
+## Changes from Previous Week
+
+How has each team's trajectory changed throughout the season? After each week of games have concluded, I update each team's rating and simulate all remaining games in the season. 
+
+The following table shows how each team's rating and predictions have changed after each week of the season, highlighting the largest absolute changes from week `r params$sim_week`.
+
+```{r changes}
+
+probs_change_df = data.frame(breaks = seq(-.9, .9, .05))
+
+wins_change_df = data.frame(breaks = seq(-3, 3, .1))
+
+elo_change_df = data.frame(outcome = 'Rating',
+                           breaks = seq(-150, 150, 5))
+
+blueOrangeColorRamp = colorRampPalette(c("orange", "white", "dodgerblue3"))
+                          
+team_predictions %>%
+        arrange(SEASON, SIM_FROM_WEEK, TEAM) %>%
+        mutate(TEAM = case_when(params$input_season == 2022 ~ paste('<a href="https://phenrickson.github.io/cfb/team_profiles/preseason/', params$input_season, "/", TEAM, '.html','">', TEAM, '</a>', sep=""),
+                                TRUE ~ TEAM)) %>%
+        group_by(SEASON, TEAM) %>%
+        mutate(rating_diff = RATING - dplyr::lag(RATING, 1),
+               win_diff = mean_wins - dplyr::lag(mean_wins, 1),
+               made_bowl_diff = made_bowl - dplyr::lag(made_bowl, 1),
+               made_conf_diff = made_conf - dplyr::lag(made_conf, 1),
+               made_nc_diff = made_nc - dplyr::lag(made_nc, 1),
+               win_conf_diff = win_conf - dplyr::lag(win_conf, 1),
+               made_playoff_diff = made_playoff - dplyr::lag(made_playoff, 1),
+               win_nc_diff = win_nc - dplyr::lag(win_nc, 1)) %>%
+        select(SEASON, CONFERENCE, SIM_FROM_WEEK, TEAM, contains("_diff")) %>%
+        ungroup() %>%
+        filter(SIM_FROM_WEEK != 0) %>%
+   #     filter(SIM_FROM_WEEK == params$sim_week) %>%
+        arrange(made_playoff_diff) %>%
+        select(SEASON, SIM_FROM_WEEK, TEAM, everything()) %>%
+        arrange(desc(made_playoff_diff)) %>%
+        arrange(desc(SIM_FROM_WEEK), desc(abs(rating_diff))) %>%
+        mutate(SIM_FROM_WEEK = factor(SIM_FROM_WEEK)) %>%
+        mutate(CONFERENCE = factor(CONFERENCE)) %>%
+        transmute(Week = SIM_FROM_WEEK,
+                  Conf = CONFERENCE,
+                  Team = TEAM,
+                  Rating = round(rating_diff, 0),
+                  Wins = round(win_diff, 1),
+                  Bowl = made_bowl_diff,
+             #     Made_Conf = made_conf_diff,
+                  Win_Conf = win_conf_diff,
+                  Playoff = made_playoff_diff,
+                  NC = made_nc_diff) %>%
+              #    Win_NC = win_nc_diff) %>%
+        mutate_at(c("Bowl",
+                 #   "Make_CC",
+                    "Win_Conf",
+                    "Playoff",
+                    "NC"),
+                #    "Win_NC"),
+                ~  format(., nsmall = 2)) %>%
+          datatable(escape=F,
+                  colnames = c(
+                          "Week",
+                          "Conf",
+                          "Team",
+                          "\u394 Rating",
+                          "\u394 Wins",
+                          "\u394 Bowl",
+                          "\u394 W_Conf",
+                          "\u394 Playoff",
+                          "\u394 NC"),
+                       #   "\u394 W_NC"),
+                  rownames = F,
+                  filter = list(position = 'top'),
+                  options = list(pageLength = 10,
+                                 initComplete = htmlwidgets::JS(
+                                         "function(settings, json) {",
+                                         paste0("$(this.api().table().container()).css({'font-size': '", '8pt', "'});"),
+                                         "}"),
+                                         scrollX=F,
+                                         autowidth=T,
+                                         columnDefs = list(list(className = 'dt-center',
+                                                                targets="_all")))) %>%
+                formatStyle(c(
+                        "Bowl",
+                        "Win_Conf", 
+                        "Playoff", 
+                        "NC"),
+                        #"Win_NC"),
+                    backgroundColor = styleInterval(probs_change_df %>%
+                                                            pull(breaks),
+                                                    blueOrangeColorRamp(probs_change_df %>%
+                                                                          pull(breaks) %>%
+                                                                          length()+1))) %>%
+        formatStyle(c("Rating"), 
+                    backgroundColor = styleInterval(elo_change_df %>%
+                                                            pull(breaks),
+                                                    blueOrangeColorRamp(elo_change_df %>%
+                                                                          pull(breaks) %>%
+                                                                          length()+1))) %>%
+                formatStyle(c("Wins"), 
+                    backgroundColor = styleInterval(wins_change_df %>%
+                                                            pull(breaks),
+                                                    blueOrangeColorRamp(wins_change_df %>%
+                                                                          pull(breaks) %>%
+                                                                          length()+1)))
+
+```
+
+<!-- Which teams improved or decreased the most in Week `r params$sim_week`? -->
+
+<!-- ```{r plot team rating changes, fig.height=6} -->
+
+<!-- team_predictions %>% -->
+<!--         arrange(SEASON, SIM_FROM_WEEK, TEAM) %>% -->
+<!--         group_by(SEASON, TEAM) %>% -->
+<!--         mutate(rating_diff = RATING - dplyr::lag(RATING, 1), -->
+<!--                win_diff = mean_wins - dplyr::lag(mean_wins, 1), -->
+<!--                made_bowl_diff = made_bowl - dplyr::lag(made_bowl, 1), -->
+<!--                made_conf_diff = made_conf - dplyr::lag(made_conf, 1), -->
+<!--                made_nc_diff = made_nc - dplyr::lag(made_nc, 1), -->
+<!--                win_conf_diff = win_conf - dplyr::lag(win_conf, 1), -->
+<!--                made_playoff_diff = made_playoff - dplyr::lag(made_playoff, 1), -->
+<!--                win_nc_diff = win_nc - dplyr::lag(win_nc, 1)) %>% -->
+<!--         select(SEASON, CONFERENCE, SIM_FROM_WEEK, TEAM, contains("_diff")) %>% -->
+<!--         ungroup() %>% -->
+<!--         filter(SIM_FROM_WEEK != 0) %>% -->
+<!--         filter(SIM_FROM_WEEK == params$sim_week) %>% -->
+<!--         slice_max(abs(rating_diff), n=40, with_ties = F) %>% -->
+<!--         ggplot(., aes(x=rating_diff, -->
+<!--                       fill = rating_diff, -->
+<!--                       y=reorder(TEAM, rating_diff)))+ -->
+<!--                 geom_col()+ -->
+<!--         theme_phil()+ -->
+<!--         coord_cartesian(xlim = c(-150, 150))+ -->
+<!--         guides(color = "none")+ -->
+<!--         xlab("\u394 Rating from Previous Week")+ -->
+<!--         ylab("")+ -->
+<!--         scale_fill_gradient2(low = 'orange', -->
+<!--                              mid = 'white', -->
+<!--                              midpoint = 0)+ -->
+<!--         guides(fill = "none")+ -->
+<!--         ggtitle(paste("Biggest Team Rating Changes in Week", params$sim_week), -->
+<!--                         subtitle = paste("Displaying teams with the largest absolute changes in rating after the results of Week", params$sim_week, "\n"))+ -->
+<!--                 theme(plot.title = element_text(hjust = 0.5, size = 16), -->
+<!--                       plot.subtitle =  element_text(hjust = 0.5), -->
+<!--                       strip.text.x = element_text(size = 12), -->
+<!--                       axis.text.y = element_text(size = 10)) -->
+
+<!-- ``` -->
+
+<!-- <!-- # Rankings --> -->
 
 <!-- This table shows the 25 teams with the highest rankings after each week of the season. -->
 
@@ -685,6 +834,57 @@ team_predictions %>%
 <!--         my_caption -->
 
 <!-- ``` -->
+
+<!-- library(purrr) -->
+
+<!-- games_and_outcomes %>% -->
+<!--         filter(WEEK < params$sim_week) %>% -->
+<!--         ggplot(aes(x=HOME_PROB)) -->
+
+<!-- games_and_outcomes %>%  -->
+<!--         filter(WEEK < params$sim_week) %>% -->
+<!--         bootstraps(.,, n = 1000) %>% -->
+<!--         mutate(analysis = map(splits, analysis)) %>% -->
+<!--         select(analysis, id) %>% -->
+<!--         unnest(analysis) %>% -->
+<!--         mutate(prob = plyr::round_any(HOME_PROB, .1, round)) %>% -->
+<!--         group_by(SEASON, id, prob, HOME_OUTCOME) %>%  -->
+<!--         count() %>% -->
+<!--         spread(HOME_OUTCOME, n) %>% -->
+<!--         mutate_at(c("win", "loss"), replace_na, 0) %>% -->
+<!--         mutate(n = win + loss) %>% -->
+<!--         mutate(observed = win / n) %>% -->
+<!--         group_by(SEASON, prob)  %>% -->
+<!--         summarize(mean = mean(observed), -->
+<!--                   n = mean(n), -->
+<!--                   quantile = quantile(observed, c(0.1, 0.5, .9)), q = c("lwr", "mid", "upr"), -->
+<!--                   .groups = 'drop') %>% -->
+<!--         spread(q, quantile) %>% -->
+<!--         ggplot(aes(x=prob, -->
+<!--                    y = mid, -->
+<!--                    ymin = lwr, -->
+<!--                    ymax = upr))+ -->
+<!--         geom_pointrange()+ -->
+<!--         geom_point(aes(y = mid, -->
+<!--                        size = n))+ -->
+<!--         geom_abline(slope = 1, -->
+<!--                     linetype = 'dashed', -->
+<!--                     color = 'grey80')+ -->
+<!--         theme_phil()+ -->
+<!--         coord_cartesian(ylim = c(0, 1), -->
+<!--                         xlim = c(0, 1))+ -->
+<!--         xlab("Predicted Pr(Home Win)")+ -->
+<!--         ylab("Observed Pr(Home Win)")+ -->
+<!--         theme_phil()+ -->
+<!--         theme(legend.title = element_text(size = 8))+ -->
+<!--         guides(size = guide_legend(title.position = 'top', -->
+<!--                                    title = 'Number of Games', -->
+<!--                                    title.hjust = 0.5))+ -->
+<!--         ggtitle(paste(params$input_season, "Model Calibration as of Week", params$sim_week), -->
+<!--                 subtitle = str_wrap(paste("Displaying observed probability of home win vs predicted probability of home wins from model. 80% percentile intervals around each estimate from 1000 bootstraps."), 90))+ -->
+<!--         theme(plot.title = element_text(hjust = 0.5, size = 16), -->
+<!--               plot.subtitle =  element_text(hjust = 0.5), -->
+<!--               strip.text.x = element_text(size = 12)) -->
 
 
 # Playoff Probabilities
@@ -781,9 +981,9 @@ if(max_week > 4) {
                                 filter(SIM_FROM_WEEK == 0) %>%
                                 mutate(TEAM_LABEL = case_when(perc > 0.1 ~ TEAM)),
                         fontface = "bold",
-                        size = 3,
+                        size = 2,
                         direction = "y",
-                        hjust = 1.4,
+                        hjust = 1.8,
                         #   hjust = 0.1,
                         segment.size = .7,
                         segment.alpha = .5,
@@ -887,9 +1087,9 @@ if(max_week > 4) {
                                 filter(SIM_FROM_WEEK == 0) %>%
                                 mutate(TEAM_LABEL = case_when(perc > 0.05 ~ TEAM)),
                         fontface = "bold",
-                        size = 3,
+                        size = 2,
                         direction = "y",
-                        hjust = 1.4,
+                        hjust = 1.8,
                         #   hjust = 0.1,
                         segment.size = .7,
                         segment.alpha = .5,
@@ -1004,9 +1204,9 @@ plot_conference_championship_prob = function(sim_conference_championship_games,
                                 filter(SIM_FROM_WEEK == 0) %>%
                                 mutate(TEAM_LABEL = case_when(perc > 0.05 ~ TEAM)),
                         fontface = "bold",
-                        size = 3,
+                        size = 2,
                         direction = "y",
-                        hjust = 1.4,
+                        hjust = 1.8,
                         #   hjust = 0.1,
                         segment.size = .7,
                         segment.alpha = .5,

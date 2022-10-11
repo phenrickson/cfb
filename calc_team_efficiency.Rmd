@@ -92,7 +92,8 @@ custom_fill_teams <- scale_fill_manual(name = "TEAM", values = team_colors)
 
 ```{r load previously scored plays}
 
-load(here::here("data/scored_plays.Rdata"))
+# load previously scored plays
+load(here::here("workflows", "data/scored_plays.Rdata"))
 
 ```
 
@@ -102,8 +103,8 @@ library(vetiver)
 library(pins)
 
 # get model board
-model_board = board_folder(path = here::here("models"),
-                          versioned = TRUE)
+model_board <- board_folder(path = here::here("workflows", "model_board"),
+                            versioned = TRUE)
 
 # get active version
 version = pin_versions(model_board, "expected_points") %>%
@@ -117,6 +118,39 @@ expected_points_model = vetiver_pin_read(model_board,
                                          version = version)
 
 ```
+
+```{r set up for calc historical efficiency}
+
+# penalized linear regression
+glmnet_reg_mod<- 
+        linear_reg(penalty = 0.001,
+                   mixture = 0.5) %>%
+        set_engine("glmnet")
+
+# lm
+lm_reg_mod<- 
+        linear_reg() %>%
+        set_engine("lm")
+
+# specify grid for tuning
+glmnet_grid <- tibble(penalty = 10^seq(-3, -1, 
+                                       length.out = 20))
+
+# specify regression metrics
+reg_metrics<-metric_set(yardstick::rmse)
+
+# control for resamples
+keep_pred <- control_resamples(save_pred = TRUE, 
+                               save_workflow = TRUE)
+
+```
+
+```{r }
+
+```
+
+
+
 
 
 ```{r pull in plays, include=F}
@@ -207,6 +241,119 @@ drives_raw = DBI::dbGetQuery(myconn,
         mutate(ELAPSED_SECONDS = as.numeric(gsub("seconds:", "", ELAPSED_SECONDS)))
         
 ```
+
+```{r collect historical}
+
+# get scored plays for regular season
+scored_regular = scored_plays %>%
+        filter(SEASON > 2006) %>%
+       # filter(SEASON_TYPE == 'regular') %>%
+        left_join(.,
+                  games_raw %>%
+                          select(GAME_ID, WEEK, GAME_DATE),
+                  by = c("GAME_ID")) %>%
+        group_by(SEASON) %>%
+        mutate(WEEK = case_when(SEASON_TYPE == 'postseason' ~ max(WEEK) + 1,
+               TRUE ~ WEEK)) %>%
+        ungroup() %>%
+        filter(OFFENSE_DIVISION == 'fbs' & DEFENSE_DIVISION == 'fbs') %>%
+        rename(EPA = EP_Added,
+               PA = Points_Added) %>%
+        mutate(PPA = case_when(is.na(EPA) & !is.na(PA) ~ PA,
+                               !is.na(EPA) & is.na(PA) ~ EPA)) %>%
+        # set offense defense ids
+        mutate(OFFENSE_ID = case_when(OFFENSE_DIVISION == 'fbs' ~ OFFENSE,
+                                      TRUE ~ 'fcs')) %>%
+        mutate(DEFENSE_ID = case_when(DEFENSE_DIVISION == 'fbs' ~ DEFENSE,
+                                      TRUE ~ 'fcs')) %>%
+        # get neutral site
+        left_join(., games_raw %>%
+                          select(GAME_ID, NEUTRAL_SITE) %>%
+                          mutate(NEUTRAL_SITE = case_when(NEUTRAL_SITE == T ~ 1,
+                                                           TRUE ~ 0)),
+                  by = c("GAME_ID")) %>%
+        # define home field advantage
+        mutate(HOME_FIELD_ADVANTAGE = case_when(NEUTRAL_SITE == 1 ~ 0,
+                                                HOME == OFFENSE ~ 1,
+                                                HOME == DEFENSE ~ -1)) %>%
+        # garbage time
+        mutate(HOME_MARGIN = HOME_SCORE - AWAY_SCORE) %>%
+        mutate(GARBAGE_TIME = case_when(PERIOD == 2 & abs(HOME_MARGIN) >= 38 ~ 1,
+                                        PERIOD ==3 & abs(HOME_MARGIN) > 28 ~ 1,
+                                        PERIOD ==4 & abs(HOME_MARGIN) > 22 ~ 1,
+                                        TRUE ~ 0)) %>%
+        # play type 
+        mutate(PLAY_CATEGORY =   case_when(grepl("pass|throw|incomplete|
+                                                 incompletion|completion|sack|intercept|reception",
+                                        tolower(PLAY_TYPE)) ~ 'PASS',
+                                        grepl("run|rush", 
+                                              tolower(PLAY_TYPE)) ~ 'RUN',
+                                        TRUE ~ 'SPECIAL')) %>%
+        select(SEASON, GAME_ID, 
+               WEEK, GAME_DATE,
+               NEUTRAL_SITE, 
+               HOME, AWAY, HOME_SCORE, AWAY_SCORE, HOME_MARGIN,
+               OFFENSE, DEFENSE, 
+               OFFENSE_ID, DEFENSE_ID,
+               OFFENSE_CONFERENCE, DEFENSE_CONFERENCE, 
+               OFFENSE_DIVISION, DEFENSE_DIVISION,
+               PLAY_TYPE, PLAY_CATEGORY, PLAY_TEXT,
+               GARBAGE_TIME,
+               HOME_FIELD_ADVANTAGE, 
+               PLAY_TEXT, EPA, PPA)
+
+# training set
+scored_train = scored_regular %>%
+        select(SEASON, GAME_ID,
+               GAME_DATE, WEEK, 
+               HOME, AWAY,
+               OFFENSE_ID, DEFENSE_ID, 
+               HOME_FIELD_ADVANTAGE, 
+               GARBAGE_TIME,
+               PLAY_CATEGORY,
+               EPA, PPA) %>%
+        # mutate(OFFENSE_ID = factor(OFFENSE_ID),
+        #        DEFENSE_ID = factor(DEFENSE_ID)) %>%
+        # mutate_at(c("OFFENSE_ID", "DEFENSE_ID"),
+        #           ~ relevel(., "fcs")) %>%
+        filter(SEASON < 2016)
+
+# validation set
+scored_valid = scored_regular %>%
+        select(SEASON, GAME_ID,
+               GAME_DATE, WEEK, 
+               HOME, AWAY,
+               OFFENSE_ID, DEFENSE_ID, 
+               HOME_FIELD_ADVANTAGE, 
+               GARBAGE_TIME,
+               PLAY_CATEGORY,
+               EPA, PPA) %>%
+        # mutate(OFFENSE_ID = factor(OFFENSE_ID),
+        #        DEFENSE_ID = factor(DEFENSE_ID)) %>%
+        # mutate_at(c("OFFENSE_ID", "DEFENSE_ID"),
+        #    ~ relevel(., "fcs")) %>%
+        filter(SEASON >= 2016 & SEASON < 2020) 
+
+# test set
+scored_test = scored_regular %>%
+        select(SEASON, GAME_ID,
+               GAME_DATE, WEEK, 
+               HOME, AWAY,
+               OFFENSE_ID, DEFENSE_ID, 
+               HOME_FIELD_ADVANTAGE, 
+               GARBAGE_TIME,
+               PLAY_CATEGORY,
+               EPA, PPA) %>%
+        # mutate(OFFENSE_ID = factor(OFFENSE_ID),
+        #        DEFENSE_ID = factor(DEFENSE_ID)) %>%
+        # mutate_at(c("OFFENSE_ID", "DEFENSE_ID"),
+        #    ~ relevel(., "fcs")) %>%
+        filter(SEASON >=2020)
+
+```
+
+
+
 
 ```{r apply clean up functions}
 
@@ -335,7 +482,5 @@ expected_points_model %>%
         bind_cols(., plays_test %>%
                           select(-NEXT_SCORE_EVENT_OFFENSE)) %>%
         select(-.config, -.row)
-
-
 ```
 
