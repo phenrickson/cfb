@@ -93,8 +93,13 @@ get_playoffs = function(input_team_season) {
                 ) %>%
                 bind_rows(.,
                           playoff_resumes %>%
-                                  filter(ELO_RANK < 5) %>%
+                                  filter(P5 == 1 & LOSSES < 3 & ELO_RANK < 10) %>%
                                   mutate(playoff_priority = 7)
+                ) %>%
+                bind_rows(.,
+                          playoff_resumes %>%
+                                  filter(P5 == 1 & LOSSES < 3 & ELO_RANK < 15) %>%
+                                  mutate(playoff_priority = 8)
                 ) %>%
                 rename(RATING = POSTGAME_ELO,
                        RANK = ELO_RANK) %>%

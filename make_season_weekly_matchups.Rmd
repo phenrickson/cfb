@@ -10,7 +10,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 5
+        sim_week: 6
         nsims: 1000
 ---
 
@@ -308,7 +308,7 @@ games_and_outcomes = games %>%
         # ranges from 0 to 1
         mutate(COMPETITIVE = -4*(HOME_SIM_PROB-0.5)^2+1) %>%
         mutate(COMPETITIVE = round(100*COMPETITIVE)) %>%
-        mutate(INTEREST = (0.5 * COMPETITIVE) + (0.5 * QUALITY)) %>%
+        mutate(INTEREST = (0.4 * COMPETITIVE) + (0.6 * QUALITY)) %>%
         mutate(INTEREST = round(100*((INTEREST - min(INTEREST)) / ((max(INTEREST) - min(INTEREST)))),0)) %>%
       #  mutate(QUALITY = 2 / ((1/HOME_PREGAME_ELO) + (1/AWAY_PREGAME_ELO))) %>%
         rename(HOME = HOME_TEAM,
@@ -351,9 +351,9 @@ This table displays the results of simulating week `r params$sim_week+1` of the 
 
 **Quality** indicates the quality of the teams involved in the game. This is the (harmonic) mean of the two team's pregame ratings and is scaled to range from 0 to 100, with 100 indicating a game between highly rated opponents.
 
-<!-- **Competitive** indicates how competitive a matchup is expected to be based on the the pre game home win probability. This ranges from 0 to 100, with 100 indicating a game between teams with identical ratings and 0 indicating a game that that where the home team is extremely likely to win or lose.  -->
+<!-- **Comp.** indicates how competitive a matchup is expected to be based on the the pre game home win probability. The rating itself is a quadratic formula applied**Pr(HomeWin)** and produces a score that ranges from 0 to 100, with 100 indicating a game between teams with nearly identical ratings and 0 indicating a game that that where the home team is extremely likely to win or lose. -->
 
-<!-- **Interest** indicates the how interesting a matchup is expected to be based on the **Quality** of the teams and how competitive the game is expected to be. This ranges from 0 to 100, where 100 indicates a competitive game between two highly rated opponents. -->
+**Interest** indicates how interesting/appealing a matchup is expected to be based on Quality and how close the game is expected to be. I assign every game a competitive rating using a quadratic formula applied to **Pr(HomeWin)**, which I use along with Quality in a weighted average to produce the **Interest** score. This ranges from 0 to 100, where 100 indicates a very competitive game between two highly rated opponents.
 
 **Pr(HomeWin)** is the percentage of times that the home team won the game across every simulation. 
 
@@ -370,8 +370,13 @@ games_and_outcomes %>%
                                    HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
                                    HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
                                    TRUE ~ 0)) %>%
-        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
-        arrange(WEEK, desc(QUALITY)) %>%
+        select(SEASON, WEEK, 
+               QUALITY, 
+            #   COMPETITIVE,
+               INTEREST,
+               HOME, AWAY, HOME_PROB, PRED) %>%
+     #   arrange(WEEK, desc(QUALITY)) %>%
+        arrange(desc(WEEK), desc(INTEREST)) %>%
         mutate(SEASON = factor(SEASON),
                WEEK = factor(WEEK)) %>%
         mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
@@ -381,11 +386,13 @@ games_and_outcomes %>%
         rename(Season = SEASON,
                Week = WEEK,
                Quality = QUALITY,
+             #  Comp. = COMPETITIVE,
+               Interest = INTEREST,
                Home = HOME,
                Away = AWAY,
                `Pr(HomeWin)` = HOME_PROB,
-               Prediction = PRED,
-               Result = OUTCOME) %>%
+               Prediction = PRED) %>%
+        #       Result = OUTCOME) %>%
         mutate(Quality = as.integer(Quality)) %>%
         datatable(escape=F,
                   rownames = F,
@@ -402,28 +409,78 @@ games_and_outcomes %>%
                                  columnDefs = list(
                                          list(className = 'dt-center',
                                               visible=T,
-                                              targets=c("Season", "Week", "Quality", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result", "Correct")),
-                                         list(className = 'dt-center',
-                                                        visible=F,
-                                                        targets=c("correct"))))) %>%
+                                              targets=c("Season",
+                                                        "Week", 
+                                                        "Quality",
+                                                    #    "Comp.",
+                                                        "Interest",
+                                                        "Pr(HomeWin)",
+                                                        "Home",
+                                                        "Away", 
+                                                        "Prediction"))))) %>%
+                                         # list(className = 'dt-center',
+                                         #                visible=F,
+                                         #                targets=c("correct"))))) %>%
         formatStyle(c("Quality"),
                   #  color = 'white',
                      backgroundColor = styleInterval(seq(-30, 130, 1),
                                                      qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
+        # formatStyle(c("Comp."),
+        #           #  color = 'white',
+        #              backgroundColor = styleInterval(seq(-30, 130, 1),
+        #                                              qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%    
+        formatStyle(c("Interest"),
+                  #  color = 'white',
+                     backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                     qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%   
         formatStyle(c("Pr(HomeWin)"),
                      backgroundColor = styleInterval(seq(0, 1.8, .01),
-                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%    
-        formatStyle('Result',
-                    'correct',
-                    backgroundColor = styleEqual(levels = c(1, 0),
-                                                 c(homeColor,
-                                                   'lightcoral')))
+                                                     homeColorRamp(length(seq(0, 1.8, .01))+1)))
+        # formatStyle('Result',
+        #             'correct',
+        #             backgroundColor = styleEqual(levels = c(1, 0),
+        #                                          c(homeColor,
+        #                                            'lightcoral')))
         # formatStyle('Result',
         #             'correct',
         #             backgroundColor = styleEqual(levels = c(1, 0),
         #                                          c(homeColor,
         #                                            'lightcoral')))
 
+```
+
+```{r function of competitive, message = F, warning=F, include=F}
+
+source(here::here("functions", "theme_phil.R"))
+
+# # seq 
+# df = tibble(prob = seq(0, 1, 0.01)) %>%
+#         mutate(comp = -4*(prob-0.5)^2 + 1) %>%
+#         nest() %>% 
+#         bind_cols(., quality = seq(0, 1, 0.01)) %>%
+#         unnest(data) %>%
+#         mutate(interest = (0.5* comp) + (0.5 * quality)) %>%
+#         mutate(interest = round(100*((interest - min(interest)) / ((max(interest) - min(interest)))),0)) %>%
+#         mutate(quality = quality * 100)
+#         
+# 
+# df %>%
+#         ggplot(aes(x=prob,
+#                    fill = interest,
+#                    y=quality))+
+#         geom_tile()+
+#         scale_fill_gradient2(low = "orange",
+#                              mid = "white",
+#                              midpoint = 50,
+#                              high = "dodgerblue2")+
+#         theme_phil()+
+#         theme(legend.title = element_text())+
+#         guides(fill = guide_colorbar(title.position = 'top',
+#                                      title = 'Interest Rating',
+#                                      barwidth = 15,
+#                                      barheight = 0.5))+
+#         theme(panel.grid.major = element_blank())
+        
 ```
 
 # Results Through Week `r params$sim`
@@ -589,7 +646,7 @@ games_and_outcomes %>%
                                    HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
                                    TRUE ~ 0)) %>%
         select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
-        arrange(WEEK, desc(QUALITY)) %>%
+        arrange(desc(WEEK), desc(QUALITY)) %>%
         mutate(SEASON = factor(SEASON),
                WEEK = factor(WEEK)) %>%
         mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
@@ -648,29 +705,37 @@ For example, we simulate the entire season before any games are played by simula
 
 # show last week's results
 games_and_outcomes %>%
-        filter(WEEK > params$sim_week) %>%
+        filter(WEEK > params$sim_week+1) %>%
         mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
                                    HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 'Yes',
                                    TRUE ~ 'No')) %>%
         mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
                                    HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
                                    TRUE ~ 0)) %>%
-      #  mutate(Name = paste('<a href="https://boardgamegeek.com/boardgame/', ID, '">', Name, '</a>', sep="")) %>%
-        select(SEASON, WEEK, QUALITY, HOME, AWAY, HOME_PROB, PRED, OUTCOME, Correct, correct) %>%
-        arrange(WEEK, desc(QUALITY)) %>%
+        select(SEASON, WEEK, 
+               QUALITY, 
+            #   COMPETITIVE,
+               INTEREST,
+               HOME, AWAY, HOME_PROB, PRED) %>%     #   arrange(WEEK, desc(QUALITY)) %>%
+        arrange(WEEK, desc(INTEREST)) %>%
         mutate(SEASON = factor(SEASON),
                WEEK = factor(WEEK)) %>%
         mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
+                                     HOME_PROB == 0 ~ .001,
                                      TRUE ~ HOME_PROB)) %>%
-        mutate(HOME_PROB = format(HOME_PROB, nsmall = 3)) %>%
+        mutate(HOME_PROB = formatC(HOME_PROB, digits=3, format="f")) %>%
         rename(Season = SEASON,
                Week = WEEK,
                Quality = QUALITY,
+             #  Comp. = COMPETITIVE,
+               Interest = INTEREST,
                Home = HOME,
                Away = AWAY,
                `Pr(HomeWin)` = HOME_PROB,
-               Prediction = PRED,
-               Result = OUTCOME) %>%
+               Prediction = PRED) %>%
+        #       Result = OUTCOME) %>%
         mutate(Quality = as.integer(Quality)) %>%
         datatable(escape=F,
                   rownames = F,
@@ -687,21 +752,41 @@ games_and_outcomes %>%
                                  columnDefs = list(
                                          list(className = 'dt-center',
                                               visible=T,
-                                              targets=c("Season", "Week", "Quality", "Pr(HomeWin)", "Home", "Away", "Prediction", "Result", "Correct")),
-                                         list(className = 'dt-center',
-                                                        visible=F,
-                                                        targets=c("correct"))))) %>%
+                                              targets=c("Season",
+                                                        "Week", 
+                                                        "Quality",
+                                                    #    "Comp.",
+                                                        "Interest",
+                                                        "Pr(HomeWin)",
+                                                        "Home",
+                                                        "Away", 
+                                                        "Prediction"))))) %>%
+                                         # list(className = 'dt-center',
+                                         #                visible=F,
+                                         #                targets=c("correct"))))) %>%
         formatStyle(c("Quality"),
                   #  color = 'white',
                      backgroundColor = styleInterval(seq(-30, 130, 1),
                                                      qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
+        # formatStyle(c("Comp."),
+        #           #  color = 'white',
+        #              backgroundColor = styleInterval(seq(-30, 130, 1),
+        #                                              qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%    
+        formatStyle(c("Interest"),
+                  #  color = 'white',
+                     backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                     qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%   
         formatStyle(c("Pr(HomeWin)"),
                      backgroundColor = styleInterval(seq(0, 1.8, .01),
-                                                     homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%    
-        formatStyle('Result',
-                    'correct',
-                    backgroundColor = styleEqual(levels = c(1, 0),
-                                                 c(homeColor,
-                                                   'lightcoral')))
-
+                                                     homeColorRamp(length(seq(0, 1.8, .01))+1)))
+        # formatStyle('Result',
+        #             'correct',
+        #             backgroundColor = styleEqual(levels = c(1, 0),
+        #                                          c(homeColor,
+        #                                            'lightcoral')))
+        # formatStyle('Result',
+        #             'correct',
+        #             backgroundColor = styleEqual(levels = c(1, 0),
+        #                                          c(homeColor,
+        #                
 ```
