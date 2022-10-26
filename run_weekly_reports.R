@@ -68,7 +68,7 @@ run_weekly_matchups = function(input_season,
 }
 
 # set week
-weeks = 7
+weeks = 8
 year = 2022
 
 # set teams

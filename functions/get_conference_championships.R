@@ -77,15 +77,17 @@ get_conference_championships = function(input_team_season,
                         left_join(.,
                                   head_to_head_winners,
                                   by = c("SEASON", "TEAM", "OPPONENT", "CONFERENCE", "CONFERENCE_DIVISION")) %>%
-                        filter(TEAM == winner) %>%
+                        filter(TEAM == winner | is.na(winner)) %>%
                         select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION) %>%
                         arrange(SEASON, CONFERENCE) %>%
                         group_by(SEASON, CONFERENCE, CONFERENCE_DIVISION) %>%
                         mutate(tiebreaker_priority = 1) %>%
-                        slice_min(., tiebreaker_priority, n = 1, with_ties = F) %>%
+                      #  slice_min(., tiebreaker_priority, n = 1, with_ties = F) %>%
                         left_join(., division_remaining,
                                   by = c("CONFERENCE", "CONFERENCE_DIVISION")) %>%
-                        sample_n(spots_left) %>%
+                        group_by(SEASON, CONFERENCE, CONFERENCE_DIVISION) %>%
+                        filter(rank(-tiebreaker_priority, ties='random') <= spots_left)  %>%
+                     #   sample_n(spots_left) %>%
                         select(SEASON, TEAM, CONFERENCE, CONFERENCE_DIVISION) %>%
                         ungroup()
                         

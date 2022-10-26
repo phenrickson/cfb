@@ -11,7 +11,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 7
+        sim_week: 9
         nsims: 1000
 ---
 
