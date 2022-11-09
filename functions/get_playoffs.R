@@ -74,7 +74,7 @@ get_playoffs = function(input_team_season) {
                                   filter(P5 == 1 & CONFERENCE_CHAMPION == 1 & LOSSES < 2 & ELO_RANK < 9) %>%
                                   mutate(playoff_priority = 3)
                 ) %>%
-                # p5 teams that won their conference with less than three losses
+                # p5 teams that won their conference with less than two losses
                 bind_rows(.,
                           playoff_resumes %>%
                                   filter(P5 == 1 & LOSSES < 2 & ELO_RANK < 5) %>%

@@ -12,7 +12,7 @@ output:
 params:
         team: "Tennessee"
         input_season: 2022
-        sim_week: 5
+        sim_week: 10
         nsims: 1000
 ---
 
@@ -1101,6 +1101,7 @@ p = plot_elo_team_season(sim_from_start%>%
         geom_line(data = team_predictions %>%
                           filter(TEAM == params$team) %>%
                           filter(SIM_FROM_WEEK %in% week_games) %>%
+                          arrange(SIM_FROM_WEEK) %>%
                           group_by(SEASON, TEAM) %>%
                           mutate(GAME = row_number()) %>%
                           ungroup() %>%
@@ -1111,6 +1112,7 @@ p = plot_elo_team_season(sim_from_start%>%
                                     team_predictions %>%
                                             filter(TEAM == params$team) %>%
                                             filter(SIM_FROM_WEEK %in% week_games) %>%
+                                            arrange(SIM_FROM_WEEK) %>%
                                             group_by(SEASON, TEAM) %>%
                                             mutate(GAME = row_number()) %>%
                                             ungroup() %>%
