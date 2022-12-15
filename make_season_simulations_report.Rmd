@@ -11,7 +11,7 @@ output:
     fig.caption: yes
 params:
         input_season: 2022
-        sim_week: 4
+        sim_week: 13
         nsims: 1000
 ---
 
@@ -886,6 +886,72 @@ team_predictions %>%
 <!--               plot.subtitle =  element_text(hjust = 0.5), -->
 <!--               strip.text.x = element_text(size = 12)) -->
 
+
+# Expected Wins
+
+How are teams performing relative to preseason expectations? The following visualizations show every team's expected regular season wins as of Week `r params$sim_week` compared to their expected regular seasons from the beginning of the season. Teams that are performing better than expected will be **above** the grey dashed line; teams that are performing worse than expected will be **below** the grey dashed line.
+
+Note: these visualizations will only display once a season is underway.
+
+## Current vs Preseason
+
+```{r display expected wins vs preseason expected wins, fig.height=8}
+
+set.seed(1)
+pos = position_jitternormal(sd_x = .03,
+                            sd_y = .025)
+
+team_predictions %>%
+        #   filter(CONFERENCE %in% c('SEC')) %>%
+        filter(SIM_FROM_WEEK == 0 | SIM_FROM_WEEK == params$sim_week) %>%
+        select(SEASON, SIM_FROM_WEEK, TEAM, CONFERENCE, CONFERENCE_DIVISION, mean_wins) %>%
+        mutate(SIM_FROM_WEEK = case_when(SIM_FROM_WEEK == min(SIM_FROM_WEEK) ~ 'begin',
+                                         SIM_FROM_WEEK == max(SIM_FROM_WEEK) ~ 'current')) %>%
+        spread(SIM_FROM_WEEK, mean_wins) %>%
+     #   mutate(label_TEAM = case_when(abs(current - begin) >= 1 ~ TEAM)) %>%
+        ggplot(., aes(x=begin,
+                      label = TEAM,
+                      color = TEAM,
+                      y=current))+
+        geom_abline(slope = 1,
+                    intercept = 0,
+                    linetype = 'dashed',
+                    col = 'grey60')+
+                 #  linetype = 'dotted')+
+        # geom_abline(slope = 1,
+        #             intercept = 2,
+        #             alpha = 0.5,
+        #             col = 'deepskyblue1')+
+        # geom_abline(slope = 1,
+        #             intercept = -2,
+        #             alpha = 0.5,
+        #             col = 'red')+
+        #           #  linetype = 'dotted')+
+        geom_text_repel(position = pos,
+                  fontface = 'bold',
+                  size = 2.5)+
+        # geom_text_repel(fontface = "bold",
+        #               #  max.overlaps = 10,
+        #                    size = 3)+
+        geom_point(position = pos,
+                   alpha = 0.8)+
+        theme_phil()+
+        custom_color_teams+
+        guides(color = 'none')+
+        scale_y_continuous(limits = c(-1, 12.5),
+                           breaks = seq(0, 12, 3))+
+        scale_x_continuous(limits = c(-1, 12.5),
+                           breaks = seq(0, 12, 3))+
+        xlab("Preseason Predicted Win Total")+
+        ylab("Current Predicted Win Total")+
+        facet_wrap(CONFERENCE ~.)+
+        ggtitle(paste(params$input_season, "Current vs Preseason Predicted Win Totals", params$sim_week),
+                subtitle = str_wrap(paste("Displaying each team's average predicted win total in simulations of remaining games, current vs preseason. \n Points jittered slightly to improve visibility."), 120))+
+        theme(plot.title = element_text(hjust = 0.5, size = 16),
+              plot.subtitle =  element_text(hjust = 0.5),
+              strip.text.x = element_text(size = 12))
+
+```
 
 # Playoff Probabilities
 
