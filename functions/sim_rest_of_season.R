@@ -14,8 +14,8 @@ function(games,
         
         # get a grid of all season and weeks
         season_weeks = games %>%
-                filter(SEASON_TYPE == 'regular') %>%
-                filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+                #filter(SEASON_TYPE == 'regular') %>%
+               # filter(CONFERENCE_CHAMPIONSHIP == F) %>%
                 filter(SEASON == season) %>%
                 arrange(START_DATE) %>%
                 distinct(SEASON, SEASON_TYPE, WEEK) %>%
@@ -35,8 +35,8 @@ function(games,
                                            
                                            # get the rest of the games from that season
                                            games_to_simulate = games %>%
-                                                   filter(SEASON_TYPE == 'regular') %>%
-                                                   filter(CONFERENCE_CHAMPIONSHIP == F) %>%
+                                                 #  filter(SEASON_TYPE == 'regular') %>%
+                                               #    filter(CONFERENCE_CHAMPIONSHIP == F) %>%
                                                    left_join(., season_weeks %>%
                                                                      select(SEASON, WEEK, SEASON_TYPE, WEEK_NUM),
                                                              by = c("SEASON", "WEEK", "SEASON_TYPE")) %>%
