@@ -11,7 +11,6 @@ output:
 params:
         input_season: 2022
         nsims: 1000
-        update: FALSE
 ---
 
 ```{r setup, include=F}
@@ -37,16 +36,6 @@ library(flextable)
 conflict_prefer("lag", "dplyr")
 
 ```
-
-```{r run postseason sims, include=F}
-
-if (params$update == T) {
-        source(here::here("run_postseason_sims.R"))
-}
-
-
-```
-
 
 ```{r load in results of postseason sims}
 
