@@ -46,6 +46,10 @@ load(here::here("simulations", "postseason", params$input_season, "postseason_pr
 
 ```{r create tables}
 
+qualityColorRamp = colorRampPalette(c("orange", "white", "dodgerblue4"))
+homeColorRamp = colorRampPalette(c("white", "deepskyblue1"))
+homeColor = homeColorRamp(5)[3]
+
 # show last week's results
 conference_championship_table = 
         games_and_outcomes %>%
@@ -143,9 +147,109 @@ conference_championship_table =
                                                    'lightcoral')))
 
 # show last week's results
-postseason_table = 
+bowls_table = 
         games_and_outcomes %>%
         filter(SEASON_TYPE == 'postseason') %>%
+        # get playoff games
+        filter(!(HOME %in% c('Georgia', 'Michigan', 'Ohio State'))) %>%
+        mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 'Yes',
+                                   TRUE ~ 'No')) %>%
+        mutate(correct = case_when(is.na(HOME_WIN) ~ NA_real_,
+                                   HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 1,
+                                   HOME_PRED == 'no' & HOME_WIN == 'no' ~ 1,
+                                   TRUE ~ 0)) %>%
+        transmute(SEASON,
+                  WEEK,
+                  DATE = GAME_DATE,
+                  QUALITY,
+                  INTEREST,
+                  HOME,
+                  AWAY,
+                  HOME_PROB,
+                  PRED,
+                  OUTCOME,
+                  correct) %>%
+        #   arrange(WEEK, desc(QUALITY)) %>%
+        arrange(desc(WEEK), desc(INTEREST)) %>%
+        mutate(SEASON = factor(SEASON),
+               WEEK = factor(WEEK)) %>%
+        mutate(HOME_PROB = case_when(HOME_PROB == 1 ~ .999,
+                                     HOME_PROB == 0 ~ .001,
+                                     TRUE ~ HOME_PROB)) %>%
+        mutate(HOME_PROB = formatC(HOME_PROB, digits=3, format="f")) %>%
+        rename(Season = SEASON,
+               Date = DATE,
+               Quality = QUALITY,
+               #  Comp. = COMPETITIVE,
+               Interest = INTEREST,
+               Home = HOME,
+               Away = AWAY,
+               `Pr(HomeWin)` = HOME_PROB,
+               Prediction = PRED,
+               Result = OUTCOME) %>%
+        #       Result = OUTCOME) %>%
+        mutate(Quality = as.integer(Quality)) %>%
+        mutate(Date = as.factor(Date)) %>%
+        select(-Season, -WEEK) %>%
+        datatable(escape=F,
+                  rownames = F,
+                  filter = list(position = 'top'),
+                  class = list(stripe =F),
+                  options = list(pageLength = 25,
+                                 editable =T,
+                                 initComplete = htmlwidgets::JS(
+                                         "function(settings, json) {",
+                                         paste0("$(this.api().table().container()).css({'font-size': '", '8pt', "'});"),
+                                         "}"),
+                                 scrollX=F,
+                                 autowidth=T,
+                                 columnDefs = list(
+                                         list(className = 'dt-center',
+                                              visible=T,
+                                              targets=c("Date",
+                                                        "Quality",
+                                                        #    "Comp.",
+                                                        "Interest",
+                                                        "Pr(HomeWin)",
+                                                        "Home",
+                                                        "Away", 
+                                                        "Prediction",
+                                                        "Result")),
+                                         list(className = 'dt-center',
+                                              visible=F,
+                                              targets=c("correct")))))  %>%
+        # list(className = 'dt-center',
+        #                visible=F,
+        #                targets=c("correct"))))) %>%
+        formatStyle(c("Quality"),
+                    #  color = 'white',
+                    backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                    qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%     
+        # formatStyle(c("Comp."),
+        #           #  color = 'white',
+        #              backgroundColor = styleInterval(seq(-30, 130, 1),
+        #                                              qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%    
+        formatStyle(c("Interest"),
+                    #  color = 'white',
+                    backgroundColor = styleInterval(seq(-30, 130, 1),
+                                                    qualityColorRamp(length(seq(-30, 130, 1))+1))) %>%   
+        formatStyle(c("Pr(HomeWin)"),
+                    backgroundColor = styleInterval(seq(0, 1.8, .01),
+                                                    homeColorRamp(length(seq(0, 1.8, .01))+1))) %>%
+        formatStyle('Result',
+                    'correct',
+                    backgroundColor = styleEqual(levels = c(1, 0),
+                                                 c(homeColor,
+                                                   'lightcoral')))
+
+# show last week's results
+playoff_table = 
+        games_and_outcomes %>%
+        filter(SEASON_TYPE == 'postseason') %>%
+        # get playoff games
+        filter(HOME %in% c('Georgia', 'Michigan', 'Ohio State')) %>%
         mutate(Correct = case_when(is.na(HOME_WIN) ~ NA_character_,
                                    HOME_PRED == 'yes' & HOME_WIN == 'yes' ~ 'Yes',
                                    HOME_PRED == 'no' & HOME_WIN == 'no' ~ 'Yes',
@@ -259,11 +363,21 @@ The following tables display the results of simulating postseason and conference
 
 **Pr(HomeWin)** is the percentage of times that the home team won the game across every simulation. 
 
+## Playoff Games
+
+```{r playoff games}
+
+playoff_table
+
+```
+
+
+
 ## Bowl Games
 
 ```{r bowl game table}
 
-postseason_table
+bowls_table
 
 ```
 
@@ -274,3 +388,87 @@ postseason_table
 conference_championship_table
 
 ```
+
+# Assessment
+
+The model predicts the probability that the home team will win and their expected margin of victory (or defeat). I assess the model's performance by assessing the accuracy of its predictions (win/loss), the logloss of its probabilities, and the mean absolute error of the margin.
+
+```{r assess results, include=F}
+
+assess_metrics = metric_set(yardstick::mn_log_loss,
+                            yardstick::accuracy)
+
+assess =
+        games_and_outcomes %>%
+        filter(!is.na(HOME_POINTS)) %>%
+        group_by(SEASON) %>%
+        mutate(games = n_distinct(GAME_ID)) %>%
+        group_by(SEASON, games) %>%
+        assess_metrics(truth = HOME_WIN,
+                       yes,
+                       estimate = HOME_PRED,
+                       event_level = 'second') %>%
+        bind_rows(.,
+                  games_and_outcomes %>%
+                          filter(!is.na(HOME_POINTS)) %>%
+                          group_by(SEASON) %>%
+                          mutate(games = n_distinct(GAME_ID)) %>%
+                          group_by(SEASON, games) %>%
+                          yardstick::mae(truth = HOME_MARGIN,
+                                         estimate = HOME_SIM_MARGIN,
+                                         event_level = 'second'))
+
+assess_table = assess %>%
+        mutate(.estimate = round(.estimate, 3)) %>%
+        transmute(season = SEASON,
+                  type = 'postseason',
+                  metric = .metric,
+                  estimate = .estimate) %>%
+        spread(metric, estimate) %>%
+        gt::gt()
+
+
+```
+
+
+```{r plot results, warning=F, message=F}
+
+# source(here::here("functions", "theme_phil.R"))
+# 
+# games_and_outcomes %>%
+#         mutate(correct = HOME_PRED == HOME_WIN) %>%
+#         mutate(LABEL = paste(
+#                 paste(HOME, "vs", AWAY),
+#                 paste(HOME_POINTS, "-", AWAY_POINTS),
+#                 sep="\n")) %>%
+#         # mutate(HOME_SIM_MARGIN = case_when(HOME_SIM_MARGIN > 75 ~ 75,
+#         #                                    HOME_SIM_MARGIN < -75 ~ 75,
+#         #                                    TRUE ~ HOME_SIM_MARGIN)) %>%
+#         ggplot(., aes(x=HOME_SIM_MARGIN,
+#                       label = LABEL,
+#                       color = correct,
+#                       y = HOME_MARGIN))+
+#         geom_point()+
+#         geom_text(check_overlap = T,
+#                   vjust = -0.5,
+#                   size = 2)+
+#         coord_cartesian(xlim =c(-85, 85),
+#                         ylim = c(-85, 85))+
+#         geom_vline(xintercept = 0,
+#                    alpha = 0.8,
+#                    linetype = 'dotted')+
+#         geom_hline(yintercept = 0,
+#                    linetype = 'dotted',
+#                    alpha = 0.8)+
+#         theme_phil()+
+#         guides(color = 'none',
+#                label = 'none')+
+#         scale_color_manual(values = c("red", 'deepskyblue3'))+
+#         xlab("Predicted Home Margin")+
+#         ylab("Actual Home Margin")+
+#         facet_wrap(SEASON ~ .)
+
+assess_table
+
+```
+
