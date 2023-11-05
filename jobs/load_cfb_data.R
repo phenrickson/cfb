@@ -180,7 +180,7 @@ recruiting_players = map(recent_seasons[recent_seasons > 2000],
 PROJECT_ID <- "gcp-analytics-326219"
 BUCKET_NAME <- "test-bucket"
 
-bq_auth(email = 'phil.henrickson@aebs.com')
+# auth to bq
 
 # establish connection
 bigquerycon<-dbConnect(
